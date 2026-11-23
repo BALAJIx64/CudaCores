@@ -9,14 +9,20 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import com.guardiangrid.core.interfaces.EmergencyCommunicator
 import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.location.GuardianLocationManager
 import com.guardiangrid.modules.audio.AudioModuleStub
-import com.guardiangrid.modules.communication.EmergencyCommunicatorStub
-import com.guardiangrid.modules.motion.MotionModuleStub
+import com.guardiangrid.modules.communication.EmergencyCommunicatorImpl
+import com.guardiangrid.modules.communication.queue.FileEmergencyQueueRepository
+import com.guardiangrid.modules.communication.sms.MockSmsSender
+import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
+import com.guardiangrid.modules.motion.fusion.MultimodalFusionEngineImpl
+import com.guardiangrid.modules.motion.sensors.AndroidMotionSensorSource
 import com.guardiangrid.ui.DashboardScreen
 import com.guardiangrid.ui.permissions.PermissionManager
 import com.guardiangrid.ui.theme.GuardianGridTheme
+import java.io.File
 
 /**
  * Main application entry point for GuardianGrid.
@@ -28,9 +34,10 @@ class MainActivity : ComponentActivity() {
     private lateinit var locationManager: GuardianLocationManager
     private lateinit var coordinator: EmergencyCoordinatorImpl
 
-    private val audioStub = AudioModuleStub()
-    private val motionStub = MotionModuleStub()
-    private val commStub = EmergencyCommunicatorStub()
+    private lateinit var audioModule: AudioModuleStub
+    private lateinit var motionDetector: MotionAnomalyDetectorImpl
+    private lateinit var fusionEngine: MultimodalFusionEngineImpl
+    private lateinit var communicator: EmergencyCommunicator
 
     // Hardware volume key triple-press stealth activation tracker
     private var volumePressCount = 0
@@ -51,11 +58,34 @@ class MainActivity : ComponentActivity() {
         // Initialize location subsystem
         locationManager = GuardianLocationManager(this)
 
-        // Initialize EmergencyCoordinator with dynamic location provider
+        // Initialize persistent offline queue repository in internal app storage
+        val queueDir = File(filesDir, "emergency_queue")
+        val queueRepo = FileEmergencyQueueRepository(queueDir)
+        communicator = EmergencyCommunicatorImpl(
+            queueRepository = queueRepo,
+            smsSender = MockSmsSender()
+        )
+
+        // Initialize audio subsystem facade (concurrent scream + KWS)
+        audioModule = AudioModuleStub(
+            cacheDirectory = cacheDir,
+            modelDirectory = filesDir
+        )
+
+        // Initialize real Android motion hardware sensor source & anomaly detector
+        val motionSensorSource = AndroidMotionSensorSource(this)
+        motionDetector = MotionAnomalyDetectorImpl(sensorSource = motionSensorSource)
+        fusionEngine = MultimodalFusionEngineImpl()
+
+        // Initialize EmergencyCoordinator with dynamic location provider, communicator, audio detector, motion detector, and fusion engine
         coordinator = EmergencyCoordinatorImpl(
             locationProvider = {
                 locationManager.lastLocation.value ?: locationManager.getLastKnownLocation()
-            }
+            },
+            communicator = communicator,
+            audioDetector = audioModule,
+            motionDetector = motionDetector,
+            fusionEngine = fusionEngine
         )
 
         // Sync initial permission states
@@ -73,9 +103,9 @@ class MainActivity : ComponentActivity() {
                     DashboardScreen(
                         coordinator = coordinator,
                         locationManager = locationManager,
-                        audioStub = audioStub,
-                        motionStub = motionStub,
-                        commStub = commStub,
+                        audioModule = audioModule,
+                        motionDetector = motionDetector,
+                        communicator = communicator,
                         onRequestPermissions = { requestAppPermissions() }
                     )
                 }
@@ -95,6 +125,9 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         if (::locationManager.isInitialized) {
             locationManager.stopLocationUpdates()
+        }
+        if (::coordinator.isInitialized) {
+            coordinator.stopProtection()
         }
     }
 

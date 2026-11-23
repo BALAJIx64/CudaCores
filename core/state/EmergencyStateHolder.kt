@@ -60,8 +60,19 @@ object EmergencyStateHolder {
     fun recordDistressSignal(signal: DistressSignal) {
         _state.update { current ->
             val updatedList = (listOf(signal) + current.recentDistressSignals).take(MAX_DISTRESS_SIGNALS)
-            current.copy(recentDistressSignals = updatedList)
+            current.copy(
+                recentDistressSignals = updatedList,
+                lastDetectedSignal = signal
+            )
         }
+    }
+
+    fun updateVerificationCountdown(remainingMs: Long) {
+        _state.update { it.copy(verificationCountdownRemainingMs = remainingMs) }
+    }
+
+    fun updateStatusMessage(message: String) {
+        _state.update { it.copy(statusMessage = message) }
     }
 
     fun setEmergencyIncident(incident: EmergencyIncident?) {

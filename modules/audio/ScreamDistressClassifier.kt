@@ -145,8 +145,8 @@ class ScreamDistressClassifier(
             val rms = AudioPreprocessor.computeRms(frame)
             val dbfs = AudioPreprocessor.rmsToDbfs(rms)
 
-            // Silence / ambient threshold: Screams must have sufficient amplitude (> -28 dBFS)
-            if (dbfs < -28.0f) continue
+            // Silence / ambient threshold: Screams must have substantial sound pressure level (> -26 dBFS)
+            if (dbfs < -26.0f) continue
 
             AudioPreprocessor.applyHannWindow(frame)
             val powerSpectrum = AudioPreprocessor.computePowerSpectrum(frame)
@@ -156,13 +156,13 @@ class ScreamDistressClassifier(
 
             // Acoustic distress heuristic scoring:
             // 1. Scream-band energy ratio (weight 0.40): Screams concentrate 35-70% energy in 1.5-4.5 kHz
-            val bandScore = ((screamBandRatio - 0.25f) / 0.45f).coerceIn(0.0f, 1.0f)
+            val bandScore = ((screamBandRatio - 0.28f) / 0.42f).coerceIn(0.0f, 1.0f)
 
-            // 2. Spectral Centroid (weight 0.35): Elevated center of mass (target > 2200 Hz)
-            val centroidScore = ((centroid - 1400.0f) / 1600.0f).coerceIn(0.0f, 1.0f)
+            // 2. Spectral Centroid (weight 0.35): Elevated center of mass (target > 2000 Hz)
+            val centroidScore = ((centroid - 1500.0f) / 1500.0f).coerceIn(0.0f, 1.0f)
 
             // 3. Amplitude / Energy (weight 0.25): High loudness relative to ambient
-            val energyScore = ((dbfs + 28.0f) / 20.0f).coerceIn(0.0f, 1.0f)
+            val energyScore = ((dbfs + 26.0f) / 18.0f).coerceIn(0.0f, 1.0f)
 
             val frameScore = (bandScore * 0.40f) + (centroidScore * 0.35f) + (energyScore * 0.25f)
 
@@ -174,7 +174,12 @@ class ScreamDistressClassifier(
             }
         }
 
-        // Temporal persistence factor: True screams sustain over multiple frames
+        // Temporal persistence factor: True screams sustain over multiple frames (>= 3 frames / >= 100ms)
+        // Transient impulse clicks and claps are rejected
+        if (screamFrameCount < 3) {
+            return (maxFrameConfidence * 0.25f)
+        }
+
         val persistenceFactor = min(1.0f, screamFrameCount.toFloat() / max(1, frames.size / 3))
         return (maxFrameConfidence * 0.75f) + (persistenceFactor * 0.25f)
     }

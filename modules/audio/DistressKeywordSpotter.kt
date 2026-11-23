@@ -62,6 +62,17 @@ class DistressKeywordSpotter(
     private var lastEmittedTimestamp = 0L
     private val emissionCooldownMs = 2000L
 
+    // Adaptive noise floor & scream preemption state
+    var adaptiveNoiseFloorDbfs: Float = -50.0f
+        private set
+
+    var screamLockoutUntil: Long = 0L
+        private set
+
+    fun notifyScreamDetected(lockoutDurationMs: Long = 1800L) {
+        screamLockoutUntil = System.currentTimeMillis() + lockoutDurationMs
+    }
+
     companion object {
         val DEFAULT_KEYWORDS = listOf(
             "help",
@@ -197,15 +208,31 @@ class DistressKeywordSpotter(
 
     /**
      * Matches a speech window against active keyword profiles.
+     * Incorporates adaptive noise floor gating, speech endpointing, spectral flux checks,
+     * and scream preemption to eliminate room-noise false alarms.
      */
     fun evaluateSpeechWindow(samples: ShortArray): MatchResult? {
         if (samples.isEmpty()) return null
+
+        // 1. Preempt keyword detection if scream lockout is active
+        if (System.currentTimeMillis() < screamLockoutUntil) {
+            return null
+        }
+
         val floatSamples = AudioPreprocessor.toNormalizedFloat(samples)
         val rms = AudioPreprocessor.computeRms(floatSamples)
         val dbfs = AudioPreprocessor.rmsToDbfs(rms)
 
-        // Voice activity gate: must be audible speech (> -32 dBFS)
-        if (dbfs < -32.0f) return null
+        // 2. Update adaptive ambient noise floor on non-transient frames
+        if (dbfs < adaptiveNoiseFloorDbfs + 4.5f) {
+            adaptiveNoiseFloorDbfs = (adaptiveNoiseFloorDbfs * 0.985f + dbfs * 0.015f).coerceIn(-75.0f, -25.0f)
+        }
+
+        // 3. Adaptive Energy Gate: Must be at least +7.5 dB above ambient noise floor AND >= -38.0 dBFS
+        val speechThreshold = max(adaptiveNoiseFloorDbfs + 7.5f, -38.0f)
+        if (dbfs < speechThreshold) {
+            return null // Reject silence and ambient room hum immediately
+        }
 
         val frames = AudioPreprocessor.frameSignal(
             floatSamples,
@@ -214,24 +241,64 @@ class DistressKeywordSpotter(
         )
         if (frames.size < 4) return null
 
-        // Extract 3-band energy vector [low: 100-800Hz, mid: 800-2500Hz, high: 2500-6000Hz] for each frame
-        val frameBands = frames.map { frame ->
+        // 4. Preempt keyword detection if scream lockout is active
+        if (System.currentTimeMillis() < screamLockoutUntil) {
+            return null
+        }
+
+        // 5. Speech Endpointing: Filter active speech frames based on local frame energy
+        val activeFrameIndices = frames.indices.filter { idx ->
+            val frameRms = AudioPreprocessor.computeRms(frames[idx])
+            AudioPreprocessor.rmsToDbfs(frameRms) >= (speechThreshold - 4.0f)
+        }
+
+        if (activeFrameIndices.isEmpty()) return null
+
+        val firstActive = activeFrameIndices.first()
+        val lastActive = activeFrameIndices.last()
+        val trimmedFrames = frames.subList(firstActive, lastActive + 1)
+
+        // Enforce valid human utterance duration: 160 ms to 1350 ms
+        val hopMs = AudioPreprocessor.DEFAULT_HOP_SIZE * 1000L / AudioPreprocessor.DEFAULT_SAMPLE_RATE
+        val utteranceDurationMs = trimmedFrames.size * hopMs
+        if (utteranceDurationMs < 160L || utteranceDurationMs > 1350L) {
+            return null // Reject transient clicks (< 160ms) and continuous running drone/hum (> 1350ms)
+        }
+
+        // 6. Extract 3-band energy vectors [low: 100-800Hz, mid: 800-2500Hz, high: 2500-6000Hz]
+        val frameBands = trimmedFrames.map { frame ->
             AudioPreprocessor.applyHannWindow(frame)
             val power = AudioPreprocessor.computePowerSpectrum(frame)
             extractThreeBandProfile(power)
         }
 
+        // 7. Spectral Flux Check: Reject static low-frequency background hum (fans/HVAC)
+        var totalFlux = 0.0f
+        for (i in 1 until frameBands.size) {
+            val p = frameBands[i - 1]
+            val c = frameBands[i]
+            totalFlux += abs(c[0] - p[0]) + abs(c[1] - p[1]) + abs(c[2] - p[2])
+        }
+        val avgFlux = if (frameBands.size > 1) totalFlux / (frameBands.size - 1) else 0.0f
+        if (avgFlux < 0.035f) {
+            return null // Constant background hum has flat spectral flux; human speech has dynamic syllable transitions
+        }
+
         var bestMatch: MatchResult? = null
 
         for (profile in PROFILES) {
-            // Check if this keyword is enabled in active configuration
             val isEnabled = activeKeywords.any {
                 it.lowercase(Locale.ROOT).trim() == profile.keyword.lowercase(Locale.ROOT)
             }
             if (!isEnabled) continue
 
+            // Check if utterance duration matches keyword syllable expectations
+            if (utteranceDurationMs < profile.minDurationMs * 0.70 || utteranceDurationMs > profile.maxDurationMs * 1.30) {
+                continue
+            }
+
             val score = computePatternAlignment(frameBands, profile.spectralPattern)
-            if (score > 0.72f && (bestMatch == null || score > bestMatch.confidence)) {
+            if (score > 0.74f && (bestMatch == null || score > bestMatch.confidence)) {
                 bestMatch = MatchResult(
                     keyword = profile.keyword,
                     language = profile.language,
@@ -255,7 +322,9 @@ class DistressKeywordSpotter(
                         metadata = mapOf(
                             "keyword" to bestMatch.keyword,
                             "language" to bestMatch.language,
-                            "confidence" to "%.3f".format(bestMatch.confidence)
+                            "confidence" to "%.3f".format(bestMatch.confidence),
+                            "duration_ms" to utteranceDurationMs.toString(),
+                            "noise_floor_dbfs" to "%.1f".format(adaptiveNoiseFloorDbfs)
                         )
                     )
                     signalFlow.emit(signal)
@@ -289,12 +358,16 @@ class DistressKeywordSpotter(
 
     /**
      * Aligns observed frame energy bands against target profile using a simplified Dynamic Time Warping distance.
+     * Incorporates onset and offset boundary validation to prevent 1-step stalling.
      */
     private fun computePatternAlignment(observed: List<FloatArray>, target: List<FloatArray>): Float {
         if (observed.isEmpty() || target.isEmpty()) return 0.0f
 
         val n = observed.size
         val m = target.size
+
+        if (n < m) return 0.0f
+
         val dtw = Array(n + 1) { FloatArray(m + 1) { Float.MAX_VALUE } }
         dtw[0][0] = 0.0f
 
@@ -311,6 +384,19 @@ class DistressKeywordSpotter(
 
         val totalDist = dtw[n][m]
         val avgDist = totalDist / (n + m)
+
+        // Endpoint boundary checks: Onset must approximate step 1, offset must approximate last step
+        val onsetDist = observed.take(min(3, observed.size)).minOf { obs ->
+            abs(obs[0] - target.first()[0]) + abs(obs[1] - target.first()[1]) + abs(obs[2] - target.first()[2])
+        }
+        val offsetDist = observed.takeLast(min(3, observed.size)).minOf { obs ->
+            abs(obs[0] - target.last()[0]) + abs(obs[1] - target.last()[1]) + abs(obs[2] - target.last()[2])
+        }
+
+        if (onsetDist > 1.35f || offsetDist > 1.35f) {
+            return 0.0f // Reject mismatched trajectories
+        }
+
         // Convert distance to normalized confidence in [0.0, 1.0]
         return (1.0f - avgDist).coerceIn(0.0f, 1.0f)
     }
