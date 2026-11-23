@@ -1,0 +1,9 @@
+<resources>
+    <string name="app_name">GuardianGrid</string>
+    <string name="app_tagline">Multimodal Distress Detection &amp; Resilient Emergency Communication</string>
+    <string name="status_monitoring_active">Protection Active</string>
+    <string name="status_monitoring_idle">Standby Mode</string>
+    <string name="status_emergency">EMERGENCY ESCALATED</string>
+    <string name="sos_manual_trigger">TRIGGER SOS</string>
+    <string name="sos_cancel">CANCEL ALERT</string>
+</resources>
