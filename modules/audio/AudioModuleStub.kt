@@ -4,94 +4,96 @@ import com.guardiangrid.core.interfaces.AudioDistressDetector
 import com.guardiangrid.core.interfaces.AudioEvidenceRecorder
 import com.guardiangrid.core.interfaces.KeywordSpotter
 import com.guardiangrid.core.models.AudioSegment
-import com.guardiangrid.core.models.AudioStage
 import com.guardiangrid.core.models.DistressSignal
 import com.guardiangrid.core.models.DistressType
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.MutableSharedFlow
-import kotlinx.coroutines.flow.asSharedFlow
 import java.io.File
-import java.util.UUID
 
 /**
- * Baseline stub implementation of audio detection and evidence recording.
- * Member 1 should replace the internal logic with real TFLite audio classification,
- * keyword spotting (hotword), and high-fidelity buffer recording.
+ * Unified production facade for GuardianGrid's Audio Intelligence subsystem.
+ *
+ * Implements:
+ * - [AudioDistressDetector]: Pretrained-compatible AI & acoustic sound-event scream/distress classifier.
+ * - [KeywordSpotter]: Multi-language emergency hotword spotter (English, Tamil, Hindi).
+ * - [AudioEvidenceRecorder]: Two-stage privacy-preserving audio evidence capture protocol.
+ *
+ * Maintains 100% backward compatibility with [MainActivity], Compose UI simulation controls,
+ * and architectural unit tests in [tests/CoreArchitectureTest.kt].
+ *
+ * Owned by Member 1 (modules/audio).
  */
-class AudioModuleStub : AudioDistressDetector, KeywordSpotter, AudioEvidenceRecorder {
+class AudioModuleStub(
+    cacheDirectory: File? = null,
+    modelDirectory: File? = null
+) : AudioDistressDetector, KeywordSpotter, AudioEvidenceRecorder {
 
-    private var monitoring = false
-    private var listening = false
-    private var sensitivityThreshold = 0.7f
-    private val signalFlow = MutableSharedFlow<DistressSignal>(extraBufferCapacity = 64)
+    // Core Subsystem Components
+    val circularBuffer: CircularAudioBuffer = CircularAudioBuffer(durationMs = 5000L, sampleRate = 16000)
+    val captureManager: AudioCaptureManager = AudioCaptureManager(sampleRate = 16000, circularBuffer = circularBuffer)
+    val screamClassifier: ScreamDistressClassifier = ScreamDistressClassifier(modelDirectory, circularBuffer)
+    val keywordSpotter: DistressKeywordSpotter = DistressKeywordSpotter(circularBuffer)
+    val evidenceRecorder: TwoStageAudioEvidenceRecorder = TwoStageAudioEvidenceRecorder(circularBuffer, captureManager, cacheDirectory)
 
     // --- AudioDistressDetector Implementation ---
 
     override fun startMonitoring(): Flow<DistressSignal> {
-        monitoring = true
-        // Member 1: Initialize AudioRecord, load TFLite model from models/audio/, and stream inferences
-        return signalFlow.asSharedFlow()
+        captureManager.startCapture()
+        return screamClassifier.startMonitoring()
     }
 
     override fun stopMonitoring() {
-        monitoring = false
+        screamClassifier.stopMonitoring()
+        if (!keywordSpotter.isListening()) {
+            captureManager.stopCapture()
+        }
     }
 
-    override fun isMonitoring(): Boolean = monitoring
+    override fun isMonitoring(): Boolean = screamClassifier.isMonitoring()
 
     override fun setSensitivity(sensitivity: Float) {
-        sensitivityThreshold = sensitivity.coerceIn(0.0f, 1.0f)
+        screamClassifier.setSensitivity(sensitivity)
     }
 
     // --- KeywordSpotter Implementation ---
 
     override fun startListening(targetKeywords: List<String>): Flow<DistressSignal> {
-        listening = true
-        // Member 1: Integrate on-device keyword spotting / hotword engine
-        return signalFlow.asSharedFlow()
+        captureManager.startCapture()
+        return keywordSpotter.startListening(targetKeywords)
     }
 
     override fun stopListening() {
-        listening = false
+        keywordSpotter.stopListening()
+        if (!screamClassifier.isMonitoring()) {
+            captureManager.stopCapture()
+        }
     }
 
-    override fun isListening(): Boolean = listening
+    override fun isListening(): Boolean = keywordSpotter.isListening()
 
     // --- AudioEvidenceRecorder Implementation ---
 
     override suspend fun captureStageOneBuffer(durationMs: Long): Result<AudioSegment> {
-        // Member 1: Extract past 3-5 seconds circular audio buffer from memory into temporary WAV file
-        val stubSegment = AudioSegment(
-            id = UUID.randomUUID().toString(),
-            filePath = "/sdcard/Android/data/com.guardiangrid/cache/stage1_stub.wav",
-            durationMs = durationMs,
-            sampleRate = 16000,
-            stage = AudioStage.STAGE_1_PREVIEW
-        )
-        return Result.success(stubSegment)
+        return evidenceRecorder.captureStageOneBuffer(durationMs)
     }
 
     override suspend fun startStageTwoRecording(outputFile: File): Flow<AudioSegment> {
-        // Member 1: Continuous or segmented high-bitrate recording streamed to outputFile
-        val flow = MutableSharedFlow<AudioSegment>()
-        return flow.asSharedFlow()
+        return evidenceRecorder.startStageTwoRecording(outputFile)
     }
 
     override fun stopRecording() {
-        // Member 1: Finalize recording and flush audio streams
+        evidenceRecorder.stopRecording()
     }
 
+    // --- Simulation & Testing Bridge ---
+
     /**
-     * Testing utility to simulate a detected distress sound or keyword.
+     * Testing and simulation bridge used by Compose Dashboard buttons to simulate distress detection.
      */
-    suspend fun emitSimulatedDistress(type: DistressType, confidence: Float, source: String = "AudioStub") {
-        val signal = DistressSignal(
-            id = UUID.randomUUID().toString(),
-            type = type,
-            confidence = confidence,
-            source = source,
-            metadata = mapOf("stub" to "true")
-        )
-        signalFlow.emit(signal)
+    suspend fun emitSimulatedDistress(type: DistressType, confidence: Float, source: String = "AudioIntelligenceFacade") {
+        when (type) {
+            DistressType.SCREAM -> screamClassifier.emitSimulatedDistress(confidence, source)
+            DistressType.KEYWORD -> keywordSpotter.emitSimulatedKeyword("help", confidence)
+            else -> screamClassifier.emitSimulatedDistress(confidence, source)
+        }
     }
 }
