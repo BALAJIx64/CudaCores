@@ -172,8 +172,8 @@ class ScreamIntelligenceEngine:
         options = audio.AudioClassifierOptions(
             base_options=base_options,
             running_mode=audio.RunningMode.AUDIO_CLIPS,
-            max_results=8,
-            score_threshold=0.01,
+            max_results=-1,  # Return ALL 521 classes, never truncate Screaming score
+            score_threshold=0.0001,
         )
         self.yamnet_classifier = audio.AudioClassifier.create_from_options(options)
         print(f"[YAMNET] MediaPipe AudioClassifier loaded from: {MODEL_PATH}")
@@ -225,12 +225,21 @@ class ScreamIntelligenceEngine:
         """Runs MediaPipe YAMNet inference on a 0.975s audio chunk for Screaming only."""
         rms = np.sqrt(np.mean(window_audio**2) + 1e-9)
         dbfs = 20.0 * np.log10(max(rms, 1e-5))
-        if dbfs < -38.0:
+
+        # Only ignore true silence / quiescent floor below -52 dBFS
+        if dbfs < -52.0:
             self.consecutive_scream_windows = 0
             self.last_scream_score = 0.0
+            self.last_top_category = ("Silence", 0.99)
             return
 
-        audio_clip = containers.AudioData.create_from_array(window_audio, SAMPLE_RATE)
+        # Peak normalize the waveform window so YAMNet receives full dynamic range
+        samples = window_audio.copy().astype(np.float32)
+        peak = np.max(np.abs(samples))
+        if peak > 1e-4:
+            samples = samples / peak
+
+        audio_clip = containers.AudioData.create_from_array(samples, SAMPLE_RATE)
         results = self.yamnet_classifier.classify(audio_clip)
 
         if not results or not results[0].classifications:
@@ -270,13 +279,13 @@ class ScreamIntelligenceEngine:
                 details = f"Score: {scream_score*100:.1f}% | Level: {dbfs:.1f} dBFS | Persistence Met"
 
                 log_entry = f"[{ts}] 🚨 TRIGGER: Screaming ({scream_score*100:.1f}%) | Top: {top_cat.category_name}"
-                self.log_cb(log_entry, is_trigger=True)
+                self.log_cb(log_entry, True)
                 print(f"[{ts}] 🚨 [SCREAM DETECTED] Score: {scream_score:.3f} | Persistence Met | Status: TRIGGERED")
 
                 self.trigger_cb("SCREAM DETECTED", label, confidence, details, ts)
             else:
                 log_entry = f"[{ts}] ⏳ PENDING: Screaming ({scream_score*100:.1f}%) | Window {self.consecutive_scream_windows}/{MIN_PERSISTENCE_WINDOWS}"
-                self.log_cb(log_entry, is_trigger=False)
+                self.log_cb(log_entry, False)
                 print(f"[{ts}] ⚠️ [SCREAM PENDING] Score: {scream_score:.3f} | Window: {self.consecutive_scream_windows}/{MIN_PERSISTENCE_WINDOWS}")
         else:
             if self.consecutive_scream_windows > 0:
@@ -285,7 +294,7 @@ class ScreamIntelligenceEngine:
             # Log rejections for non-scream sounds
             if shout_score > 0.20 or speech_score > 0.40 or cry_score > 0.20 or scream_score > 0.10:
                 log_entry = f"[{ts}] 🛡️ REJECTED: Top '{top_cat.category_name}' ({top_cat.score*100:.0f}%) | Scream: {scream_score*100:.1f}%"
-                self.log_cb(log_entry, is_trigger=False)
+                self.log_cb(log_entry, False)
                 print(f"[{ts}] ℹ️ [NON-SCREAM REJECTED] Top: '{top_cat.category_name}' ({top_cat.score:.2f}) | Screaming: {scream_score:.3f} < {CONFIDENCE_THRESHOLD:.2f}")
 
     def inject_wav_samples(self, wav_path: str):
@@ -295,6 +304,7 @@ class ScreamIntelligenceEngine:
             return
 
         def _worker():
+            import scipy.signal as signal
             sr, data = wavfile.read(wav_path)
             if data.ndim > 1:
                 data = data[:, 0]
@@ -305,6 +315,11 @@ class ScreamIntelligenceEngine:
                 max_v = np.max(np.abs(samples))
                 if max_v > 1.0:
                     samples /= max_v
+
+            # High-quality automatic resample to 16 kHz
+            if sr != SAMPLE_RATE:
+                num_s = int(len(samples) * SAMPLE_RATE / sr)
+                samples = signal.resample(samples, num_s)
 
             # Stream into circular buffer in chunks of 512 samples
             chunk_size = 512
