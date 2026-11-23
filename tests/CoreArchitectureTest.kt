@@ -11,6 +11,8 @@ import com.guardiangrid.core.models.DistressSignal
 import com.guardiangrid.core.models.DistressType
 import com.guardiangrid.core.models.EmergencyIncident
 import com.guardiangrid.core.models.EmergencyLevel
+import com.guardiangrid.core.models.LocationData
+import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.core.state.EmergencyStateHolder
 import com.guardiangrid.core.state.ProtectionMode
 import com.guardiangrid.modules.audio.AudioModuleStub
@@ -20,14 +22,21 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
+import org.junit.Before
 import org.junit.Test
 
 /**
  * Architectural contract verification tests.
- * Validates that core models, state management, and module stubs adhere to contract rules.
+ * Validates that core models, state management, emergency coordinator, and module stubs adhere to contract rules.
  */
 class CoreArchitectureTest {
+
+    @Before
+    fun resetState() {
+        EmergencyStateHolder.reset()
+    }
 
     @Test
     fun testEmergencyStateHolderLifecycle() {
@@ -119,5 +128,93 @@ class CoreArchitectureTest {
         assertEquals("inc-100", state.activeIncident?.incidentId)
 
         EmergencyStateHolder.setEmergencyIncident(null)
+    }
+
+    @Test
+    fun testCoordinatorManualSosWithLocation() {
+        val mockLocation = LocationData(
+            latitude = 12.9716,
+            longitude = 77.5946,
+            accuracyMeters = 8.5f,
+            timestampEpochMs = System.currentTimeMillis(),
+            provider = "gps"
+        )
+
+        val coordinator = EmergencyCoordinatorImpl(locationProvider = { mockLocation })
+        coordinator.triggerManualSos(triggerSource = "Test_Manual_Button")
+
+        val state = EmergencyStateHolder.state.value
+        assertEquals(EmergencyLevel.CONFIRMED_EMERGENCY, state.emergencyLevel)
+        assertEquals(ProtectionMode.ACTIVE_MONITORING, state.mode)
+        assertNotNull(state.activeIncident)
+        assertEquals(mockLocation, state.activeIncident?.location)
+        assertEquals(DistressType.MANUAL_SOS, state.activeIncident?.distressType)
+        assertFalse(state.isDiscreetModeEnabled)
+
+        // Verify history recorded the incident
+        assertTrue(state.incidentHistory.isNotEmpty())
+        assertEquals(state.activeIncident?.incidentId, state.incidentHistory.first().incidentId)
+
+        // Cancel emergency
+        coordinator.cancelEmergency("User confirmed safe in test")
+        val cancelledState = EmergencyStateHolder.state.value
+        assertEquals(EmergencyLevel.IDLE, cancelledState.emergencyLevel)
+        assertEquals(ProtectionMode.STANDBY, cancelledState.mode)
+        assertNull(cancelledState.activeIncident)
+        assertEquals(EmergencyLevel.CANCELLED, cancelledState.incidentHistory.first().level)
+    }
+
+    @Test
+    fun testCoordinatorDiscreetSos() {
+        val coordinator = EmergencyCoordinatorImpl()
+        coordinator.triggerDiscreetSos(triggerSource = "Hardware_Volume_Key_Triple_Press")
+
+        val state = EmergencyStateHolder.state.value
+        assertEquals(EmergencyLevel.CONFIRMED_EMERGENCY, state.emergencyLevel)
+        assertEquals(ProtectionMode.DISCREET_MONITORING, state.mode)
+        assertTrue(state.isDiscreetModeEnabled)
+        assertNotNull(state.activeIncident)
+        assertEquals(DistressType.SILENT_ACTIVATION, state.activeIncident?.distressType)
+        assertTrue(state.activeIncident?.notes?.contains("Hardware_Volume_Key_Triple_Press") == true)
+    }
+
+    @Test
+    fun testEmergencyStateHolderIncidentHistoryCap() {
+        // Add 25 incidents; history should be capped at 20
+        for (i in 1..25) {
+            val incident = EmergencyIncident(
+                incidentId = "inc-$i",
+                level = EmergencyLevel.CONFIRMED_EMERGENCY,
+                notes = "Incident sequence #$i"
+            )
+            EmergencyStateHolder.setEmergencyIncident(incident)
+        }
+
+        val state = EmergencyStateHolder.state.value
+        assertEquals(20, state.incidentHistory.size)
+        // Most recent incident should be at index 0
+        assertEquals("inc-25", state.incidentHistory[0].incidentId)
+        // Oldest retained incident should be inc-6
+        assertEquals("inc-6", state.incidentHistory[19].incidentId)
+    }
+
+    @Test
+    fun testEmergencyStateHolderPermissionUpdates() {
+        EmergencyStateHolder.updatePermissions(
+            audio = true,
+            location = true,
+            notification = false,
+            sms = true
+        )
+
+        var state = EmergencyStateHolder.state.value
+        assertTrue(state.isAudioPermissionGranted)
+        assertTrue(state.isLocationPermissionGranted)
+        assertFalse(state.isNotificationPermissionGranted)
+        assertTrue(state.isSmsPermissionGranted)
+
+        EmergencyStateHolder.updateGpsAvailability(true)
+        state = EmergencyStateHolder.state.value
+        assertTrue(state.isGpsEnabled)
     }
 }
