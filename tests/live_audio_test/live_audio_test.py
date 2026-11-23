@@ -1,19 +1,19 @@
 #!/usr/bin/env python3
 """
-GuardianGrid: Live Microphone Scream Detection Test
-Uses the official Google MediaPipe YAMNet Audio Classifier (yamnet.tflite)
-for detecting screaming only. Keyword spotting (KWS) and non-scream vocalizations
-(crying, shouting, speech) are cleanly excluded.
+GuardianGrid: Live Visual Microphone Scream Detection Test
+Visual GUI application featuring:
+- Real-time animated audio oscilloscope (waveform)
+- Live microphone volume meter (dBFS VU meter)
+- Live YAMNet Scream Confidence gauge (0% - 100%)
+- Temporal persistence window indicators
+- 1-click test buttons for authentic scream, crying, and speech samples
+- Full emerald-green flash screen on verified scream detection
+- Clean rejection of crying/sobbing, shouting, speech, and background noise
 
 IMPORTANT LIMITATION:
 YAMNet classifies audio sound events; it cannot establish a person's intent
-or confirm that they are actually in danger. Its output represents an acoustic
+or confirm that they are actually in danger. Detection represents an acoustic
 'scream detected' signature, not confirmed legal or physical danger.
-
-GUI: Tkinter window
-- Default State: Dark/neutral "Listening..." with real-time level and YAMNet telemetry.
-- Triggered State: Turns bright emerald green (#00E676) for 2.5 seconds when
-  an authentic scream is verified.
 """
 
 import sys
@@ -23,6 +23,7 @@ import queue
 import threading
 import datetime
 import argparse
+import scipy.io.wavfile as wavfile
 
 # Auto-configure Tcl/Tk paths for embeddable / portable Python installations
 py_dir = os.path.dirname(sys.executable)
@@ -45,6 +46,7 @@ for p in tk_candidates:
 
 try:
     import tkinter as tk
+    from tkinter import ttk
     from tkinter import font as tkfont
     HAS_TKINTER = True
 except Exception:
@@ -83,10 +85,11 @@ BUFFER_SAMPLES = int(SAMPLE_RATE * BUFFER_CAPACITY_SEC)
 YAMNET_WINDOW_SAMPLES = 15600  # 0.975 seconds
 YAMNET_HOP_SAMPLES = 7800      # ~0.4875 seconds (50% window overlap)
 
-# Model paths
+# Model and Samples Paths
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "audio", "yamnet.tflite")
+SAMPLES_DIR = os.path.join(SCRIPT_DIR, "samples")
 
 # Target class: Screaming ONLY (AudioSet Class 11)
 TARGET_CLASS = "Screaming"
@@ -143,10 +146,11 @@ class CircularAudioBuffer:
 
 # --- 3. Scream Intelligence Engine ---
 class ScreamIntelligenceEngine:
-    def __init__(self, circular_buffer: CircularAudioBuffer, trigger_callback, telemetry_callback):
+    def __init__(self, circular_buffer: CircularAudioBuffer, trigger_callback, telemetry_callback, log_callback):
         self.buffer = circular_buffer
         self.trigger_cb = trigger_callback
         self.telemetry_cb = telemetry_callback
+        self.log_cb = log_callback
         self.running = False
 
         # VAD & Adaptive Noise Floor
@@ -155,6 +159,8 @@ class ScreamIntelligenceEngine:
 
         # YAMNet Scream Classification State
         self.consecutive_scream_windows = 0
+        self.last_scream_score = 0.0
+        self.last_cry_score = 0.0
         self.last_scream_trigger_time = 0.0
 
         # Initialize MediaPipe YAMNet AudioClassifier
@@ -173,12 +179,12 @@ class ScreamIntelligenceEngine:
 
     def process_loop(self):
         self.running = True
-        print("[AUDIO ENGINE] Real-time scream evaluation loop active.")
+        print("[AUDIO ENGINE] Real-time visual scream evaluation loop active.")
 
         last_yamnet_time = time.time()
 
         while self.running:
-            time.sleep(0.016)  # 16 ms loop
+            time.sleep(0.016)  # ~60 Hz loop for smooth oscilloscope UI
 
             recent_samples = self.buffer.snapshot(0.032)  # 32 ms frame (512 samples)
             if len(recent_samples) < FRAME_SIZE:
@@ -194,8 +200,16 @@ class ScreamIntelligenceEngine:
 
             snr = self.current_dbfs - self.adaptive_noise_floor_dbfs
 
-            # Telemetry update
-            self.telemetry_cb(self.current_dbfs, self.adaptive_noise_floor_dbfs, snr)
+            # Deliver telemetry and waveform to UI
+            waveform_snapshot = self.buffer.snapshot(0.064)  # 64 ms for oscilloscope
+            self.telemetry_cb(
+                self.current_dbfs,
+                self.adaptive_noise_floor_dbfs,
+                snr,
+                self.last_scream_score,
+                self.consecutive_scream_windows,
+                waveform_snapshot
+            )
 
             # Evaluate YAMNet every ~480 ms (50% overlap of 975 ms window)
             now = time.time()
@@ -207,11 +221,11 @@ class ScreamIntelligenceEngine:
 
     def evaluate_yamnet_scream(self, window_audio: np.ndarray):
         """Runs MediaPipe YAMNet inference on a 0.975s audio chunk for Screaming only."""
-        # Volume gate: Ignore complete silence
         rms = np.sqrt(np.mean(window_audio**2) + 1e-9)
         dbfs = 20.0 * np.log10(max(rms, 1e-5))
         if dbfs < -38.0:
             self.consecutive_scream_windows = 0
+            self.last_scream_score = 0.0
             return
 
         audio_clip = containers.AudioData.create_from_array(window_audio, SAMPLE_RATE)
@@ -225,15 +239,17 @@ class ScreamIntelligenceEngine:
 
         # Target class score
         scream_score = cat_map.get("Screaming", 0.0)
+        self.last_scream_score = scream_score
 
-        # Non-scream competitor classes
+        # Competitor classes
         cry_score = max(cat_map.get("Crying, sobbing", 0.0), cat_map.get("Baby cry, infant cry", 0.0))
+        self.last_cry_score = cry_score
         speech_score = cat_map.get("Speech", 0.0)
         shout_score = max(cat_map.get("Shout", 0.0), cat_map.get("Yell", 0.0), cat_map.get("Children shouting", 0.0))
 
         now = time.time()
         top_cat = categories[0]
-        ts = datetime.datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
 
         # Screaming detection rule:
         # 1. scream_score >= CONFIDENCE_THRESHOLD (0.35)
@@ -248,22 +264,55 @@ class ScreamIntelligenceEngine:
 
                 confidence = float(min(0.99, scream_score))
                 label = "Scream Detected"
-                details = f"YAMNet Screaming: {scream_score*100:.1f}% | Level: {dbfs:.1f} dBFS"
+                details = f"Score: {scream_score*100:.1f}% | Level: {dbfs:.1f} dBFS | Persistence Met"
 
-                print(f"[{ts}] 🚨 [SCREAM DETECTED] Screaming Score: {scream_score:.3f} | Persistence Met | Status: TRIGGERED")
-                print(f"      Top Categories: {[(c.category_name, round(c.score, 3)) for c in categories[:3]]}")
-                print("      [NOTE] Audio event classification indicates a scream sound event, not proof of danger.")
+                log_entry = f"[{ts}] 🚨 TRIGGER: Screaming ({scream_score*100:.1f}%) | Top: {top_cat.category_name}"
+                self.log_cb(log_entry, is_trigger=True)
+                print(f"[{ts}] 🚨 [SCREAM DETECTED] Score: {scream_score:.3f} | Persistence Met | Status: TRIGGERED")
 
                 self.trigger_cb("SCREAM DETECTED", label, confidence, details, ts)
             else:
-                print(f"[{ts}] ⚠️ [SCREAM PENDING] Screaming Score: {scream_score:.3f} | Window: {self.consecutive_scream_windows}/{MIN_PERSISTENCE_WINDOWS}")
+                log_entry = f"[{ts}] ⏳ PENDING: Screaming ({scream_score*100:.1f}%) | Window {self.consecutive_scream_windows}/{MIN_PERSISTENCE_WINDOWS}"
+                self.log_cb(log_entry, is_trigger=False)
+                print(f"[{ts}] ⚠️ [SCREAM PENDING] Score: {scream_score:.3f} | Window: {self.consecutive_scream_windows}/{MIN_PERSISTENCE_WINDOWS}")
         else:
             if self.consecutive_scream_windows > 0:
                 self.consecutive_scream_windows = 0
 
             # Log rejections for non-scream sounds
             if shout_score > 0.20 or speech_score > 0.40 or cry_score > 0.20 or scream_score > 0.10:
-                print(f"[{ts}] ℹ️ [NON-SCREAM REJECTED] Top: '{top_cat.category_name}' ({top_cat.score:.2f}) | Screaming: {scream_score:.3f} < {CONFIDENCE_THRESHOLD:.2f} (REJECTED)")
+                log_entry = f"[{ts}] 🛡️ REJECTED: Top '{top_cat.category_name}' ({top_cat.score*100:.0f}%) | Scream: {scream_score*100:.1f}%"
+                self.log_cb(log_entry, is_trigger=False)
+                print(f"[{ts}] ℹ️ [NON-SCREAM REJECTED] Top: '{top_cat.category_name}' ({top_cat.score:.2f}) | Screaming: {scream_score:.3f} < {CONFIDENCE_THRESHOLD:.2f}")
+
+    def inject_wav_samples(self, wav_path: str):
+        """Feeds a WAV file into the circular buffer in real-time chunks for visual testing."""
+        if not os.path.exists(wav_path):
+            print(f"[ERROR] Sample file not found: {wav_path}", file=sys.stderr)
+            return
+
+        def _worker():
+            sr, data = wavfile.read(wav_path)
+            if data.ndim > 1:
+                data = data[:, 0]
+            if data.dtype == np.int16:
+                samples = data.astype(np.float32) / 32768.0
+            else:
+                samples = data.astype(np.float32)
+                max_v = np.max(np.abs(samples))
+                if max_v > 1.0:
+                    samples /= max_v
+
+            # Stream into circular buffer in chunks of 512 samples
+            chunk_size = 512
+            for i in range(0, len(samples), chunk_size):
+                if not self.running:
+                    break
+                chunk = samples[i : i + chunk_size]
+                self.buffer.write(chunk)
+                time.sleep(chunk_size / SAMPLE_RATE)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def close(self):
         self.running = False
@@ -271,131 +320,362 @@ class ScreamIntelligenceEngine:
             self.yamnet_classifier.close()
 
 
-# --- 4. Visual Tkinter GUI ---
-class LiveAudioTestApp:
+# --- 4. Enhanced Visual GUI (Tkinter) ---
+class VisualAudioTestApp:
     def __init__(self, root):
         self.root = root
-        self.root.title("GuardianGrid - Live Audio Scream Detection Verifier")
-        self.root.geometry("750x480")
-        self.root.minsize(620, 400)
+        self.root.title("GuardianGrid - Live Visual Scream Detection Verifier")
+        self.root.geometry("880x700")
+        self.root.minsize(780, 620)
 
         # Theme Colors
         self.DARK_BG = "#121212"
         self.CARD_BG = "#1E1E1E"
+        self.ELEVATED_BG = "#262626"
         self.TEXT_PRIMARY = "#FFFFFF"
         self.TEXT_SECONDARY = "#A0A0A0"
-        self.TEXT_MUTED = "#757575"
-        self.TRIGGER_BG = "#00E676"  # Bright Emerald Green
+        self.TEXT_MUTED = "#707070"
+        self.TRIGGER_BG = "#00E676"  # Bright Emerald Green!
         self.TRIGGER_TEXT = "#000000"
+        self.ACCENT_CYAN = "#00E5FF"
         self.ACCENT_BLUE = "#29B6F6"
+        self.ACCENT_RED = "#FF5252"
+        self.ACCENT_YELLOW = "#FFD700"
 
         self.root.configure(bg=self.DARK_BG)
 
         # Fonts
-        self.font_header = tkfont.Font(family="Segoe UI", size=20, weight="bold")
-        self.font_sub = tkfont.Font(family="Segoe UI", size=11)
-        self.font_icon = tkfont.Font(family="Segoe UI", size=24, weight="bold")
-        self.font_title = tkfont.Font(family="Segoe UI", size=26, weight="bold")
-        self.font_detail = tkfont.Font(family="Segoe UI", size=13, weight="bold")
-        self.font_meta = tkfont.Font(family="Consolas", size=10)
+        self.font_header = tkfont.Font(family="Segoe UI", size=18, weight="bold")
+        self.font_sub = tkfont.Font(family="Segoe UI", size=10)
+        self.font_card_title = tkfont.Font(family="Segoe UI", size=12, weight="bold")
+        self.font_status_large = tkfont.Font(family="Segoe UI", size=24, weight="bold")
+        self.font_status_detail = tkfont.Font(family="Segoe UI", size=11, weight="bold")
+        self.font_mono = tkfont.Font(family="Consolas", size=9)
+        self.font_button = tkfont.Font(family="Segoe UI", size=10, weight="bold")
 
-        # Main Layout
-        self.main_frame = tk.Frame(self.root, bg=self.DARK_BG)
-        self.main_frame.pack(fill=tk.BOTH, expand=True, padx=24, pady=18)
+        # Main Layout Container
+        self.main_container = tk.Frame(self.root, bg=self.DARK_BG)
+        self.main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=14)
 
-        self.app_label = tk.Label(
-            self.main_frame,
-            text="GuardianGrid Scream Detection",
+        # --- Top Header ---
+        self.header_frame = tk.Frame(self.main_container, bg=self.DARK_BG)
+        self.header_frame.pack(fill=tk.X, pady=(0, 10))
+
+        self.lbl_title = tk.Label(
+            self.header_frame,
+            text="GuardianGrid Scream Detection Verifier",
             font=self.font_header,
             fg=self.TEXT_PRIMARY,
             bg=self.DARK_BG
         )
-        self.app_label.pack(pady=(4, 2))
+        self.lbl_title.pack(anchor="w")
 
-        self.sub_label = tk.Label(
-            self.main_frame,
-            text="MediaPipe YAMNet Live Acoustic Scream Classifier (yamnet.tflite)",
+        self.lbl_subtitle = tk.Label(
+            self.header_frame,
+            text="Live Acoustic Event Verification using Google MediaPipe YAMNet (yamnet.tflite) | AudioSet Class 11",
             font=self.font_sub,
             fg=self.TEXT_SECONDARY,
             bg=self.DARK_BG
         )
-        self.sub_label.pack(pady=(0, 14))
+        self.lbl_subtitle.pack(anchor="w")
 
-        # Central Card
-        self.card = tk.Frame(self.main_frame, bg=self.CARD_BG, relief=tk.FLAT, bd=0)
-        self.card.pack(fill=tk.BOTH, expand=True, pady=8)
+        # --- Card 1: Alert / Status Banner ---
+        self.status_card = tk.Frame(self.main_container, bg=self.CARD_BG, relief=tk.FLAT, bd=0)
+        self.status_card.pack(fill=tk.X, pady=(0, 10), ipady=10)
 
-        self.status_icon = tk.Label(
-            self.card,
-            text="[ MIC READY ]",
-            font=self.font_icon,
-            fg=self.ACCENT_BLUE,
+        self.lbl_status_icon = tk.Label(
+            self.status_card,
+            text="[ 🎙️ MICROPHONE READY ]",
+            font=self.font_card_title,
+            fg=self.ACCENT_CYAN,
             bg=self.CARD_BG
         )
-        self.status_icon.pack(pady=(22, 6))
+        self.lbl_status_icon.pack(pady=(6, 2))
 
-        self.status_title = tk.Label(
-            self.card,
-            text="Listening...",
-            font=self.font_title,
+        self.lbl_status_state = tk.Label(
+            self.status_card,
+            text="Listening for Screams...",
+            font=self.font_status_large,
             fg=self.TEXT_PRIMARY,
             bg=self.CARD_BG
         )
-        self.status_title.pack(pady=4)
+        self.lbl_status_state.pack(pady=2)
 
-        self.status_detail = tk.Label(
-            self.card,
-            text="Listening for screams only.\nSpoken keywords, conversation, shouting, crying, and noise are ignored.",
+        self.lbl_status_sub = tk.Label(
+            self.status_card,
+            text="Monitoring live microphone. Shouting, speech, crying, music, and ambient noise are cleanly rejected.",
             font=self.font_sub,
             fg=self.TEXT_SECONDARY,
-            bg=self.CARD_BG,
-            justify=tk.CENTER
+            bg=self.CARD_BG
         )
-        self.status_detail.pack(pady=(4, 15))
+        self.lbl_status_sub.pack(pady=(2, 6))
 
-        # Operational Limitation Notice
-        self.limitation_label = tk.Label(
-            self.card,
-            text="* Note: YAMNet detects acoustic scream events; it cannot determine intent or confirm danger.",
-            font=tkfont.Font(family="Segoe UI", size=9, slant="italic"),
+        # --- Card 2: Visual Oscilloscope (Waveform Display) ---
+        self.osc_card = tk.Frame(self.main_container, bg=self.CARD_BG, relief=tk.FLAT, bd=0)
+        self.osc_card.pack(fill=tk.X, pady=(0, 10), ipady=4)
+
+        self.lbl_osc_title = tk.Label(
+            self.osc_card,
+            text="LIVE AUDIO OSCILLOSCOPE (16 kHz Mono)",
+            font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
+            fg=self.TEXT_SECONDARY,
+            bg=self.CARD_BG
+        )
+        self.lbl_osc_title.pack(anchor="w", padx=12, pady=(4, 2))
+
+        self.canvas_width = 820
+        self.canvas_height = 80
+        self.osc_canvas = tk.Canvas(
+            self.osc_card,
+            width=self.canvas_width,
+            height=self.canvas_height,
+            bg="#0D1117",
+            highlightthickness=1,
+            highlightbackground="#30363D"
+        )
+        self.osc_canvas.pack(fill=tk.X, padx=12, pady=(0, 6))
+
+        # --- Card 3: Real-Time Gauges & Telemetry ---
+        self.gauges_card = tk.Frame(self.main_container, bg=self.CARD_BG, relief=tk.FLAT, bd=0)
+        self.gauges_card.pack(fill=tk.X, pady=(0, 10), padx=0, ipady=6)
+
+        # Gauge 1: Mic Volume (dBFS)
+        self.meter_frame = tk.Frame(self.gauges_card, bg=self.CARD_BG)
+        self.meter_frame.pack(fill=tk.X, padx=12, pady=(4, 6))
+
+        self.lbl_vu_name = tk.Label(
+            self.meter_frame,
+            text="MICROPHONE LEVEL (dBFS):",
+            font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
+            fg=self.TEXT_SECONDARY,
+            bg=self.CARD_BG,
+            width=26,
+            anchor="w"
+        )
+        self.lbl_vu_name.pack(side=tk.LEFT)
+
+        self.canvas_vu = tk.Canvas(self.meter_frame, height=16, bg="#0D1117", highlightthickness=1, highlightbackground="#30363D")
+        self.canvas_vu.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 8))
+
+        self.lbl_vu_val = tk.Label(
+            self.meter_frame,
+            text="-60.0 dBFS",
+            font=self.font_mono,
+            fg=self.TEXT_PRIMARY,
+            bg=self.CARD_BG,
+            width=14,
+            anchor="e"
+        )
+        self.lbl_vu_val.pack(side=tk.RIGHT)
+
+        # Gauge 2: YAMNet Scream Confidence
+        self.scream_frame = tk.Frame(self.gauges_card, bg=self.CARD_BG)
+        self.scream_frame.pack(fill=tk.X, padx=12, pady=(2, 6))
+
+        self.lbl_scream_name = tk.Label(
+            self.scream_frame,
+            text="YAMNET SCREAM SCORE:",
+            font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
+            fg=self.TEXT_SECONDARY,
+            bg=self.CARD_BG,
+            width=26,
+            anchor="w"
+        )
+        self.lbl_scream_name.pack(side=tk.LEFT)
+
+        self.canvas_scream = tk.Canvas(self.scream_frame, height=16, bg="#0D1117", highlightthickness=1, highlightbackground="#30363D")
+        self.canvas_scream.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(4, 8))
+
+        self.lbl_scream_val = tk.Label(
+            self.scream_frame,
+            text="0.0% (Gate: 35%)",
+            font=self.font_mono,
+            fg=self.ACCENT_CYAN,
+            bg=self.CARD_BG,
+            width=16,
+            anchor="e"
+        )
+        self.lbl_scream_val.pack(side=tk.RIGHT)
+
+        # Persistence Badges Frame
+        self.pers_frame = tk.Frame(self.gauges_card, bg=self.CARD_BG)
+        self.pers_frame.pack(fill=tk.X, padx=12, pady=(4, 4))
+
+        self.lbl_pers_desc = tk.Label(
+            self.pers_frame,
+            text="Persistence Requirement:",
+            font=tkfont.Font(family="Segoe UI", size=9),
             fg=self.TEXT_MUTED,
             bg=self.CARD_BG
         )
-        self.limitation_label.pack(side=tk.BOTTOM, pady=(0, 8))
+        self.lbl_pers_desc.pack(side=tk.LEFT)
 
-        # Telemetry Footer
-        self.footer = tk.Label(
-            self.main_frame,
-            text="Audio: 16 kHz Mono | YAMNet: yamnet.tflite Active | Ready",
-            font=self.font_meta,
+        self.badge_win1 = tk.Label(
+            self.pers_frame,
+            text="[ WINDOW 1: IDLE ]",
+            font=self.font_mono,
+            fg=self.TEXT_MUTED,
+            bg=self.ELEVATED_BG,
+            padx=8,
+            pady=2
+        )
+        self.badge_win1.pack(side=tk.LEFT, padx=6)
+
+        self.badge_win2 = tk.Label(
+            self.pers_frame,
+            text="[ WINDOW 2: IDLE ]",
+            font=self.font_mono,
+            fg=self.TEXT_MUTED,
+            bg=self.ELEVATED_BG,
+            padx=8,
+            pady=2
+        )
+        self.badge_win2.pack(side=tk.LEFT, padx=4)
+
+        # --- Card 4: Quick Audio Test Simulation Buttons ---
+        self.test_card = tk.Frame(self.main_container, bg=self.CARD_BG, relief=tk.FLAT, bd=0)
+        self.test_card.pack(fill=tk.X, pady=(0, 10), ipady=6)
+
+        self.lbl_test_title = tk.Label(
+            self.test_card,
+            text="INTERACTIVE TEST SIMULATION (Audio Ingestion)",
+            font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
+            fg=self.TEXT_SECONDARY,
+            bg=self.CARD_BG
+        )
+        self.lbl_test_title.pack(anchor="w", padx=12, pady=(4, 6))
+
+        self.btn_frame = tk.Frame(self.test_card, bg=self.CARD_BG)
+        self.btn_frame.pack(fill=tk.X, padx=12, pady=(0, 4))
+
+        self.btn_scream = tk.Button(
+            self.btn_frame,
+            text="🚨 Test Real Scream Sample",
+            font=self.font_button,
+            bg="#D32F2F",
+            fg="#FFFFFF",
+            activebackground="#FF5252",
+            activeforeground="#FFFFFF",
+            relief=tk.FLAT,
+            padx=12,
+            pady=6,
+            command=self.simulate_scream
+        )
+        self.btn_scream.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.btn_crying = tk.Button(
+            self.btn_frame,
+            text="👶 Test Real Crying Sample",
+            font=self.font_button,
+            bg="#37474F",
+            fg="#ECEFF1",
+            activebackground="#455A64",
+            activeforeground="#FFFFFF",
+            relief=tk.FLAT,
+            padx=12,
+            pady=6,
+            command=self.simulate_crying
+        )
+        self.btn_crying.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.btn_speech = tk.Button(
+            self.btn_frame,
+            text="🗣️ Test Human Speech Sample",
+            font=self.font_button,
+            bg="#37474F",
+            fg="#ECEFF1",
+            activebackground="#455A64",
+            activeforeground="#FFFFFF",
+            relief=tk.FLAT,
+            padx=12,
+            pady=6,
+            command=self.simulate_speech
+        )
+        self.btn_speech.pack(side=tk.LEFT, padx=(0, 8))
+
+        self.btn_reset = tk.Button(
+            self.btn_frame,
+            text="🔄 Reset Alert",
+            font=self.font_button,
+            bg="#212121",
+            fg="#B0BEC5",
+            activebackground="#424242",
+            activeforeground="#FFFFFF",
+            relief=tk.FLAT,
+            padx=10,
+            pady=6,
+            command=self.reset_listening_screen
+        )
+        self.btn_reset.pack(side=tk.RIGHT)
+
+        # --- Card 5: Recent Classification Events Log ---
+        self.log_card = tk.Frame(self.main_container, bg=self.CARD_BG, relief=tk.FLAT, bd=0)
+        self.log_card.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        self.lbl_log_title = tk.Label(
+            self.log_card,
+            text="CLASSIFICATION AUDIT LOG",
+            font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
+            fg=self.TEXT_SECONDARY,
+            bg=self.CARD_BG
+        )
+        self.lbl_log_title.pack(anchor="w", padx=12, pady=(4, 2))
+
+        self.log_listbox = tk.Listbox(
+            self.log_card,
+            bg="#0D1117",
+            fg="#C9D1D9",
+            selectbackground="#21262D",
+            font=self.font_mono,
+            relief=tk.FLAT,
+            bd=0,
+            height=4
+        )
+        self.log_listbox.pack(fill=tk.BOTH, expand=True, padx=12, pady=(0, 6))
+
+        # --- Bottom Limitation Notice ---
+        self.lbl_limit = tk.Label(
+            self.main_container,
+            text="* Operational Notice: YAMNet acoustic classification detects sound events; it cannot determine a person's intent or confirm legal/physical danger.",
+            font=tkfont.Font(family="Segoe UI", size=8, slant="italic"),
             fg=self.TEXT_MUTED,
             bg=self.DARK_BG
         )
-        self.footer.pack(side=tk.BOTTOM, pady=(8, 0))
+        self.lbl_limit.pack(side=tk.BOTTOM, pady=(2, 0))
 
-        # Event queues
+        # Event Queues
         self.event_queue = queue.Queue()
         self.telemetry_queue = queue.Queue()
+        self.log_queue = queue.Queue()
         self.is_triggered = False
         self.reset_timer_id = None
 
         # Setup audio pipeline
         self.circ_buffer = CircularAudioBuffer()
-        self.engine = ScreamIntelligenceEngine(self.circ_buffer, self.queue_trigger, self.queue_telemetry)
+        self.engine = ScreamIntelligenceEngine(
+            self.circ_buffer,
+            self.queue_trigger,
+            self.queue_telemetry,
+            self.queue_log
+        )
         self.stream = None
         self.start_audio()
 
-        self.root.after(40, self.poll_queues)
+        # Start UI event polling at 30 FPS
+        self.root.after(33, self.poll_queues)
 
     def queue_trigger(self, trigger_type, label, confidence, details, timestamp):
         self.event_queue.put((trigger_type, label, confidence, details, timestamp))
 
-    def queue_telemetry(self, dbfs, noise_floor, snr):
+    def queue_telemetry(self, dbfs, noise_floor, snr, scream_score, win_count, waveform):
         if self.telemetry_queue.empty():
-            self.telemetry_queue.put((dbfs, noise_floor, snr))
+            self.telemetry_queue.put((dbfs, noise_floor, snr, scream_score, win_count, waveform))
+
+    def queue_log(self, message, is_trigger=False):
+        self.log_queue.put((message, is_trigger))
 
     def poll_queues(self):
-        # 1. Process triggers
+        # 1. Process Triggers
         try:
             while not self.event_queue.empty():
                 trigger_type, label, confidence, details, timestamp = self.event_queue.get_nowait()
@@ -403,60 +683,162 @@ class LiveAudioTestApp:
         except queue.Empty:
             pass
 
-        # 2. Process telemetry
+        # 2. Process Logs
         try:
-            if not self.is_triggered and not self.telemetry_queue.empty():
-                dbfs, noise_floor, snr = self.telemetry_queue.get_nowait()
-                self.footer.configure(text=f"Level: {dbfs:.1f} dBFS | Noise Floor: {noise_floor:.1f} dBFS | SNR: {snr:+.1f} dB")
+            while not self.log_queue.empty():
+                msg, is_trig = self.log_queue.get_nowait()
+                self.log_listbox.insert(tk.END, msg)
+                if self.log_listbox.size() > 50:
+                    self.log_listbox.delete(0)
+                self.log_listbox.see(tk.END)
         except queue.Empty:
             pass
 
-        self.root.after(40, self.poll_queues)
+        # 3. Process Real-Time Telemetry & Draw Graphics
+        try:
+            if not self.telemetry_queue.empty():
+                dbfs, noise_floor, snr, scream_score, win_count, waveform = self.telemetry_queue.get_nowait()
+                self.update_visual_meters(dbfs, snr, scream_score, win_count)
+                self.draw_oscilloscope(waveform)
+        except queue.Empty:
+            pass
+
+        self.root.after(33, self.poll_queues)
+
+    def draw_oscilloscope(self, waveform: np.ndarray):
+        """Renders live audio waveform in the Tkinter Canvas."""
+        self.osc_canvas.delete("wave")
+        w = self.osc_canvas.winfo_width() or self.canvas_width
+        h = self.osc_canvas.winfo_height() or self.canvas_height
+        mid_y = h / 2.0
+
+        # Draw center line
+        self.osc_canvas.create_line(0, mid_y, w, mid_y, fill="#21262D", tags="wave")
+
+        if len(waveform) < 10:
+            return
+
+        # Subsample to canvas width
+        step = max(1, len(waveform) // w)
+        points = []
+        for x in range(0, min(w, len(waveform) // step)):
+            idx = x * step
+            sample_val = waveform[idx]
+            y = mid_y - (sample_val * (mid_y - 4))
+            points.append(x)
+            points.append(y)
+
+        if len(points) >= 4:
+            line_color = "#000000" if self.is_triggered else self.ACCENT_CYAN
+            self.osc_canvas.create_line(points, fill=line_color, width=1.5, tags="wave")
+
+    def update_visual_meters(self, dbfs: float, snr: float, scream_score: float, win_count: int):
+        """Updates VU meter, YAMNet score bar, and persistence badges."""
+        if not self.is_triggered:
+            # 1. VU Decibel Meter
+            self.lbl_vu_val.configure(text=f"{dbfs:5.1f} dBFS")
+            vu_w = self.canvas_vu.winfo_width() or 400
+            vu_h = self.canvas_vu.winfo_height() or 16
+            self.canvas_vu.delete("bar")
+            # Map -60 dBFS .. 0 dBFS to 0 .. vu_w
+            norm_dbfs = max(0.0, min(1.0, (dbfs + 60.0) / 60.0))
+            bar_len = int(norm_dbfs * vu_w)
+            vu_color = "#00E676" if dbfs < -20 else ("#FFD700" if dbfs < -6 else "#FF5252")
+            if bar_len > 0:
+                self.canvas_vu.create_rectangle(0, 0, bar_len, vu_h, fill=vu_color, width=0, tags="bar")
+
+            # 2. YAMNet Scream Confidence Meter
+            self.lbl_scream_val.configure(text=f"{scream_score*100:4.1f}% (Gate: 35%)")
+            sc_w = self.canvas_scream.winfo_width() or 400
+            sc_h = self.canvas_scream.winfo_height() or 16
+            self.canvas_scream.delete("s_bar")
+            scream_norm = max(0.0, min(1.0, scream_score))
+            s_len = int(scream_norm * sc_w)
+            s_color = "#00E5FF" if scream_score < CONFIDENCE_THRESHOLD else "#00E676"
+            if s_len > 0:
+                self.canvas_scream.create_rectangle(0, 0, s_len, sc_h, fill=s_color, width=0, tags="s_bar")
+
+            # Threshold line at 35%
+            gate_x = int(CONFIDENCE_THRESHOLD * sc_w)
+            self.canvas_scream.create_line(gate_x, 0, gate_x, sc_h, fill="#FF5252", width=2, tags="s_bar")
+
+            # 3. Persistence Window Badges
+            if win_count >= 1:
+                self.badge_win1.configure(text="[ WINDOW 1: DETECTED ]", fg="#FFD700", bg="#4A3B00")
+            else:
+                self.badge_win1.configure(text="[ WINDOW 1: IDLE ]", fg=self.TEXT_MUTED, bg=self.ELEVATED_BG)
+
+            if win_count >= 2:
+                self.badge_win2.configure(text="[ WINDOW 2: SUSTAINED ]", fg="#00E676", bg="#004D20")
+            else:
+                self.badge_win2.configure(text="[ WINDOW 2: IDLE ]", fg=self.TEXT_MUTED, bg=self.ELEVATED_BG)
 
     def trigger_green_screen(self, trigger_type, label, confidence, details, timestamp):
-        """Immediately turns the window bright green for 2.5 seconds."""
+        """Instantly turns the entire visual window bright emerald green for 2.5 seconds."""
         if self.reset_timer_id:
             self.root.after_cancel(self.reset_timer_id)
 
         self.is_triggered = True
 
+        # Flash backgrounds to Emerald Green
         self.root.configure(bg=self.TRIGGER_BG)
-        self.main_frame.configure(bg=self.TRIGGER_BG)
-        self.card.configure(bg=self.TRIGGER_BG)
-        self.app_label.configure(bg=self.TRIGGER_BG, fg=self.TRIGGER_TEXT)
-        self.sub_label.configure(bg=self.TRIGGER_BG, fg="#1B5E20")
-        self.limitation_label.configure(bg=self.TRIGGER_BG, fg="#1B5E20")
-        self.footer.configure(bg=self.TRIGGER_BG, fg=self.TRIGGER_TEXT)
+        self.main_container.configure(bg=self.TRIGGER_BG)
+        self.header_frame.configure(bg=self.TRIGGER_BG)
+        self.status_card.configure(bg=self.TRIGGER_BG)
+        self.lbl_title.configure(bg=self.TRIGGER_BG, fg=self.TRIGGER_TEXT)
+        self.lbl_subtitle.configure(bg=self.TRIGGER_BG, fg="#004D20")
+        self.lbl_limit.configure(bg=self.TRIGGER_BG, fg="#004D20")
 
-        self.status_icon.configure(text="🚨 SCREAM DETECTED!", bg=self.TRIGGER_BG, fg=self.TRIGGER_TEXT)
-        self.status_title.configure(text="SCREAM DETECTED!", fg=self.TRIGGER_TEXT, bg=self.TRIGGER_BG)
-        self.status_detail.configure(
-            text=f"{label}\nConfidence: {confidence * 100:.1f}%  |  {details}\nTime: {timestamp}",
-            font=self.font_detail,
+        self.lbl_status_icon.configure(text="🚨 [ SCREAM DETECTED! ]", bg=self.TRIGGER_BG, fg=self.TRIGGER_TEXT)
+        self.lbl_status_state.configure(text="🚨 SCREAM DETECTED!", fg=self.TRIGGER_TEXT, bg=self.TRIGGER_BG)
+        self.lbl_status_sub.configure(
+            text=f"{label}  |  Confidence: {confidence*100:.1f}%  |  {details}  |  {timestamp}",
+            font=self.font_status_detail,
             fg=self.TRIGGER_TEXT,
             bg=self.TRIGGER_BG
         )
 
-        self.reset_timer_id = self.root.after(2500, self.reset_listening_screen)
+        self.reset_timer_id = self.root.after(2800, self.reset_listening_screen)
 
     def reset_listening_screen(self):
         self.is_triggered = False
         self.root.configure(bg=self.DARK_BG)
-        self.main_frame.configure(bg=self.DARK_BG)
-        self.card.configure(bg=self.CARD_BG)
-        self.app_label.configure(bg=self.DARK_BG, fg=self.TEXT_PRIMARY)
-        self.sub_label.configure(bg=self.DARK_BG, fg=self.TEXT_SECONDARY)
-        self.limitation_label.configure(bg=self.CARD_BG, fg=self.TEXT_MUTED)
-        self.footer.configure(bg=self.DARK_BG, fg=self.TEXT_MUTED)
+        self.main_container.configure(bg=self.DARK_BG)
+        self.header_frame.configure(bg=self.DARK_BG)
+        self.status_card.configure(bg=self.CARD_BG)
+        self.lbl_title.configure(bg=self.DARK_BG, fg=self.TEXT_PRIMARY)
+        self.lbl_subtitle.configure(bg=self.DARK_BG, fg=self.TEXT_SECONDARY)
+        self.lbl_limit.configure(bg=self.DARK_BG, fg=self.TEXT_MUTED)
 
-        self.status_icon.configure(text="[ MIC READY ]", bg=self.CARD_BG, fg=self.ACCENT_BLUE)
-        self.status_title.configure(text="Listening...", fg=self.TEXT_PRIMARY, bg=self.CARD_BG)
-        self.status_detail.configure(
-            text="Listening for screams only.\nSpoken keywords, conversation, shouting, crying, and noise are ignored.",
+        self.lbl_status_icon.configure(text="[ 🎙️ MICROPHONE READY ]", bg=self.CARD_BG, fg=self.ACCENT_CYAN)
+        self.lbl_status_state.configure(text="Listening for Screams...", fg=self.TEXT_PRIMARY, bg=self.CARD_BG)
+        self.lbl_status_sub.configure(
+            text="Monitoring live microphone. Shouting, speech, crying, music, and ambient noise are cleanly rejected.",
             font=self.font_sub,
             fg=self.TEXT_SECONDARY,
             bg=self.CARD_BG
         )
+
+    def simulate_scream(self):
+        scream_path = os.path.join(SAMPLES_DIR, "pi_scream.wav")
+        if not os.path.exists(scream_path):
+            scream_path = os.path.join(os.environ.get("TEMP", ""), "pi_scream.wav")
+        self.log_listbox.insert(tk.END, "▶️ Ingesting Real Scream sample (pi_scream.wav)...")
+        self.engine.inject_wav_samples(scream_path)
+
+    def simulate_crying(self):
+        crying_path = os.path.join(SAMPLES_DIR, "crying_real.wav")
+        if not os.path.exists(crying_path):
+            crying_path = os.path.join(os.environ.get("TEMP", ""), "crying_real.wav")
+        self.log_listbox.insert(tk.END, "▶️ Ingesting Real Crying sample (crying_real.wav) [Expect Rejection]...")
+        self.engine.inject_wav_samples(crying_path)
+
+    def simulate_speech(self):
+        speech_path = os.path.join(SAMPLES_DIR, "speech_16000_hz_mono.wav")
+        if not os.path.exists(speech_path):
+            speech_path = os.path.join(os.environ.get("TEMP", ""), "speech_16000_hz_mono.wav")
+        self.log_listbox.insert(tk.END, "▶️ Ingesting Human Speech sample [Expect Rejection]...")
+        self.engine.inject_wav_samples(speech_path)
 
     def audio_callback(self, indata, frames, time_info, status):
         if status:
@@ -478,8 +860,7 @@ class LiveAudioTestApp:
         except Exception as e:
             err_msg = f"Cannot open microphone: {e}"
             print(f"[ERROR] {err_msg}", file=sys.stderr)
-            self.status_detail.configure(text=f"ERROR: {err_msg}", fg="#FF5252")
-            return
+            self.lbl_status_sub.configure(text=f"Mic Note: {err_msg} (Test simulation buttons remain fully functional)", fg="#FF5252")
 
         self.worker_thread = threading.Thread(target=self.engine.process_loop, daemon=True)
         self.worker_thread.start()
@@ -495,8 +876,9 @@ class LiveAudioTestApp:
         self.root.destroy()
 
 
+# --- 5. Headless Terminal Fallback ---
 def run_cli_mode():
-    """Interactive terminal console runner for headless or non-GUI environments."""
+    """Terminal fallback for environments without desktop displays."""
     circ_buffer = CircularAudioBuffer()
     last_trigger_time = 0.0
 
@@ -506,30 +888,26 @@ def run_cli_mode():
         print(f"\n\033[92m\033[1m🚨 [{trigger_type}] {label} | Confidence: {confidence*100:.1f}%\033[0m")
         print(f"\033[92m   {details} | Time: {timestamp}\033[0m\n")
 
-    def on_telemetry(dbfs, noise_floor, snr):
+    def on_telemetry(dbfs, noise_floor, snr, scream_score, win_count, waveform):
         now = time.time()
         if now - last_trigger_time > 2.0:
-            meter_bars = int(max(0, min(20, (dbfs + 60.0) / 3.0)))
-            meter = "|" * meter_bars + " " * (20 - meter_bars)
-            sys.stdout.write(f"\r[MIC] [{meter}] Level: {dbfs:5.1f} dBFS | Floor: {noise_floor:5.1f} dBFS | SNR: {snr:+5.1f} dB")
+            meter_bars = int(max(0, min(18, (dbfs + 60.0) / 3.3)))
+            meter = "#" * meter_bars + "-" * (18 - meter_bars)
+            score_pct = int(scream_score * 100)
+            sys.stdout.write(f"\r[MIC: {meter}] {dbfs:5.1f} dBFS | YAMNet Scream: {score_pct:3d}% | Persist: {win_count}/2")
             sys.stdout.flush()
 
-    engine = ScreamIntelligenceEngine(circ_buffer, on_trigger, on_telemetry)
+    def on_log(msg, is_trig):
+        pass
+
+    engine = ScreamIntelligenceEngine(circ_buffer, on_trigger, on_telemetry, on_log)
 
     def audio_callback(indata, frames, time_info, status):
-        if status:
-            print(f"\n[AUDIO WARN] {status}", file=sys.stderr)
         samples = indata[:, 0].copy()
         circ_buffer.write(samples)
 
     try:
-        stream = sd.InputStream(
-            samplerate=SAMPLE_RATE,
-            channels=1,
-            dtype='float32',
-            blocksize=FRAME_SIZE,
-            callback=audio_callback
-        )
+        stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype='float32', blocksize=FRAME_SIZE, callback=audio_callback)
         stream.start()
         print("\n[AUDIO] Physical microphone stream active: 16 kHz Mono.")
         print("[AUDIO] Listening for scream vocalizations. Press Ctrl+C to stop.\n")
@@ -556,40 +934,28 @@ def run_cli_mode():
 
 
 def main():
-    parser = argparse.ArgumentParser(description="GuardianGrid Live Microphone Scream Verifier")
-    parser.add_argument("--cli", action="store_true", help="Run in terminal CLI mode without Tkinter GUI")
+    parser = argparse.ArgumentParser(description="GuardianGrid Visual Scream Detection Verifier")
+    parser.add_argument("--cli", action="store_true", help="Force headless terminal CLI mode")
     args = parser.parse_args()
 
     print("=" * 70)
-    print("  GuardianGrid: Live Microphone Scream Detection Harness")
-    print("  Model: MediaPipe YAMNet (yamnet.tflite) [Scream Detection Only]")
-    print("=" * 70)
-    print("Target Detection:")
-    print("  - Screaming (AudioSet Class 11)")
-    print("Excluded Audio Events (Cleanly Rejected):")
-    print("  - Spoken Keywords ('help', 'stop', 'save me', etc.)")
-    print("  - Crying & sobbing")
-    print("  - Shouting & yelling")
-    print("  - Conversational speech")
-    print("  - HVAC, fans, traffic, music, keyboard clicks")
-    print("=" * 70)
-    print("Operational Notice:")
-    print("  YAMNet classifies acoustic event categories; it cannot determine intent or confirm danger.")
+    print("  GuardianGrid: Visual Scream Detection Verifier")
+    print("  Model: Google MediaPipe YAMNet (yamnet.tflite) [AudioSet Class 11]")
     print("=" * 70)
 
     if args.cli or not HAS_TKINTER:
         if not HAS_TKINTER:
-            print("[INFO] Tkinter not available in this Python environment. Launching in interactive CLI mode.")
+            print("[INFO] Tkinter not available. Launching in interactive CLI mode.")
         run_cli_mode()
         return
 
     try:
         root = tk.Tk()
-        app = LiveAudioTestApp(root)
+        app = VisualAudioTestApp(root)
         root.protocol("WM_DELETE_WINDOW", app.on_closing)
         root.mainloop()
     except Exception as e:
-        print(f"[WARN] Could not initialize graphical GUI: {e}")
+        print(f"[WARN] Graphical GUI failed to launch: {e}")
         print("[INFO] Falling back to interactive CLI mode...")
         run_cli_mode()
 
