@@ -1,24 +1,14 @@
 @echo off
-setlocal
-title GuardianGrid - Live Scream Detection Verifier
-echo =========================================================================
-echo GuardianGrid: Launching Visual Scream Detection Test
-echo =========================================================================
+title GuardianGrid - Visual Scream Detection Verifier
 cd /d "%~dp0"
-
-set "PYTHON_EXE=C:\Users\Ashwin Kumar L\AppData\Local\Programs\Python311Embed\python.exe"
-
-if not exist "%PYTHON_EXE%" (
-    echo [ERROR] Python embed interpreter not found at: %PYTHON_EXE%
-    pause
-    exit /b 1
-)
-
-echo Launching graphical UI...
-"%PYTHON_EXE%" tests\live_audio_test\live_audio_test.py %*
-
+echo =====================================================================
+echo   Launching GuardianGrid Visual Scream Detection Verifier (GUI)
+echo   Model: Google MediaPipe YAMNet (yamnet.tflite)
+echo =====================================================================
+echo.
+"C:\Users\Ashwin Kumar L\AppData\Local\Programs\Python311Embed\python.exe" tests\live_audio_test\live_audio_test.py
 if %ERRORLEVEL% NEQ 0 (
     echo.
-    echo [INFO] Exited with code %ERRORLEVEL%.
+    echo [ERROR] Application exited with error code %ERRORLEVEL%.
     pause
 )
