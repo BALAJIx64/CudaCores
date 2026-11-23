@@ -5,16 +5,23 @@ import com.guardiangrid.core.interfaces.MultimodalFusionEngine
 import com.guardiangrid.core.models.DistressSignal
 import com.guardiangrid.core.models.DistressType
 import kotlin.math.abs
+import kotlin.math.sqrt
 
 /**
  * Production implementation of [MultimodalFusionEngine].
- * Implements explainable multimodal sensor fusion, temporal cross-modal correlation,
+ * Implements mathematically consistent multimodal sensor fusion, temporal cross-modal correlation,
  * confidence-weighted escalation, and false-alarm suppression.
+ *
+ * @param escalationThreshold Threshold for confirmed escalation (default 0.80)
+ * @param strongAudioThreshold Threshold for audio-only escalation without motion confirmation (default 0.85)
+ * @param defaultTimeWindowMs Sliding temporal correlation window duration (default 3000ms)
+ * @param clock Injectable time provider for deterministic testing (defaults to System.currentTimeMillis)
  */
 class MultimodalFusionEngineImpl(
     val escalationThreshold: Float = 0.80f,
     val strongAudioThreshold: Float = 0.85f,
-    val defaultTimeWindowMs: Long = 3000L
+    val defaultTimeWindowMs: Long = 3000L,
+    private val clock: () -> Long = { System.currentTimeMillis() }
 ) : MultimodalFusionEngine {
 
     override fun evaluateSignals(
@@ -31,24 +38,26 @@ class MultimodalFusionEngineImpl(
         }
 
         val windowDuration = if (timeWindowMs > 0) timeWindowMs else defaultTimeWindowMs
+        val now = clock()
+        val windowCutoff = now - windowDuration
 
-        // Current evaluation time based on latest signal
-        val latestTimestamp = signals.maxOf { it.timestampEpochMs }
-        val windowCutoff = latestTimestamp - windowDuration
+        // Exclude expired signals (older than windowCutoff relative to now)
+        // and future timestamps (> 1000ms in the future)
+        val activeSignals = signals.filter {
+            it.timestampEpochMs in windowCutoff..(now + 1000L)
+        }
 
-        // Filter signals strictly within temporal window (pruning stale / out-of-window signals)
-        val windowSignals = signals.filter { it.timestampEpochMs in windowCutoff..latestTimestamp }
-        if (windowSignals.isEmpty()) {
+        if (activeSignals.isEmpty()) {
             return FusionResult(
                 combinedConfidence = 0.0f,
                 isEscalationTriggered = false,
                 contributingSignals = emptyList(),
-                explanation = "All signals expired outside sliding time window (${windowDuration}ms)."
+                explanation = "All signals expired outside sliding time window (${windowDuration}ms) relative to current time."
             )
         }
 
-        // 1. Check for Manual SOS or Silent Activation (Highest Priority - Immediate Escalation)
-        val manualSignal = windowSignals.firstOrNull {
+        // 1. Manual SOS or Silent Activation (Highest Priority - Immediate Escalation)
+        val manualSignal = activeSignals.firstOrNull {
             it.type == DistressType.MANUAL_SOS || it.type == DistressType.SILENT_ACTIVATION
         }
         if (manualSignal != null) {
@@ -61,37 +70,71 @@ class MultimodalFusionEngineImpl(
         }
 
         // Partition signals into Audio and Motion categories
-        val audioSignals = windowSignals.filter {
+        val audioSignals = activeSignals.filter {
             it.type == DistressType.SCREAM || it.type == DistressType.KEYWORD
         }
-        val motionSignals = windowSignals.filter {
+        val motionSignals = activeSignals.filter {
             it.type == DistressType.MOTION_ANOMALY || it.type == DistressType.FALL_IMPACT
         }
 
         val bestAudio = audioSignals.maxByOrNull { it.confidence }
         val bestMotion = motionSignals.maxByOrNull { it.confidence }
 
-        // 2. Correlated Multimodal Trigger (Audio + Motion within temporal window)
+        // 2. Correlated Multimodal Trigger (Audio + Motion)
         if (bestAudio != null && bestMotion != null) {
             val deltaMs = abs(bestAudio.timestampEpochMs - bestMotion.timestampEpochMs)
-            val temporalWeight = (1.0f - (deltaMs.toFloat() / windowDuration.toFloat())).coerceIn(0.1f, 1.0f)
 
-            // Independent probability fusion formula with multimodal boost
-            val baseFused = 1.0f - (1.0f - sanitize(bestAudio.confidence)) * (1.0f - sanitize(bestMotion.confidence))
-            val combined = sanitize(baseFused + 0.08f * temporalWeight).coerceIn(0.85f, 0.99f)
-            val shouldEscalate = combined >= escalationThreshold
+            // Verify that audio and motion signals genuinely overlap within the correlation window
+            if (deltaMs <= windowDuration) {
+                val cAudio = sanitize(bestAudio.confidence)
+                val cMotion = sanitize(bestMotion.confidence)
 
-            return FusionResult(
-                combinedConfidence = combined,
-                isEscalationTriggered = shouldEscalate,
-                contributingSignals = listOf(bestAudio, bestMotion),
-                explanation = "Multimodal Sensor Fusion: Temporal cross-correlation confirmed between ${bestAudio.type} (confidence %.2f) and ${bestMotion.type} (confidence %.2f) with Δt = ${deltaMs}ms <= ${windowDuration}ms. Combined confidence = %.2f >= %.2f. Immediate emergency escalation triggered.".format(
-                    bestAudio.confidence,
-                    bestMotion.confidence,
-                    combined,
-                    escalationThreshold
-                )
-            )
+                // Mathematically consistent independent evidence fusion:
+                // P(A U M) = 1 - (1 - P(A)) * (1 - P(M))
+                val baseFused = 1.0f - (1.0f - cAudio) * (1.0f - cMotion)
+
+                // Temporal correlation synergy: rewarded only when both signals have non-trivial confidence (>= 0.40)
+                val temporalProximity = (1.0f - (deltaMs.toFloat() / windowDuration.toFloat())).coerceIn(0.0f, 1.0f)
+                val synergyBoost = if (cAudio >= 0.40f && cMotion >= 0.40f) {
+                    0.05f * temporalProximity * sqrt(cAudio * cMotion)
+                } else {
+                    0.0f
+                }
+
+                val combined = sanitize(baseFused + synergyBoost).coerceIn(0.0f, 1.0f)
+
+                // Escalation requires combined confidence >= threshold AND at least one signal with meaningful confidence (>= 0.50)
+                // to prevent two insignificant weak signals (e.g. 0.20 + 0.20) from escalating
+                val atLeastOneSignificant = cAudio >= 0.50f || cMotion >= 0.50f
+                val shouldEscalate = combined >= escalationThreshold && atLeastOneSignificant
+
+                return if (shouldEscalate) {
+                    FusionResult(
+                        combinedConfidence = combined,
+                        isEscalationTriggered = true,
+                        contributingSignals = listOf(bestAudio, bestMotion),
+                        explanation = "Multimodal Sensor Fusion: Significant temporal cross-correlation confirmed between ${bestAudio.type} (confidence %.2f) and ${bestMotion.type} (confidence %.2f) with Δt = ${deltaMs}ms <= ${windowDuration}ms. Combined confidence = %.2f >= %.2f. Immediate emergency escalation triggered.".format(
+                            cAudio,
+                            cMotion,
+                            combined,
+                            escalationThreshold
+                        )
+                    )
+                } else {
+                    FusionResult(
+                        combinedConfidence = combined,
+                        isEscalationTriggered = false,
+                        contributingSignals = listOf(bestAudio, bestMotion),
+                        explanation = "Multimodal Sensor Fusion: Sub-threshold cross-modal evidence (${bestAudio.type} confidence %.2f, ${bestMotion.type} confidence %.2f, Δt = ${deltaMs}ms). Combined confidence = %.2f < %.2f. Escalation withheld.".format(
+                            cAudio,
+                            cMotion,
+                            combined,
+                            escalationThreshold
+                        )
+                    )
+                }
+            }
+            // If deltaMs > windowDuration, signals do not overlap within window; fall through to evaluate independently
         }
 
         // 3. Strong Distress Audio Evidence Alone
@@ -110,7 +153,7 @@ class MultimodalFusionEngineImpl(
                 )
             } else {
                 // Moderate audio alone: starts verification, but does not immediately trigger full confirmed escalation
-                val moderatedConfidence = sanitize(audioConf * 0.90f).coerceIn(0.50f, 0.79f)
+                val moderatedConfidence = sanitize(audioConf * 0.90f).coerceIn(0.0f, 0.79f)
                 return FusionResult(
                     combinedConfidence = moderatedConfidence,
                     isEscalationTriggered = false,
@@ -123,12 +166,12 @@ class MultimodalFusionEngineImpl(
         }
 
         // 4. Isolated Motion Anomaly Alone (phone drop, random shake, pocket movement)
-        // Must NOT automatically equate a random phone shake to an attack
+        // Must NOT automatically equate a random phone shake or drop to an attack
         if (bestMotion != null) {
             val motionConf = sanitize(bestMotion.confidence)
             val cappedConfidence = when (bestMotion.type) {
-                DistressType.FALL_IMPACT -> sanitize(motionConf * 0.75f).coerceIn(0.50f, 0.68f)
-                DistressType.MOTION_ANOMALY -> sanitize(motionConf * 0.65f).coerceIn(0.40f, 0.58f)
+                DistressType.FALL_IMPACT -> sanitize(motionConf * 0.75f).coerceIn(0.0f, 0.68f)
+                DistressType.MOTION_ANOMALY -> sanitize(motionConf * 0.65f).coerceIn(0.0f, 0.58f)
                 else -> 0.40f
             }
 
@@ -144,12 +187,12 @@ class MultimodalFusionEngineImpl(
         }
 
         // 5. Unclassified or fallback signals
-        val highest = windowSignals.maxByOrNull { it.confidence } ?: windowSignals.first()
-        val conf = sanitize(highest.confidence * 0.50f).coerceIn(0.10f, 0.49f)
+        val highest = activeSignals.maxByOrNull { it.confidence } ?: activeSignals.first()
+        val conf = sanitize(highest.confidence * 0.50f).coerceIn(0.0f, 0.49f)
         return FusionResult(
             combinedConfidence = conf,
             isEscalationTriggered = false,
-            contributingSignals = windowSignals,
+            contributingSignals = activeSignals,
             explanation = "Signals below escalation threshold (max confidence %.2f). No emergency escalation triggered.".format(conf)
         )
     }

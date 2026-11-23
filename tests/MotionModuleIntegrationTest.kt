@@ -25,9 +25,9 @@ import org.junit.Test
 import java.util.UUID
 
 /**
- * Comprehensive independent unit and integration tests for Member 2's Motion and Multimodal Intelligence module.
- * Tests motion anomaly detection, false-alarm logic, multimodal fusion, emergency state machine,
- * and edge cases (missing hardware, boundary conditions, out-of-order timestamps, resource cleanup).
+ * Comprehensive independent unit and regression test suite for Member 2's Motion and Multimodal Intelligence module.
+ * Validates kinematic feature extraction, mathematically sound confidence fusion, temporal correlation,
+ * false-alarm filtering, and robust state machine lifecycle transitions.
  */
 class MotionModuleIntegrationTest {
 
@@ -203,69 +203,129 @@ class MotionModuleIntegrationTest {
         }
     }
 
-    // --- MULTIMODAL FUSION & CONFIDENCE THRESHOLD BOUNDARY TESTS ---
+    // --- TASK 1 & 2: MULTIMODAL CONFIDENCE & TEMPORAL CORRELATION REGRESSION TESTS ---
 
     @Test
-    fun testMultimodalFusionCorrelatedAudioAndMotion() {
-        val fusionEngine = MultimodalFusionEngineImpl()
-        val now = System.currentTimeMillis()
+    fun testTwoWeakSignalsDoNotProduceConfirmedEmergency() {
+        val simTime = 50000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
 
-        val audio = DistressSignal(
-            id = "a-1",
+        // Audio confidence = 0.25 (weak), Motion confidence = 0.25 (weak)
+        val weakAudio = DistressSignal(
+            id = "w-audio",
             type = DistressType.SCREAM,
-            confidence = 0.85f,
-            timestampEpochMs = now,
-            source = "TFLiteScreamClassifier"
+            confidence = 0.25f,
+            timestampEpochMs = simTime - 100L,
+            source = "AudioClassifier"
         )
-        val motion = DistressSignal(
-            id = "m-1",
-            type = DistressType.FALL_IMPACT,
-            confidence = 0.88f,
-            timestampEpochMs = now - 500L,
-            source = "MotionAnomalyDetector"
+        val weakMotion = DistressSignal(
+            id = "w-motion",
+            type = DistressType.MOTION_ANOMALY,
+            confidence = 0.25f,
+            timestampEpochMs = simTime - 200L,
+            source = "MotionClassifier"
         )
 
-        val result = fusionEngine.evaluateSignals(listOf(audio, motion), timeWindowMs = 3000L)
-        assertTrue(result.combinedConfidence >= 0.90f)
-        assertTrue(result.isEscalationTriggered)
-        assertEquals(2, result.contributingSignals.size)
-        assertTrue(result.explanation.contains("Temporal cross-correlation"))
+        val result = fusionEngine.evaluateSignals(listOf(weakAudio, weakMotion))
+
+        // Mathematically: P = 1 - (1 - 0.25) * (1 - 0.25) = 1 - 0.5625 = 0.4375
+        // Combined confidence must remain low (< 0.50) and never forced to 0.85+
+        assertFalse("Two weak signals must never trigger escalation", result.isEscalationTriggered)
+        assertTrue("Confidence must remain low for weak inputs", result.combinedConfidence < 0.50f)
+        assertTrue(result.combinedConfidence > 0.40f)
+        assertTrue(result.explanation.contains("Sub-threshold cross-modal evidence"))
+        assertTrue(result.explanation.contains("Escalation withheld"))
     }
 
     @Test
-    fun testMultimodalFusionStrongAudioAloneEscalates() {
-        val fusionEngine = MultimodalFusionEngineImpl()
-        val now = System.currentTimeMillis()
+    fun testMediumSignalCombinationsDoNotPrematurelyEscalate() {
+        val simTime = 50000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
 
-        // Strong scream >= 0.85 must escalate without mandatory motion confirmation
+        // One weak (0.25) and one medium (0.50) signal
+        val weakAudio = DistressSignal(
+            id = "w-audio",
+            type = DistressType.SCREAM,
+            confidence = 0.25f,
+            timestampEpochMs = simTime - 100L,
+            source = "Audio"
+        )
+        val medMotion = DistressSignal(
+            id = "m-motion",
+            type = DistressType.MOTION_ANOMALY,
+            confidence = 0.50f,
+            timestampEpochMs = simTime - 300L,
+            source = "Motion"
+        )
+
+        val result = fusionEngine.evaluateSignals(listOf(weakAudio, medMotion))
+
+        // baseFused = 1 - (0.75 * 0.50) = 0.625 < 0.80
+        assertFalse("Weak + medium signals must not trigger escalation", result.isEscalationTriggered)
+        assertTrue(result.combinedConfidence in 0.60f..0.79f)
+    }
+
+    @Test
+    fun testStrongCorrelatedAudioAndMotionEscalates() {
+        val simTime = 50000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
+
+        val strongAudio = DistressSignal(
+            id = "a-1",
+            type = DistressType.SCREAM,
+            confidence = 0.82f,
+            timestampEpochMs = simTime - 400L,
+            source = "TFLiteScreamClassifier"
+        )
+        val strongMotion = DistressSignal(
+            id = "m-1",
+            type = DistressType.FALL_IMPACT,
+            confidence = 0.84f,
+            timestampEpochMs = simTime - 200L,
+            source = "MotionAnomalyDetector"
+        )
+
+        val result = fusionEngine.evaluateSignals(listOf(strongAudio, strongMotion), timeWindowMs = 3000L)
+        assertTrue(result.combinedConfidence >= 0.90f)
+        assertTrue(result.isEscalationTriggered)
+        assertEquals(2, result.contributingSignals.size)
+        assertTrue(result.explanation.contains("Significant temporal cross-correlation"))
+    }
+
+    @Test
+    fun testStrongAudioAloneEscalatesWithoutMotion() {
+        val simTime = 50000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
+
         val strongAudio = DistressSignal(
             id = "a-strong",
             type = DistressType.SCREAM,
             confidence = 0.89f,
-            timestampEpochMs = now,
+            timestampEpochMs = simTime - 100L,
             source = "TFLiteScreamClassifier"
         )
 
         val result = fusionEngine.evaluateSignals(listOf(strongAudio))
-        assertTrue("Strong audio must trigger escalation", result.isEscalationTriggered)
+        assertTrue("Strong audio alone (>= 0.85) must escalate", result.isEscalationTriggered)
         assertEquals(0.89f, result.combinedConfidence, 0.01f)
         assertTrue(result.explanation.contains("without mandatory motion confirmation"))
     }
 
     @Test
     fun testMultimodalFusionEscalationThresholdBoundaries() {
+        val simTime = 50000L
         val fusionEngine = MultimodalFusionEngineImpl(
             escalationThreshold = 0.80f,
-            strongAudioThreshold = 0.85f
+            strongAudioThreshold = 0.85f,
+            clock = { simTime }
         )
-        val now = System.currentTimeMillis()
 
         // 1. Audio confidence right below 0.85 (0.849f): must NOT escalate alone
         val subThresholdAudio = DistressSignal(
             id = "sub-audio",
             type = DistressType.SCREAM,
             confidence = 0.849f,
-            timestampEpochMs = now,
+            timestampEpochMs = simTime - 50L,
             source = "Audio"
         )
         val subResult = fusionEngine.evaluateSignals(listOf(subThresholdAudio))
@@ -277,7 +337,7 @@ class MotionModuleIntegrationTest {
             id = "thresh-audio",
             type = DistressType.SCREAM,
             confidence = 0.850f,
-            timestampEpochMs = now,
+            timestampEpochMs = simTime - 50L,
             source = "Audio"
         )
         val threshResult = fusionEngine.evaluateSignals(listOf(thresholdAudio))
@@ -286,45 +346,92 @@ class MotionModuleIntegrationTest {
     }
 
     @Test
-    fun testStaleAudioEvidencePrunedFromWindow() {
-        val fusionEngine = MultimodalFusionEngineImpl()
-        val now = System.currentTimeMillis()
+    fun testExpiredEvidenceIsRejectedByDeterministicClock() {
+        val simTime = 100000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
 
-        // Stale audio occurred 5000ms ago (window is 3000ms)
-        val staleAudio = DistressSignal(
-            id = "stale-audio",
+        // Stale audio occurred 10,000ms ago (window is 3000ms)
+        val expiredAudio = DistressSignal(
+            id = "expired-audio",
             type = DistressType.SCREAM,
-            confidence = 0.80f,
-            timestampEpochMs = now - 5000L,
+            confidence = 0.95f,
+            timestampEpochMs = simTime - 10000L,
             source = "Audio"
         )
 
-        // New motion occurred now
+        val result = fusionEngine.evaluateSignals(listOf(expiredAudio), timeWindowMs = 3000L)
+        assertFalse("Expired signal must be rejected", result.isEscalationTriggered)
+        assertEquals(0.0f, result.combinedConfidence, 0.001f)
+        assertTrue(result.explanation.contains("expired outside sliding time window"))
+    }
+
+    @Test
+    fun testStaleAudioEvidenceCannotCorrelateWithCurrentMotion() {
+        val simTime = 100000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
+
+        // Stale audio occurred 5000ms ago (outside 3000ms window relative to now)
+        val staleAudio = DistressSignal(
+            id = "stale-audio",
+            type = DistressType.SCREAM,
+            confidence = 0.92f,
+            timestampEpochMs = simTime - 5000L,
+            source = "Audio"
+        )
+
+        // Fresh motion occurred now
         val currentMotion = DistressSignal(
             id = "curr-motion",
             type = DistressType.FALL_IMPACT,
             confidence = 0.85f,
-            timestampEpochMs = now,
+            timestampEpochMs = simTime - 100L,
             source = "Motion"
         )
 
         val result = fusionEngine.evaluateSignals(listOf(staleAudio, currentMotion), timeWindowMs = 3000L)
-        // Stale audio must not correlate with current motion!
-        assertFalse("Stale audio must not trigger multimodal escalation with fresh motion", result.isEscalationTriggered)
+
+        // Stale audio must not correlate with fresh motion!
+        assertFalse("Stale audio cannot cause multimodal escalation", result.isEscalationTriggered)
         assertEquals(1, result.contributingSignals.size)
         assertEquals("curr-motion", result.contributingSignals[0].id)
     }
 
     @Test
-    fun testMultimodalFusionIsolatedMotionDoesNotImmediatelyEscalate() {
-        val fusionEngine = MultimodalFusionEngineImpl()
-        val now = System.currentTimeMillis()
+    fun testSignalsOutsideCorrelationWindowEvaluatedIndependently() {
+        val simTime = 50000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
+
+        // Both signals are within active window relative to now, but separated by 2500ms (window is 2000ms)
+        val audio = DistressSignal(
+            id = "a-early",
+            type = DistressType.SCREAM,
+            confidence = 0.70f,
+            timestampEpochMs = simTime - 2600L,
+            source = "Audio"
+        )
+        val motion = DistressSignal(
+            id = "m-late",
+            type = DistressType.FALL_IMPACT,
+            confidence = 0.75f,
+            timestampEpochMs = simTime - 100L,
+            source = "Motion"
+        )
+
+        val result = fusionEngine.evaluateSignals(listOf(audio, motion), timeWindowMs = 2000L)
+        // Since Δt = 2500ms > 2000ms, they cannot be combined as correlated
+        assertFalse(result.isEscalationTriggered)
+    }
+
+    @Test
+    fun testIsolatedMotionDoesNotImmediatelyEscalate() {
+        val simTime = 50000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
 
         val motionAlone = DistressSignal(
             id = "m-alone",
             type = DistressType.MOTION_ANOMALY,
             confidence = 0.90f,
-            timestampEpochMs = now,
+            timestampEpochMs = simTime - 200L,
             source = "MotionAnomalyDetector"
         )
 
@@ -336,14 +443,14 @@ class MotionModuleIntegrationTest {
 
     @Test
     fun testMultimodalFusionManualSosEscalatesImmediately() {
-        val fusionEngine = MultimodalFusionEngineImpl()
-        val now = System.currentTimeMillis()
+        val simTime = 50000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
 
         val manualSos = DistressSignal(
             id = "sos-1",
             type = DistressType.MANUAL_SOS,
             confidence = 1.0f,
-            timestampEpochMs = now,
+            timestampEpochMs = simTime - 50L,
             source = "UI_Button"
         )
 
@@ -352,11 +459,14 @@ class MotionModuleIntegrationTest {
         assertEquals(1.0f, result.combinedConfidence, 0.01f)
     }
 
-    // --- EMERGENCY STATE MACHINE TESTS ---
+    // --- TASK 3: EMERGENCY STATE MACHINE HARDENING TESTS ---
 
     @Test
     fun testEmergencyStateMachineAllRequiredStatesAndTransitions() {
-        val stateMachine = EmergencyStateMachine()
+        var simTime = 50000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
+        val stateMachine = EmergencyStateMachine(fusionEngine = fusionEngine, clock = { simTime })
+
         assertEquals(MotionEmergencyState.NORMAL, stateMachine.state.value)
 
         // 1. Moderate audio starts VERIFYING
@@ -364,29 +474,34 @@ class MotionModuleIntegrationTest {
             id = "sig-1",
             type = DistressType.SCREAM,
             confidence = 0.75f,
+            timestampEpochMs = simTime,
             source = "Audio"
         )
         stateMachine.onSignal(moderateAudio)
         assertEquals(MotionEmergencyState.VERIFYING, stateMachine.state.value)
 
         // 2. Countdown tick to <= 2000ms triggers HIGH_CONCERN
-        stateMachine.onCountdownTick(1500L)
+        stateMachine.onCountdownTick(1500L, stateMachine.activeVerificationSessionId)
         assertEquals(MotionEmergencyState.HIGH_CONCERN, stateMachine.state.value)
 
         // 3. User cancels countdown -> CANCELLED
+        simTime += 2000L
         stateMachine.cancelEmergency("User verified safe")
         assertEquals(MotionEmergencyState.CANCELLED, stateMachine.state.value)
 
         // 4. Reset back to NORMAL
+        simTime += 1000L
         stateMachine.resetToNormal()
         assertEquals(MotionEmergencyState.NORMAL, stateMachine.state.value)
 
         // 5. Manual SOS triggers ALERTED directly (bypassing countdown)
+        simTime += 1000L
         stateMachine.triggerManualSos()
         assertEquals(MotionEmergencyState.ALERTED, stateMachine.state.value)
         assertEquals(0L, stateMachine.activeCountdownRemainingMs)
 
         // 6. Responders resolve incident -> RESOLVED
+        simTime += 5000L
         stateMachine.resolveEmergency("First responders on scene")
         assertEquals(MotionEmergencyState.RESOLVED, stateMachine.state.value)
 
@@ -398,6 +513,101 @@ class MotionModuleIntegrationTest {
         assertTrue(visitedStates.contains(MotionEmergencyState.NORMAL))
         assertTrue(visitedStates.contains(MotionEmergencyState.ALERTED))
         assertTrue(visitedStates.contains(MotionEmergencyState.RESOLVED))
+    }
+
+    @Test
+    fun testCancellationPreventsDelayedTimeoutAlert() {
+        var simTime = 50000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
+        val stateMachine = EmergencyStateMachine(fusionEngine = fusionEngine, clock = { simTime })
+
+        // 1. Moderate distress triggers VERIFYING session
+        val signal = DistressSignal(
+            id = "sig-1",
+            type = DistressType.SCREAM,
+            confidence = 0.72f,
+            timestampEpochMs = simTime,
+            source = "Audio"
+        )
+        stateMachine.onSignal(signal)
+        assertEquals(MotionEmergencyState.VERIFYING, stateMachine.state.value)
+        val initialSessionId = stateMachine.activeVerificationSessionId
+
+        // 2. User cancels countdown at t + 1000ms
+        simTime += 1000L
+        stateMachine.cancelEmergency("False alarm from video")
+        assertEquals(MotionEmergencyState.CANCELLED, stateMachine.state.value)
+
+        // 3. Delayed timer callback from Session 1 fires at t + 5000ms
+        simTime += 4000L
+        stateMachine.onVerificationTimeout(sessionId = initialSessionId)
+
+        // State MUST remain CANCELLED, not transitioned to ALERTED!
+        assertEquals("Delayed timeout callback must be ignored after cancellation",
+            MotionEmergencyState.CANCELLED, stateMachine.state.value)
+    }
+
+    @Test
+    fun testResolutionPreventsStaleEvidenceReactivation() {
+        var simTime = 50000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
+        val stateMachine = EmergencyStateMachine(fusionEngine = fusionEngine, clock = { simTime })
+
+        // Trigger manual SOS -> ALERTED
+        stateMachine.triggerManualSos()
+        assertEquals(MotionEmergencyState.ALERTED, stateMachine.state.value)
+
+        // Incident resolved
+        simTime += 10000L
+        stateMachine.resolveEmergency("Safe and secure")
+        assertEquals(MotionEmergencyState.RESOLVED, stateMachine.state.value)
+
+        // Stale sensory evidence generated before or during resolution cannot reopen incident
+        val staleSignal = DistressSignal(
+            id = "stale-sig",
+            type = DistressType.FALL_IMPACT,
+            confidence = 0.85f,
+            timestampEpochMs = simTime - 5000L,
+            source = "Motion"
+        )
+        stateMachine.onSignal(staleSignal)
+        assertEquals("Resolved state must not be reopened by sensory evidence",
+            MotionEmergencyState.RESOLVED, stateMachine.state.value)
+
+        // Manual SOS CAN immediately initiate a fresh emergency from RESOLVED
+        simTime += 1000L
+        stateMachine.triggerManualSos("New_Panic_Button")
+        assertEquals("Manual SOS must escalate immediately from RESOLVED",
+            MotionEmergencyState.ALERTED, stateMachine.state.value)
+    }
+
+    @Test
+    fun testTwoWeakSignalsDoNotEscalateInStateMachine() {
+        val simTime = 50000L
+        val fusionEngine = MultimodalFusionEngineImpl(clock = { simTime })
+        val stateMachine = EmergencyStateMachine(fusionEngine = fusionEngine, clock = { simTime })
+
+        val weakAudio = DistressSignal(
+            id = "w-audio",
+            type = DistressType.SCREAM,
+            confidence = 0.20f,
+            timestampEpochMs = simTime - 200L,
+            source = "Audio"
+        )
+        val weakMotion = DistressSignal(
+            id = "w-motion",
+            type = DistressType.MOTION_ANOMALY,
+            confidence = 0.20f,
+            timestampEpochMs = simTime - 100L,
+            source = "Motion"
+        )
+
+        stateMachine.onSignal(weakAudio)
+        val stateAfterBoth = stateMachine.onSignal(weakMotion)
+
+        // Two weak signals must NOT escalate to ALERTED or even VERIFYING
+        assertFalse(stateAfterBoth == MotionEmergencyState.ALERTED)
+        assertFalse(stateAfterBoth == MotionEmergencyState.VERIFYING)
     }
 
     @Test

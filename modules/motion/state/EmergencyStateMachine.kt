@@ -29,7 +29,8 @@ data class StateTransitionRecord(
  */
 class EmergencyStateMachine(
     private val fusionEngine: MultimodalFusionEngineImpl = MultimodalFusionEngineImpl(),
-    val verificationTimeoutMs: Long = 5000L
+    val verificationTimeoutMs: Long = 5000L,
+    private val clock: () -> Long = { System.currentTimeMillis() }
 ) {
     private val _state = MutableStateFlow(MotionEmergencyState.NORMAL)
     val state: StateFlow<MotionEmergencyState> = _state.asStateFlow()
@@ -43,14 +44,31 @@ class EmergencyStateMachine(
     @Volatile var activeCountdownRemainingMs: Long = 0L
         private set
 
+    /** Session ID to correlate active verification sessions and reject delayed timer callbacks. */
+    @Volatile var activeVerificationSessionId: Long = 0L
+        private set
+
+    @Volatile private var lastCancelledTimestampMs: Long = 0L
+    @Volatile private var lastResolvedTimestampMs: Long = 0L
+
     /**
      * Evaluate incoming distress signal against current state.
      */
     @Synchronized
     fun onSignal(signal: DistressSignal): MotionEmergencyState {
-        // Immediate check for Manual SOS or Silent trigger: bypasses buffer & countdown
+        val now = clock()
+
+        // Reject invalid future timestamps (> 1000ms ahead of clock)
+        if (signal.timestampEpochMs > now + 1000L) {
+            return _state.value
+        }
+
+        // Immediate check for Manual SOS or Silent trigger: immediately initiates emergency
+        // even from CANCELLED, RESOLVED, or VERIFYING states
         if (signal.type == DistressType.MANUAL_SOS || signal.type == DistressType.SILENT_ACTIVATION) {
+            activeVerificationSessionId++
             activeCountdownRemainingMs = 0L
+            signalBuffer.clear()
             transitionTo(
                 to = MotionEmergencyState.ALERTED,
                 reason = "Manual SOS initiated: ${signal.source}",
@@ -59,11 +77,22 @@ class EmergencyStateMachine(
             return _state.value
         }
 
+        // A resolved incident cannot be reopened by stale sensory signals
+        // Requires an explicit resetToNormal() before new sensory anomalies can be evaluated
+        if (_state.value == MotionEmergencyState.RESOLVED) {
+            return _state.value
+        }
+
+        // Signals that were generated before or at the time of the last cancellation or resolution are stale
+        if (signal.timestampEpochMs <= lastCancelledTimestampMs || signal.timestampEpochMs <= lastResolvedTimestampMs) {
+            return _state.value
+        }
+
         signalBuffer.add(signal)
 
         // Prune buffer to temporal correlation window (3000ms), purging stale signals
-        val cutoff = signal.timestampEpochMs - 3000L
-        signalBuffer.removeAll { it.timestampEpochMs < cutoff || it.timestampEpochMs > signal.timestampEpochMs }
+        val cutoff = now - 3000L
+        signalBuffer.removeAll { it.timestampEpochMs < cutoff }
 
         // Run multimodal fusion evaluation
         val fusionResult = fusionEngine.evaluateSignals(signalBuffer, 3000L)
@@ -77,14 +106,15 @@ class EmergencyStateMachine(
     fun onFusionResult(result: FusionResult, originatingSignal: DistressSignal? = null): MotionEmergencyState {
         val currentState = _state.value
 
-        // If already ALERTED, do not downgrade
-        if (currentState == MotionEmergencyState.ALERTED) {
+        // If already ALERTED or RESOLVED, do not downgrade or reopen via sensory fusion
+        if (currentState == MotionEmergencyState.ALERTED || currentState == MotionEmergencyState.RESOLVED) {
             return currentState
         }
 
         when {
             // Immediate escalation triggered (e.g. correlated audio+motion or strong scream >= 0.85)
             result.isEscalationTriggered -> {
+                activeVerificationSessionId++
                 activeCountdownRemainingMs = 0L
                 transitionTo(
                     to = MotionEmergencyState.ALERTED,
@@ -97,6 +127,7 @@ class EmergencyStateMachine(
             // Moderate confidence (0.60 to 0.79) -> Enter VERIFYING state with countdown
             result.combinedConfidence in 0.60f..0.79f -> {
                 if (currentState == MotionEmergencyState.NORMAL || currentState == MotionEmergencyState.SUSPECTED_DISTRESS) {
+                    activeVerificationSessionId++
                     activeCountdownRemainingMs = verificationTimeoutMs
                     transitionTo(
                         to = MotionEmergencyState.VERIFYING,
@@ -129,9 +160,10 @@ class EmergencyStateMachine(
     @Synchronized
     fun triggerManualSos(triggerSource: String = "Manual_SOS_Button"): MotionEmergencyState {
         val sosSignal = DistressSignal(
-            id = "manual-${System.currentTimeMillis()}",
+            id = "manual-${clock()}",
             type = DistressType.MANUAL_SOS,
             confidence = 1.0f,
+            timestampEpochMs = clock(),
             source = triggerSource,
             metadata = mapOf("discreet" to "false")
         )
@@ -139,11 +171,18 @@ class EmergencyStateMachine(
     }
 
     /**
-     * Verification countdown tick handler.
+     * Verification countdown tick handler associated with an optional session ID.
      * Transitions from VERIFYING -> HIGH_CONCERN when remaining time is low (<= 2000ms).
      */
     @Synchronized
-    fun onCountdownTick(remainingMs: Long): MotionEmergencyState {
+    fun onCountdownTick(remainingMs: Long, sessionId: Long? = null): MotionEmergencyState {
+        if (sessionId != null && sessionId != activeVerificationSessionId) {
+            return _state.value
+        }
+        if (_state.value != MotionEmergencyState.VERIFYING && _state.value != MotionEmergencyState.HIGH_CONCERN) {
+            return _state.value
+        }
+
         activeCountdownRemainingMs = remainingMs
         if (_state.value == MotionEmergencyState.VERIFYING && remainingMs in 1..2000L) {
             transitionTo(
@@ -156,9 +195,13 @@ class EmergencyStateMachine(
 
     /**
      * Verification countdown expired without user cancellation -> Escalate to ALERTED!
+     * Protects against delayed callbacks from cancelled or previous verification sessions.
      */
     @Synchronized
-    fun onVerificationTimeout(): MotionEmergencyState {
+    fun onVerificationTimeout(sessionId: Long? = null): MotionEmergencyState {
+        if (sessionId != null && sessionId != activeVerificationSessionId) {
+            return _state.value
+        }
         val current = _state.value
         if (current == MotionEmergencyState.VERIFYING || current == MotionEmergencyState.HIGH_CONCERN) {
             activeCountdownRemainingMs = 0L
@@ -172,6 +215,7 @@ class EmergencyStateMachine(
 
     /**
      * User or authenticated pin cancellation -> Transitions to CANCELLED.
+     * Invalidates active verification session to prevent delayed timeout callbacks.
      */
     @Synchronized
     fun cancelEmergency(reason: String = "User cancelled emergency countdown"): MotionEmergencyState {
@@ -181,7 +225,9 @@ class EmergencyStateMachine(
             current == MotionEmergencyState.ALERTED ||
             current == MotionEmergencyState.SUSPECTED_DISTRESS
         ) {
+            activeVerificationSessionId++
             activeCountdownRemainingMs = 0L
+            lastCancelledTimestampMs = clock()
             signalBuffer.clear()
             transitionTo(
                 to = MotionEmergencyState.CANCELLED,
@@ -193,11 +239,14 @@ class EmergencyStateMachine(
 
     /**
      * Emergency incident marked resolved and safe.
+     * Invalidates active verification session and purges buffered evidence.
      */
     @Synchronized
     fun resolveEmergency(reason: String = "Emergency incident resolved by user/responders"): MotionEmergencyState {
         if (_state.value == MotionEmergencyState.ALERTED) {
+            activeVerificationSessionId++
             activeCountdownRemainingMs = 0L
+            lastResolvedTimestampMs = clock()
             signalBuffer.clear()
             transitionTo(
                 to = MotionEmergencyState.RESOLVED,
@@ -212,6 +261,7 @@ class EmergencyStateMachine(
      */
     @Synchronized
     fun resetToNormal(): MotionEmergencyState {
+        activeVerificationSessionId++
         activeCountdownRemainingMs = 0L
         signalBuffer.clear()
         transitionTo(
@@ -233,7 +283,7 @@ class EmergencyStateMachine(
         val record = StateTransitionRecord(
             fromState = from,
             toState = to,
-            timestampEpochMs = System.currentTimeMillis(),
+            timestampEpochMs = clock(),
             reason = reason,
             triggeringSignal = triggeringSignal,
             fusionResult = fusionResult
