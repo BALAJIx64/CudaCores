@@ -6,82 +6,46 @@ import com.guardiangrid.core.interfaces.MultimodalFusionEngine
 import com.guardiangrid.core.models.DistressSignal
 import com.guardiangrid.core.models.DistressType
 import com.guardiangrid.core.models.MotionSample
+import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
+import com.guardiangrid.modules.motion.fusion.MultimodalFusionEngineImpl
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
 import java.util.UUID
 
 /**
- * Baseline stub implementation of motion anomaly detection and sensor fusion.
- * Member 2 should replace this with SensorEventListener processing (accelerometer/gyroscope),
- * fall/impact/struggle heuristic or ML models, and temporal cross-modal fusion.
+ * Bridge implementation of motion anomaly detection and sensor fusion.
+ * Maintains full contract compatibility with tests and coordinator while
+ * backed by [MotionAnomalyDetectorImpl] and [MultimodalFusionEngineImpl].
  */
-class MotionModuleStub : MotionAnomalyDetector, MultimodalFusionEngine {
+class MotionModuleStub(
+    private val realDetector: MotionAnomalyDetectorImpl = MotionAnomalyDetectorImpl(),
+    private val realFusionEngine: MultimodalFusionEngineImpl = MultimodalFusionEngineImpl()
+) : MotionAnomalyDetector, MultimodalFusionEngine {
 
-    private var monitoring = false
     private val signalFlow = MutableSharedFlow<DistressSignal>(extraBufferCapacity = 64)
-    private val motionSampleFlow = MutableSharedFlow<MotionSample>(extraBufferCapacity = 128)
-
-    // --- MotionAnomalyDetector Implementation ---
 
     override fun startMonitoring(): Flow<DistressSignal> {
-        monitoring = true
-        // Member 2: Register Sensor.TYPE_ACCELEROMETER and Sensor.TYPE_GYROSCOPE listeners
-        return signalFlow.asSharedFlow()
+        realDetector.startMonitoring()
+        return realDetector.startMonitoring()
     }
 
     override fun stopMonitoring() {
-        monitoring = false
+        realDetector.stopMonitoring()
     }
 
-    override fun isMonitoring(): Boolean = monitoring
+    override fun isMonitoring(): Boolean = realDetector.isMonitoring()
 
     override fun calibrateBaseline() {
-        // Member 2: Compute running average of stationary gravity and user movement variance
+        realDetector.calibrateBaseline()
     }
 
     override fun observeMotionSamples(): Flow<MotionSample> {
-        return motionSampleFlow.asSharedFlow()
+        return realDetector.observeMotionSamples()
     }
 
-    // --- MultimodalFusionEngine Implementation ---
-
     override fun evaluateSignals(signals: List<DistressSignal>, timeWindowMs: Long): FusionResult {
-        // Member 2: Implement temporal correlation algorithm
-        // Example logic: An audio scream within 3000ms of a high-acceleration impact or struggle
-        // yields a high combined confidence (> 0.85) and triggers emergency escalation.
-        if (signals.isEmpty()) {
-            return FusionResult(
-                combinedConfidence = 0.0f,
-                isEscalationTriggered = false,
-                contributingSignals = emptyList(),
-                explanation = "No distress signals present"
-            )
-        }
-
-        val hasAudio = signals.any { it.type == DistressType.SCREAM || it.type == DistressType.KEYWORD }
-        val hasMotion = signals.any { it.type == DistressType.MOTION_ANOMALY || it.type == DistressType.FALL_IMPACT }
-        val isManual = signals.any { it.type == DistressType.MANUAL_SOS || it.type == DistressType.SILENT_ACTIVATION }
-
-        val combinedConfidence = when {
-            isManual -> 1.0f
-            hasAudio && hasMotion -> 0.92f
-            hasAudio -> 0.75f
-            hasMotion -> 0.65f
-            else -> 0.40f
-        }
-
-        val shouldEscalate = combinedConfidence >= 0.80f
-
-        return FusionResult(
-            combinedConfidence = combinedConfidence,
-            isEscalationTriggered = shouldEscalate,
-            contributingSignals = signals,
-            explanation = if (hasAudio && hasMotion) "Multimodal audio-motion correlation confirmed distress"
-            else if (hasAudio) "Audio distress detected alone"
-            else if (hasMotion) "Motion anomaly detected alone"
-            else "Manual or unclassified signal"
-        )
+        return realFusionEngine.evaluateSignals(signals, timeWindowMs)
     }
 
     /**
