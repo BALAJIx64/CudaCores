@@ -56,16 +56,14 @@ Both the Python and Java test harnesses feature a reactive GUI:
 
 ### Option A: Python MediaPipe YAMNet Live Test (`live_audio_test.py`)
 
-Requires Python 3.9–3.11 with `mediapipe`, `numpy`, `sounddevice`, `scipy`:
-
+#### 1. Graphical Green-Screen GUI Mode (Recommended)
 ```powershell
-pip install -r tests/live_audio_test/requirements.txt
-python tests/live_audio_test/live_audio_test.py
+& "C:\Users\Ashwin Kumar L\AppData\Local\Programs\Python311Embed\python.exe" tests\live_audio_test\live_audio_test.py
 ```
 
-*Using the embeddable Python in this workspace:*
+#### 2. Terminal CLI Console Mode
 ```powershell
-& "C:\Users\Ashwin Kumar L\AppData\Local\Programs\Python311Embed\python.exe" tests/live_audio_test/live_audio_test.py
+& "C:\Users\Ashwin Kumar L\AppData\Local\Programs\Python311Embed\python.exe" tests\live_audio_test\live_audio_test.py --cli
 ```
 
 ### Option B: Offline Benchmark & Calibration Suite (`evaluate_yamnet_distress.py`)
@@ -73,15 +71,7 @@ python tests/live_audio_test/live_audio_test.py
 Runs the positive and negative test battery through the MediaPipe YAMNet model without needing a microphone:
 
 ```powershell
-& "C:\Users\Ashwin Kumar L\AppData\Local\Programs\Python311Embed\python.exe" tests/live_audio_test/evaluate_yamnet_distress.py
-```
-
-### Option C: Standalone Java Live Test (`LiveAudioTestRunner.java`)
-
-Zero-install runner using the JDK bundled in Android Studio:
-
-```powershell
-& "C:\Program Files\Android\Android Studio\jbr\bin\java.exe" tests\live_audio_test\LiveAudioTestRunner.java
+& "C:\Users\Ashwin Kumar L\AppData\Local\Programs\Python311Embed\python.exe" tests\live_audio_test\evaluate_yamnet_distress.py
 ```
 
 ---

@@ -22,8 +22,33 @@ import time
 import queue
 import threading
 import datetime
-import tkinter as tk
-from tkinter import font as tkfont
+import argparse
+
+# Auto-configure Tcl/Tk paths for embeddable / portable Python installations
+py_dir = os.path.dirname(sys.executable)
+tcl_candidates = [
+    os.path.join(py_dir, "tcl", "tcl8.6"),
+    os.path.join(py_dir, "tcl8.6"),
+]
+tk_candidates = [
+    os.path.join(py_dir, "tcl", "tk8.6"),
+    os.path.join(py_dir, "tk8.6"),
+]
+for p in tcl_candidates:
+    if os.path.exists(p) and "TCL_LIBRARY" not in os.environ:
+        os.environ["TCL_LIBRARY"] = p
+        break
+for p in tk_candidates:
+    if os.path.exists(p) and "TK_LIBRARY" not in os.environ:
+        os.environ["TK_LIBRARY"] = p
+        break
+
+try:
+    import tkinter as tk
+    from tkinter import font as tkfont
+    HAS_TKINTER = True
+except Exception:
+    HAS_TKINTER = False
 
 try:
     import numpy as np
@@ -677,7 +702,72 @@ class LiveAudioTestApp:
         self.root.destroy()
 
 
+def run_cli_mode():
+    """Interactive terminal console runner for headless or non-GUI environments."""
+    circ_buffer = CircularAudioBuffer()
+    last_trigger_time = 0.0
+
+    def on_trigger(trigger_type, label, confidence, details, timestamp):
+        nonlocal last_trigger_time
+        last_trigger_time = time.time()
+        icon = "🚨" if trigger_type == "VOCAL DISTRESS" else "🗣️"
+        print(f"\n\033[92m\033[1m{icon} [{trigger_type} CONFIRMED] {label} | Confidence: {confidence*100:.1f}%\033[0m")
+        print(f"\033[92m   {details} | Time: {timestamp}\033[0m\n")
+
+    def on_telemetry(dbfs, noise_floor, snr, zcr):
+        now = time.time()
+        if now - last_trigger_time > 2.0:
+            meter_bars = int(max(0, min(20, (dbfs + 60.0) / 3.0)))
+            meter = "|" * meter_bars + " " * (20 - meter_bars)
+            sys.stdout.write(f"\r[MIC] [{meter}] Level: {dbfs:5.1f} dBFS | Floor: {noise_floor:5.1f} dBFS | SNR: {snr:+5.1f} dB")
+            sys.stdout.flush()
+
+    engine = AudioIntelligenceEngine(circ_buffer, on_trigger, on_telemetry)
+
+    def audio_callback(indata, frames, time_info, status):
+        if status:
+            print(f"\n[AUDIO WARN] {status}", file=sys.stderr)
+        samples = indata[:, 0].copy()
+        circ_buffer.write(samples)
+
+    try:
+        stream = sd.InputStream(
+            samplerate=SAMPLE_RATE,
+            channels=1,
+            dtype='float32',
+            blocksize=FRAME_SIZE,
+            callback=audio_callback
+        )
+        stream.start()
+        print("\n[AUDIO] Physical microphone stream active: 16 kHz Mono.")
+        print("[AUDIO] Listening for distress vocalizations and keywords. Press Ctrl+C to stop.\n")
+    except Exception as e:
+        print(f"\n[ERROR] Cannot open microphone: {e}", file=sys.stderr)
+        engine.close()
+        return
+
+    worker = threading.Thread(target=engine.process_loop, daemon=True)
+    worker.start()
+
+    try:
+        while True:
+            time.sleep(0.5)
+    except KeyboardInterrupt:
+        print("\n[AUDIO] Stopping audio capture...")
+    finally:
+        engine.close()
+        try:
+            stream.stop()
+            stream.close()
+        except Exception:
+            pass
+
+
 def main():
+    parser = argparse.ArgumentParser(description="GuardianGrid Live Microphone Distress Verifier")
+    parser.add_argument("--cli", action="store_true", help="Run in terminal CLI mode without Tkinter GUI")
+    args = parser.parse_args()
+
     print("=" * 70)
     print("  GuardianGrid: Live Microphone Test Harness")
     print("  Model: MediaPipe YAMNet (yamnet.tflite) + Multi-Language KWS")
@@ -696,13 +786,21 @@ def main():
     print("  YAMNet classifies acoustic event categories; it cannot determine intent.")
     print("=" * 70)
 
-    root = tk.Tk()
-    app = LiveAudioTestApp(root)
-    root.protocol("WM_DELETE_WINDOW", app.on_closing)
+    if args.cli or not HAS_TKINTER:
+        if not HAS_TKINTER:
+            print("[INFO] Tkinter not available in this Python environment. Launching in interactive CLI mode.")
+        run_cli_mode()
+        return
+
     try:
+        root = tk.Tk()
+        app = LiveAudioTestApp(root)
+        root.protocol("WM_DELETE_WINDOW", app.on_closing)
         root.mainloop()
-    except KeyboardInterrupt:
-        app.on_closing()
+    except Exception as e:
+        print(f"[WARN] Could not initialize graphical GUI: {e}")
+        print("[INFO] Falling back to interactive CLI mode...")
+        run_cli_mode()
 
 
 if __name__ == "__main__":

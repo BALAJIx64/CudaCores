@@ -61,8 +61,8 @@ To achieve clean, zero-false-positive live detection, three calibrated enhanceme
 
 ---
 
-## 3. Calibrated Test Harnesses Provided
+## 3. Calibrated Test Harnesses
 
-Two calibrated scripts are provided inside `tests/live_audio_test/`:
-- `tests/live_audio_test/LiveAudioTestRunnerCalibrated.java` (Zero-install Java runner)
-- `tests/live_audio_test/live_audio_test_calibrated.py` (Python runner)
+The official live microphone test harness is:
+- `tests/live_audio_test/live_audio_test.py` (Official MediaPipe YAMNet live microphone runner with reactive GUI and terminal CLI mode)
+- `tests/live_audio_test/evaluate_yamnet_distress.py` (Automated benchmark and calibration suite)
