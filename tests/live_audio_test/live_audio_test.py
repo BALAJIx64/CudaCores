@@ -162,6 +162,7 @@ class ScreamIntelligenceEngine:
         self.last_scream_score = 0.0
         self.last_cry_score = 0.0
         self.last_scream_trigger_time = 0.0
+        self.last_top_category = ("Idle / Ambient", 0.0)
 
         # Initialize MediaPipe YAMNet AudioClassifier
         if not os.path.exists(MODEL_PATH):
@@ -208,7 +209,8 @@ class ScreamIntelligenceEngine:
                 snr,
                 self.last_scream_score,
                 self.consecutive_scream_windows,
-                waveform_snapshot
+                waveform_snapshot,
+                self.last_top_category
             )
 
             # Evaluate YAMNet every ~480 ms (50% overlap of 975 ms window)
@@ -249,6 +251,7 @@ class ScreamIntelligenceEngine:
 
         now = time.time()
         top_cat = categories[0]
+        self.last_top_category = (top_cat.category_name, float(top_cat.score))
         ts = datetime.datetime.now().strftime("%H:%M:%S")
 
         # Screaming detection rule:
@@ -408,7 +411,17 @@ class VisualAudioTestApp:
             fg=self.TEXT_SECONDARY,
             bg=self.CARD_BG
         )
-        self.lbl_status_sub.pack(pady=(2, 6))
+        self.lbl_status_sub.pack(pady=(2, 4))
+
+        # Live Sound Classifier Card (Shows what YAMNet is actively hearing in real-time)
+        self.lbl_sound_card = tk.Label(
+            self.status_card,
+            text="Current Sound: [ Listening / Ambient ]",
+            font=tkfont.Font(family="Segoe UI", size=11, weight="bold"),
+            fg=self.TEXT_MUTED,
+            bg=self.CARD_BG
+        )
+        self.lbl_sound_card.pack(pady=(0, 6))
 
         # --- Card 2: Visual Oscilloscope (Waveform Display) ---
         self.osc_card = tk.Frame(self.main_container, bg=self.CARD_BG, relief=tk.FLAT, bd=0)
@@ -667,9 +680,9 @@ class VisualAudioTestApp:
     def queue_trigger(self, trigger_type, label, confidence, details, timestamp):
         self.event_queue.put((trigger_type, label, confidence, details, timestamp))
 
-    def queue_telemetry(self, dbfs, noise_floor, snr, scream_score, win_count, waveform):
+    def queue_telemetry(self, dbfs, noise_floor, snr, scream_score, win_count, waveform, top_cat):
         if self.telemetry_queue.empty():
-            self.telemetry_queue.put((dbfs, noise_floor, snr, scream_score, win_count, waveform))
+            self.telemetry_queue.put((dbfs, noise_floor, snr, scream_score, win_count, waveform, top_cat))
 
     def queue_log(self, message, is_trigger=False):
         self.log_queue.put((message, is_trigger))
@@ -697,8 +710,8 @@ class VisualAudioTestApp:
         # 3. Process Real-Time Telemetry & Draw Graphics
         try:
             if not self.telemetry_queue.empty():
-                dbfs, noise_floor, snr, scream_score, win_count, waveform = self.telemetry_queue.get_nowait()
-                self.update_visual_meters(dbfs, snr, scream_score, win_count)
+                dbfs, noise_floor, snr, scream_score, win_count, waveform, top_cat = self.telemetry_queue.get_nowait()
+                self.update_visual_meters(dbfs, snr, scream_score, win_count, top_cat)
                 self.draw_oscilloscope(waveform)
         except queue.Empty:
             pass
@@ -732,9 +745,42 @@ class VisualAudioTestApp:
             line_color = "#000000" if self.is_triggered else self.ACCENT_CYAN
             self.osc_canvas.create_line(points, fill=line_color, width=1.5, tags="wave")
 
-    def update_visual_meters(self, dbfs: float, snr: float, scream_score: float, win_count: int):
-        """Updates VU meter, YAMNet score bar, and persistence badges."""
+    def update_visual_meters(self, dbfs: float, snr: float, scream_score: float, win_count: int, top_cat: tuple):
+        """Updates VU meter, YAMNet score bar, live sound classification, and persistence badges."""
         if not self.is_triggered:
+            # 0. Live Sound Classification Card
+            top_name, top_score = top_cat
+            if top_name == "Screaming":
+                self.lbl_sound_card.configure(
+                    text=f"Current Sound: Screaming ({top_score*100:.0f}%) [SCREAM DETECTED]",
+                    fg="#00E676"
+                )
+            elif top_name in ("Speech", "Conversation"):
+                self.lbl_sound_card.configure(
+                    text=f"Current Sound: Speech ({top_score*100:.0f}%) [IGNORED - NOT A SCREAM]",
+                    fg="#FFB300"
+                )
+            elif "cry" in top_name.lower():
+                self.lbl_sound_card.configure(
+                    text=f"Current Sound: Crying ({top_score*100:.0f}%) [IGNORED - NOT A SCREAM]",
+                    fg="#FFB300"
+                )
+            elif any(w in top_name.lower() for w in ("shout", "yell")):
+                self.lbl_sound_card.configure(
+                    text=f"Current Sound: Shouting ({top_score*100:.0f}%) [IGNORED - NOT A SCREAM]",
+                    fg="#FFB300"
+                )
+            elif "silence" in top_name.lower():
+                self.lbl_sound_card.configure(
+                    text=f"Current Sound: Silence / Background ({top_score*100:.0f}%)",
+                    fg=self.TEXT_MUTED
+                )
+            else:
+                self.lbl_sound_card.configure(
+                    text=f"Current Sound: {top_name} ({top_score*100:.0f}%) [IGNORED]",
+                    fg=self.TEXT_SECONDARY
+                )
+
             # 1. VU Decibel Meter
             self.lbl_vu_val.configure(text=f"{dbfs:5.1f} dBFS")
             vu_w = self.canvas_vu.winfo_width() or 400
@@ -791,6 +837,7 @@ class VisualAudioTestApp:
 
         self.lbl_status_icon.configure(text="🚨 [ SCREAM DETECTED! ]", bg=self.TRIGGER_BG, fg=self.TRIGGER_TEXT)
         self.lbl_status_state.configure(text="🚨 SCREAM DETECTED!", fg=self.TRIGGER_TEXT, bg=self.TRIGGER_BG)
+        self.lbl_sound_card.configure(text="🚨 CONFIRMED SCREAM EVENT (AudioSet Class 11)", fg=self.TRIGGER_TEXT, bg=self.TRIGGER_BG)
         self.lbl_status_sub.configure(
             text=f"{label}  |  Confidence: {confidence*100:.1f}%  |  {details}  |  {timestamp}",
             font=self.font_status_detail,
@@ -812,6 +859,7 @@ class VisualAudioTestApp:
 
         self.lbl_status_icon.configure(text="[ 🎙️ MICROPHONE READY ]", bg=self.CARD_BG, fg=self.ACCENT_CYAN)
         self.lbl_status_state.configure(text="Listening for Screams...", fg=self.TEXT_PRIMARY, bg=self.CARD_BG)
+        self.lbl_sound_card.configure(text="Current Sound: [ Listening / Ambient ]", fg=self.TEXT_MUTED, bg=self.CARD_BG)
         self.lbl_status_sub.configure(
             text="Monitoring live microphone. Shouting, speech, crying, music, and ambient noise are cleanly rejected.",
             font=self.font_sub,
@@ -888,17 +936,20 @@ def run_cli_mode():
         print(f"\n\033[92m\033[1m🚨 [{trigger_type}] {label} | Confidence: {confidence*100:.1f}%\033[0m")
         print(f"\033[92m   {details} | Time: {timestamp}\033[0m\n")
 
-    def on_telemetry(dbfs, noise_floor, snr, scream_score, win_count, waveform):
+    def on_telemetry(dbfs, noise_floor, snr, scream_score, win_count, waveform, top_cat=("", 0.0)):
         now = time.time()
         if now - last_trigger_time > 2.0:
-            meter_bars = int(max(0, min(18, (dbfs + 60.0) / 3.3)))
-            meter = "#" * meter_bars + "-" * (18 - meter_bars)
+            meter_bars = int(max(0, min(16, (dbfs + 60.0) / 3.7)))
+            meter = "#" * meter_bars + "-" * (16 - meter_bars)
             score_pct = int(scream_score * 100)
-            sys.stdout.write(f"\r[MIC: {meter}] {dbfs:5.1f} dBFS | YAMNet Scream: {score_pct:3d}% | Persist: {win_count}/2")
+            top_name, top_s = top_cat
+            top_str = f" | Hearing: {top_name[:14]} ({top_s*100:.0f}%)" if top_name else ""
+            sys.stdout.write(f"\r\033[K[MIC: {meter}] {dbfs:5.1f} dBFS | Scream: {score_pct:3d}% | Persist: {win_count}/2{top_str}")
             sys.stdout.flush()
 
     def on_log(msg, is_trig):
-        pass
+        sys.stdout.write(f"\r\033[K{msg}\n")
+        sys.stdout.flush()
 
     engine = ScreamIntelligenceEngine(circ_buffer, on_trigger, on_telemetry, on_log)
 
