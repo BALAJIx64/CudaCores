@@ -18,21 +18,29 @@ import kotlinx.coroutines.flow.update
  */
 object EmergencyStateHolder {
 
-    private val _state = MutableStateFlow(
-        EmergencyState(
-            trustedContacts = listOf(
-                EmergencyContact(
-                    id = "contact-placeholder-1",
-                    name = "Primary Contact (Placeholder)",
-                    phoneNumber = "+00000000000",
-                    telegramChatId = "@placeholder_channel",
-                    isPrimary = true
-                )
-            )
+    const val MAX_INCIDENT_HISTORY = 20
+    const val MAX_DELIVERY_RECEIPTS = 20
+    const val MAX_DISTRESS_SIGNALS = 20
+
+    private val initialContacts = listOf(
+        EmergencyContact(
+            id = "contact-placeholder-1",
+            name = "Primary Contact (Placeholder)",
+            phoneNumber = "+00000000000",
+            telegramChatId = "@placeholder_channel",
+            isPrimary = true
         )
     )
 
+    private val _state = MutableStateFlow(
+        EmergencyState(trustedContacts = initialContacts)
+    )
+
     val state: StateFlow<EmergencyState> = _state.asStateFlow()
+
+    fun reset() {
+        _state.value = EmergencyState(trustedContacts = initialContacts)
+    }
 
     fun setProtectionActive(active: Boolean, mode: ProtectionMode = ProtectionMode.ACTIVE_MONITORING) {
         _state.update { current ->
@@ -45,17 +53,28 @@ object EmergencyStateHolder {
         }
     }
 
+    fun setDiscreetModeEnabled(enabled: Boolean) {
+        _state.update { it.copy(isDiscreetModeEnabled = enabled) }
+    }
+
     fun recordDistressSignal(signal: DistressSignal) {
         _state.update { current ->
-            val updatedList = (listOf(signal) + current.recentDistressSignals).take(20)
+            val updatedList = (listOf(signal) + current.recentDistressSignals).take(MAX_DISTRESS_SIGNALS)
             current.copy(recentDistressSignals = updatedList)
         }
     }
 
     fun setEmergencyIncident(incident: EmergencyIncident?) {
         _state.update { current ->
+            val updatedHistory = if (incident != null && (incident.level == EmergencyLevel.CONFIRMED_EMERGENCY || incident.level == EmergencyLevel.CANCELLED || incident.level == EmergencyLevel.RESOLVED)) {
+                (listOf(incident) + current.incidentHistory.filter { it.incidentId != incident.incidentId }).take(MAX_INCIDENT_HISTORY)
+            } else {
+                current.incidentHistory
+            }
+
             current.copy(
                 activeIncident = incident,
+                incidentHistory = updatedHistory,
                 emergencyLevel = incident?.level ?: if (current.isProtectionActive) EmergencyLevel.MONITORING else EmergencyLevel.IDLE,
                 statusMessage = when (incident?.level) {
                     EmergencyLevel.VERIFYING -> "Verifying Multimodal Distress..."
@@ -63,7 +82,7 @@ object EmergencyStateHolder {
                     EmergencyLevel.SUSPICIOUS -> "Suspicious Activity Detected"
                     EmergencyLevel.CANCELLED -> "Alert Cancelled by User"
                     EmergencyLevel.RESOLVED -> "Emergency Resolved"
-                    else -> current.statusMessage
+                    else -> if (current.isProtectionActive) "Active Protection Running" else "Protection Standby"
                 }
             )
         }
@@ -73,10 +92,30 @@ object EmergencyStateHolder {
         _state.update { it.copy(currentLocation = location) }
     }
 
+    fun updateGpsAvailability(enabled: Boolean) {
+        _state.update { it.copy(isGpsEnabled = enabled) }
+    }
+
+    fun updatePermissions(
+        audio: Boolean,
+        location: Boolean,
+        notification: Boolean,
+        sms: Boolean
+    ) {
+        _state.update {
+            it.copy(
+                isAudioPermissionGranted = audio,
+                isLocationPermissionGranted = location,
+                isNotificationPermissionGranted = notification,
+                isSmsPermissionGranted = sms
+            )
+        }
+    }
+
     fun recordDeliveryReceipt(receipt: DeliveryReceipt) {
         _state.update { current ->
             current.copy(
-                recentDeliveryReceipts = (listOf(receipt) + current.recentDeliveryReceipts).take(10)
+                recentDeliveryReceipts = (listOf(receipt) + current.recentDeliveryReceipts).take(MAX_DELIVERY_RECEIPTS)
             )
         }
     }

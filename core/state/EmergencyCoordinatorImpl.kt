@@ -16,48 +16,99 @@ import java.util.UUID
  * Coordinates audio detection, motion analysis, and communication dispatch.
  * Member 4 maintains and expands this orchestrator.
  */
-class EmergencyCoordinatorImpl : EmergencyCoordinator {
+class EmergencyCoordinatorImpl(
+    private val locationProvider: (() -> LocationData?)? = null
+) : EmergencyCoordinator {
 
     private val _activeIncident = MutableStateFlow<EmergencyIncident?>(null)
     override val activeIncident: StateFlow<EmergencyIncident?> = _activeIncident.asStateFlow()
 
     override fun triggerDiscreetSos(triggerSource: String) {
+        triggerEmergency(
+            triggerSource = triggerSource,
+            type = DistressType.SILENT_ACTIVATION,
+            isSilent = true,
+            notes = "Discreet SOS activated via $triggerSource"
+        )
+    }
+
+    /**
+     * Trigger a standard manual SOS alert (audible / visible).
+     */
+    fun triggerManualSos(triggerSource: String = "Manual_SOS_Button", locationOverride: LocationData? = null) {
+        triggerEmergency(
+            triggerSource = triggerSource,
+            type = DistressType.MANUAL_SOS,
+            isSilent = false,
+            notes = "Manual SOS initiated via $triggerSource",
+            locationOverride = locationOverride
+        )
+    }
+
+    private fun triggerEmergency(
+        triggerSource: String,
+        type: DistressType,
+        isSilent: Boolean,
+        notes: String,
+        locationOverride: LocationData? = null
+    ) {
         val signal = DistressSignal(
             id = UUID.randomUUID().toString(),
-            type = DistressType.MANUAL_SOS,
+            type = type,
             confidence = 1.0f,
             source = triggerSource,
-            metadata = mapOf("trigger" to "manual_discreet")
+            metadata = mapOf(
+                "trigger" to triggerSource,
+                "silent" to isSilent.toString()
+            )
         )
         EmergencyStateHolder.recordDistressSignal(signal)
 
+        val loc = locationOverride ?: locationProvider?.invoke() ?: EmergencyStateHolder.state.value.currentLocation
+
         val incident = EmergencyIncident(
             incidentId = "INC-${System.currentTimeMillis()}",
+            startTimeEpochMs = System.currentTimeMillis(),
+            lastUpdatedEpochMs = System.currentTimeMillis(),
             level = EmergencyLevel.CONFIRMED_EMERGENCY,
             triggeringSignals = listOf(signal),
-            isSilent = true,
-            notes = "Discreet SOS initiated via $triggerSource"
+            location = loc,
+            isSilent = isSilent,
+            notes = notes
         )
         _activeIncident.value = incident
+        EmergencyStateHolder.setDiscreetModeEnabled(isSilent)
+        val targetMode = if (isSilent) ProtectionMode.DISCREET_MONITORING else ProtectionMode.ACTIVE_MONITORING
+        EmergencyStateHolder.setProtectionActive(true, targetMode)
         EmergencyStateHolder.setEmergencyIncident(incident)
     }
 
     override fun cancelEmergency(reason: String) {
         val current = _activeIncident.value
+        EmergencyStateHolder.setDiscreetModeEnabled(false)
         if (current != null) {
             val cancelledIncident = current.copy(
                 level = EmergencyLevel.CANCELLED,
+                lastUpdatedEpochMs = System.currentTimeMillis(),
                 notes = "Cancelled: $reason"
             )
             EmergencyStateHolder.setEmergencyIncident(cancelledIncident)
             _activeIncident.value = null
-        } else {
-            EmergencyStateHolder.setEmergencyIncident(null)
         }
+        EmergencyStateHolder.setEmergencyIncident(null)
+        EmergencyStateHolder.setProtectionActive(false, ProtectionMode.STANDBY)
     }
 
     override fun updateLocation(location: LocationData) {
         EmergencyStateHolder.updateLocation(location)
+        _activeIncident.value?.let { current ->
+            val updated = current.copy(
+                location = location,
+                lastUpdatedEpochMs = System.currentTimeMillis()
+            )
+            _activeIncident.value = updated
+            EmergencyStateHolder.setEmergencyIncident(updated)
+        }
     }
 
     override fun startProtection() {

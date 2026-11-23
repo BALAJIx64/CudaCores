@@ -1,28 +1,68 @@
 package com.guardiangrid
 
 import android.os.Bundle
+import android.view.KeyEvent
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import com.guardiangrid.core.state.EmergencyCoordinatorImpl
+import com.guardiangrid.location.GuardianLocationManager
 import com.guardiangrid.modules.audio.AudioModuleStub
 import com.guardiangrid.modules.communication.EmergencyCommunicatorStub
 import com.guardiangrid.modules.motion.MotionModuleStub
 import com.guardiangrid.ui.DashboardScreen
+import com.guardiangrid.ui.permissions.PermissionManager
 import com.guardiangrid.ui.theme.GuardianGridTheme
 
+/**
+ * Main application entry point for GuardianGrid.
+ * Owned by Member 4 (Core / UI / Integration Coordinator).
+ * Manages UI composition, system permission flow, location updates, and hardware discreet triggers.
+ */
 class MainActivity : ComponentActivity() {
 
-    private val coordinator = EmergencyCoordinatorImpl()
+    private lateinit var locationManager: GuardianLocationManager
+    private lateinit var coordinator: EmergencyCoordinatorImpl
+
     private val audioStub = AudioModuleStub()
     private val motionStub = MotionModuleStub()
     private val commStub = EmergencyCommunicatorStub()
 
+    // Hardware volume key triple-press stealth activation tracker
+    private var volumePressCount = 0
+    private var lastVolumePressTime = 0L
+
+    private val permissionLauncher = registerForActivityResult(
+        ActivityResultContracts.RequestMultiplePermissions()
+    ) { _ ->
+        PermissionManager.syncPermissionsWithState(this)
+        if (locationManager.hasLocationPermission()) {
+            locationManager.getLastKnownLocation()
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Initialize location subsystem
+        locationManager = GuardianLocationManager(this)
+
+        // Initialize EmergencyCoordinator with dynamic location provider
+        coordinator = EmergencyCoordinatorImpl(
+            locationProvider = {
+                locationManager.lastLocation.value ?: locationManager.getLastKnownLocation()
+            }
+        )
+
+        // Sync initial permission states
+        PermissionManager.syncPermissionsWithState(this)
+        if (locationManager.hasLocationPermission()) {
+            locationManager.getLastKnownLocation()
+        }
 
         setContent {
             GuardianGridTheme {
@@ -32,12 +72,67 @@ class MainActivity : ComponentActivity() {
                 ) {
                     DashboardScreen(
                         coordinator = coordinator,
+                        locationManager = locationManager,
                         audioStub = audioStub,
                         motionStub = motionStub,
-                        commStub = commStub
+                        commStub = commStub,
+                        onRequestPermissions = { requestAppPermissions() }
                     )
                 }
             }
         }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        PermissionManager.syncPermissionsWithState(this)
+        if (locationManager.hasLocationPermission()) {
+            locationManager.getLastKnownLocation()
+        }
+    }
+
+    override fun onDestroy() {
+        super.onDestroy()
+        if (::locationManager.isInitialized) {
+            locationManager.stopLocationUpdates()
+        }
+    }
+
+    /**
+     * Request all missing runtime safety permissions.
+     */
+    private fun requestAppPermissions() {
+        val permissionsToRequest = PermissionManager.REQUIRED_PERMISSIONS
+            .map { it.permission }
+            .filter { !PermissionManager.isPermissionGranted(this, it) }
+            .toTypedArray()
+
+        if (permissionsToRequest.isNotEmpty()) {
+            permissionLauncher.launch(permissionsToRequest)
+        } else {
+            PermissionManager.syncPermissionsWithState(this)
+        }
+    }
+
+    /**
+     * Stealth / Discreet Hardware SOS Trigger.
+     * Pressing Volume Down or Volume Up 3 times rapidly within 1.5 seconds triggers discreet emergency mode.
+     */
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_VOLUME_DOWN || keyCode == KeyEvent.KEYCODE_VOLUME_UP) {
+            val currentTime = System.currentTimeMillis()
+            if (currentTime - lastVolumePressTime < 1500L) {
+                volumePressCount++
+                if (volumePressCount >= 3) {
+                    coordinator.triggerDiscreetSos(triggerSource = "Hardware_Volume_Key_Triple_Press")
+                    volumePressCount = 0
+                    return true
+                }
+            } else {
+                volumePressCount = 1
+            }
+            lastVolumePressTime = currentTime
+        }
+        return super.onKeyDown(keyCode, event)
     }
 }

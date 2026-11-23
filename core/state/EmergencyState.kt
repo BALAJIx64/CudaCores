@@ -28,7 +28,14 @@ data class EmergencyState(
     val currentLocation: LocationData? = null,
     val trustedContacts: List<EmergencyContact> = emptyList(),
     val recentDeliveryReceipts: List<DeliveryReceipt> = emptyList(),
+    val incidentHistory: List<EmergencyIncident> = emptyList(),
     val isAudioMonitoringRunning: Boolean = false,
     val isMotionMonitoringRunning: Boolean = false,
+    val isDiscreetModeEnabled: Boolean = false,
+    val isAudioPermissionGranted: Boolean = false,
+    val isLocationPermissionGranted: Boolean = false,
+    val isNotificationPermissionGranted: Boolean = false,
+    val isSmsPermissionGranted: Boolean = false,
+    val isGpsEnabled: Boolean = false,
     val statusMessage: String = "GuardianGrid Standby"
 )

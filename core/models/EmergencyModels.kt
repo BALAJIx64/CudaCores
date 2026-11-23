@@ -50,4 +50,7 @@ data class EmergencyIncident(
     val audioSegments: List<AudioSegment> = emptyList(),
     val isSilent: Boolean = false,
     val notes: String = ""
-)
+) {
+    val distressType: DistressType?
+        get() = triggeringSignals.firstOrNull()?.type
+}
