@@ -52,12 +52,12 @@ SAMPLE_RATE = 16000
 WINDOW_SAMPLES = 15600  # 0.975 seconds
 
 # Calibrated detection parameters:
-# Real human scream produces Screaming score >= 0.35
-CONFIDENCE_THRESHOLD = 0.35
+# Responsive scream detection calibrated against real recordings
+CONFIDENCE_THRESHOLD = 0.18
 # Single high-confidence peak threshold
-HIGH_CONFIDENCE_THRESHOLD = 0.50
+HIGH_CONFIDENCE_THRESHOLD = 0.25
 # Minimum persistence required across windows
-MIN_PERSISTENCE_WINDOWS = 2
+MIN_PERSISTENCE_WINDOWS = 1
 
 
 class YamnetScreamEvaluator:
@@ -106,16 +106,14 @@ class YamnetScreamEvaluator:
             if scream_score > max_scream_score:
                 max_scream_score = scream_score
 
-            # Screaming condition: score >= 0.35 AND must dominate crying
+            # Screaming condition: score >= CONFIDENCE_THRESHOLD AND must dominate crying
             scream_present = (scream_score >= CONFIDENCE_THRESHOLD) and (scream_score > cry_score)
             if scream_present:
                 consecutive_scream += 1
+                if (consecutive_scream >= MIN_PERSISTENCE_WINDOWS) or (scream_score >= HIGH_CONFIDENCE_THRESHOLD):
+                    overall_scream_detected = True
             else:
                 consecutive_scream = 0
-
-            # Persistence criterion: sustained over >= 2 windows OR single peak >= 0.50
-            if (consecutive_scream >= MIN_PERSISTENCE_WINDOWS) or (scream_score >= HIGH_CONFIDENCE_THRESHOLD):
-                overall_scream_detected = True
 
             window_evaluations.append({
                 "window_index": w_idx,
