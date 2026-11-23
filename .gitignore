@@ -1,0 +1,34 @@
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE & Editors
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# Build artifacts & Android / Gradle
+.gradle/
+build/
+bin/
+out/
+app/build/
+*.apk
+*.aab
+
+# Local configuration
+local.properties
+.env
+*.local
+
+# Python / ML / Models cache
+__pycache__/
+*.py[cod]
+*$py.class
+*.pt
+*.onnx
+*.tflite
+venv/
+.venv/
+env/
