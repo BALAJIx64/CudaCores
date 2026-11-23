@@ -58,6 +58,7 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.guardiangrid.core.interfaces.EmergencyCoordinator
+import com.guardiangrid.core.interfaces.EmergencyCommunicator
 import com.guardiangrid.core.models.AlertPayload
 import com.guardiangrid.core.models.DeliveryChannel
 import com.guardiangrid.core.models.DistressType
@@ -69,7 +70,6 @@ import com.guardiangrid.core.state.EmergencyStateHolder
 import com.guardiangrid.core.state.ProtectionMode
 import com.guardiangrid.location.GuardianLocationManager
 import com.guardiangrid.modules.audio.AudioModuleStub
-import com.guardiangrid.modules.communication.EmergencyCommunicatorStub
 import com.guardiangrid.modules.motion.MotionModuleStub
 import com.guardiangrid.ui.permissions.PermissionOnboardingDialog
 import com.guardiangrid.ui.theme.DarkSurface
@@ -91,9 +91,9 @@ import java.util.Locale
 fun DashboardScreen(
     coordinator: EmergencyCoordinatorImpl,
     locationManager: GuardianLocationManager,
-    audioStub: AudioModuleStub,
+    audioModule: AudioModuleStub,
     motionStub: MotionModuleStub,
-    commStub: EmergencyCommunicatorStub,
+    communicator: EmergencyCommunicator,
     onRequestPermissions: () -> Unit
 ) {
     val state by EmergencyStateHolder.state.collectAsState()
@@ -232,7 +232,7 @@ fun DashboardScreen(
                                 location = freshLoc,
                                 emergencyMessage = "MANUAL SOS ACTIVATED: User requires urgent emergency assistance!"
                             )
-                            val receipts = commStub.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
+                            val receipts = communicator.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
                             receipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
                         }
                     },
@@ -283,7 +283,7 @@ fun DashboardScreen(
                                 location = freshLoc,
                                 emergencyMessage = "DISCREET SILENT SOS: User in distress, silent activation."
                             )
-                            val receipts = commStub.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
+                            val receipts = communicator.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
                             receipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
                         }
                     },
@@ -430,7 +430,7 @@ fun DashboardScreen(
                         OutlinedButton(
                             onClick = {
                                 scope.launch {
-                                    audioStub.emitSimulatedDistress(DistressType.SCREAM, 0.94f)
+                                    audioModule.emitSimulatedDistress(DistressType.SCREAM, 0.94f)
                                 }
                             },
                             modifier = Modifier.weight(1f)
@@ -463,7 +463,7 @@ fun DashboardScreen(
                                     location = freshLoc,
                                     emergencyMessage = "SIMULATION: Hotword 'Bachao' triggered emergency alert"
                                 )
-                                val receipts = commStub.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
+                                val receipts = communicator.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
                                 receipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
                             }
                         },

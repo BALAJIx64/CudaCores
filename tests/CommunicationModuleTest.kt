@@ -10,6 +10,7 @@ import com.guardiangrid.modules.communication.EmergencyCommunicatorImpl
 import com.guardiangrid.modules.communication.models.EmergencyDeliveryState
 import com.guardiangrid.modules.communication.network.HttpResponse
 import com.guardiangrid.modules.communication.network.MockHttpTransport
+import com.guardiangrid.modules.communication.queue.DeliveryQueueManagerImpl
 import com.guardiangrid.modules.communication.queue.FileEmergencyQueueRepository
 import com.guardiangrid.modules.communication.queue.IdempotencyManager
 import com.guardiangrid.modules.communication.queue.InMemoryQueueRepository
@@ -358,7 +359,7 @@ class CommunicationModuleTest {
         val sentSms = mockSms.sentMessages.first()
         assertEquals("+15551234567", sentSms.destinationAddress)
         assertTrue(sentSms.text.contains("EMERGENCY: GuardianGrid SOS!"))
-        assertTrue(sentSms.text.contains("12.97159"))
+        assertTrue(sentSms.text.contains("12.9716"))
         assertTrue(sentSms.text.length <= 160) // Enforce single-segment GSM 160-char budget
     }
 

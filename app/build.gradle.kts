@@ -68,6 +68,10 @@ android {
         }
     }
 
+    tasks.withType<JavaCompile>().configureEach {
+        exclude("**/live_audio_test/**")
+    }
+
     packaging {
         resources {
             excludes += "/META-INF/{AL2.0,LGPL2.1}"

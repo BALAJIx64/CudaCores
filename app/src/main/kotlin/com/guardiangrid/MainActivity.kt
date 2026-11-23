@@ -9,14 +9,18 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
+import com.guardiangrid.core.interfaces.EmergencyCommunicator
 import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.location.GuardianLocationManager
 import com.guardiangrid.modules.audio.AudioModuleStub
-import com.guardiangrid.modules.communication.EmergencyCommunicatorStub
+import com.guardiangrid.modules.communication.EmergencyCommunicatorImpl
+import com.guardiangrid.modules.communication.queue.FileEmergencyQueueRepository
+import com.guardiangrid.modules.communication.sms.MockSmsSender
 import com.guardiangrid.modules.motion.MotionModuleStub
 import com.guardiangrid.ui.DashboardScreen
 import com.guardiangrid.ui.permissions.PermissionManager
 import com.guardiangrid.ui.theme.GuardianGridTheme
+import java.io.File
 
 /**
  * Main application entry point for GuardianGrid.
@@ -28,9 +32,9 @@ class MainActivity : ComponentActivity() {
     private lateinit var locationManager: GuardianLocationManager
     private lateinit var coordinator: EmergencyCoordinatorImpl
 
-    private val audioStub = AudioModuleStub()
+    private lateinit var audioModule: AudioModuleStub
     private val motionStub = MotionModuleStub()
-    private val commStub = EmergencyCommunicatorStub()
+    private lateinit var communicator: EmergencyCommunicator
 
     // Hardware volume key triple-press stealth activation tracker
     private var volumePressCount = 0
@@ -51,11 +55,27 @@ class MainActivity : ComponentActivity() {
         // Initialize location subsystem
         locationManager = GuardianLocationManager(this)
 
-        // Initialize EmergencyCoordinator with dynamic location provider
+        // Initialize persistent offline queue repository in internal app storage
+        val queueDir = File(filesDir, "emergency_queue")
+        val queueRepo = FileEmergencyQueueRepository(queueDir)
+        communicator = EmergencyCommunicatorImpl(
+            queueRepository = queueRepo,
+            smsSender = MockSmsSender()
+        )
+
+        // Initialize audio subsystem facade
+        audioModule = AudioModuleStub(
+            cacheDirectory = cacheDir,
+            modelDirectory = filesDir
+        )
+
+        // Initialize EmergencyCoordinator with dynamic location provider, communicator, and audio detector
         coordinator = EmergencyCoordinatorImpl(
             locationProvider = {
                 locationManager.lastLocation.value ?: locationManager.getLastKnownLocation()
-            }
+            },
+            communicator = communicator,
+            audioDetector = audioModule
         )
 
         // Sync initial permission states
@@ -73,9 +93,9 @@ class MainActivity : ComponentActivity() {
                     DashboardScreen(
                         coordinator = coordinator,
                         locationManager = locationManager,
-                        audioStub = audioStub,
+                        audioModule = audioModule,
                         motionStub = motionStub,
-                        commStub = commStub,
+                        communicator = communicator,
                         onRequestPermissions = { requestAppPermissions() }
                     )
                 }
@@ -95,6 +115,9 @@ class MainActivity : ComponentActivity() {
         super.onDestroy()
         if (::locationManager.isInitialized) {
             locationManager.stopLocationUpdates()
+        }
+        if (::coordinator.isInitialized) {
+            coordinator.stopProtection()
         }
     }
 
