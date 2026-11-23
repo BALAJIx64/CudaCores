@@ -291,11 +291,23 @@ class ScreamIntelligenceEngine:
             if self.consecutive_scream_windows > 0:
                 self.consecutive_scream_windows = 0
 
-            # Log rejections for non-scream sounds
-            if shout_score > 0.20 or speech_score > 0.40 or cry_score > 0.20 or scream_score > 0.10:
-                log_entry = f"[{ts}] 🛡️ REJECTED: Top '{top_cat.category_name}' ({top_cat.score*100:.0f}%) | Scream: {scream_score*100:.1f}%"
+            # Log rejections for non-scream sounds with clear, self-explanatory descriptions
+            if top_cat.category_name in ("Speech", "Conversation"):
+                log_entry = f"[{ts}] 🗣️ [SPEECH REJECTED] Human Voice ({top_cat.score*100:.0f}%) | Screaming: {scream_score*100:.1f}% (Normal speech ignored)"
                 self.log_cb(log_entry, False)
-                print(f"[{ts}] ℹ️ [NON-SCREAM REJECTED] Top: '{top_cat.category_name}' ({top_cat.score:.2f}) | Screaming: {scream_score:.3f} < {CONFIDENCE_THRESHOLD:.2f}")
+                print(f"[{ts}] 🗣️ [SPEECH REJECTED] Human Voice ({top_cat.score:.2f}) | Screaming: {scream_score:.3f} < {CONFIDENCE_THRESHOLD:.2f} (Spoken words/conversation do not trigger screams)")
+            elif any(w in top_cat.category_name.lower() for w in ("shout", "yell")):
+                log_entry = f"[{ts}] 🗣️ [SHOUT REJECTED] Shouting ({top_cat.score*100:.0f}%) | Screaming: {scream_score*100:.1f}% (Shouting is not a distress scream)"
+                self.log_cb(log_entry, False)
+                print(f"[{ts}] 🗣️ [SHOUT REJECTED] Shouting ({top_cat.score:.2f}) | Screaming: {scream_score:.3f} < {CONFIDENCE_THRESHOLD:.2f} (Shouting/yelling is not a distress scream)")
+            elif "cry" in top_cat.category_name.lower():
+                log_entry = f"[{ts}] 👶 [CRYING REJECTED] Crying ({top_cat.score*100:.0f}%) | Screaming: {scream_score*100:.1f}% (Crying excluded from scream detection)"
+                self.log_cb(log_entry, False)
+                print(f"[{ts}] 👶 [CRYING REJECTED] Crying ({top_cat.score:.2f}) | Screaming: {scream_score:.3f} < {CONFIDENCE_THRESHOLD:.2f} (Crying is not a scream)")
+            elif shout_score > 0.20 or speech_score > 0.40 or cry_score > 0.20 or scream_score > 0.10:
+                log_entry = f"[{ts}] 🛡️ [NON-SCREAM REJECTED] Top: '{top_cat.category_name}' ({top_cat.score*100:.0f}%) | Screaming: {scream_score*100:.1f}%"
+                self.log_cb(log_entry, False)
+                print(f"[{ts}] 🛡️ [NON-SCREAM REJECTED] Top: '{top_cat.category_name}' ({top_cat.score:.2f}) | Screaming: {scream_score:.3f} < {CONFIDENCE_THRESHOLD:.2f}")
 
     def inject_wav_samples(self, wav_path: str):
         """Feeds a WAV file into the circular buffer in real-time chunks for visual testing."""
