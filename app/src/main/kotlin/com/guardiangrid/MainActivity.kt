@@ -16,7 +16,9 @@ import com.guardiangrid.modules.audio.AudioModuleStub
 import com.guardiangrid.modules.communication.EmergencyCommunicatorImpl
 import com.guardiangrid.modules.communication.queue.FileEmergencyQueueRepository
 import com.guardiangrid.modules.communication.sms.MockSmsSender
-import com.guardiangrid.modules.motion.MotionModuleStub
+import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
+import com.guardiangrid.modules.motion.fusion.MultimodalFusionEngineImpl
+import com.guardiangrid.modules.motion.sensors.AndroidMotionSensorSource
 import com.guardiangrid.ui.DashboardScreen
 import com.guardiangrid.ui.permissions.PermissionManager
 import com.guardiangrid.ui.theme.GuardianGridTheme
@@ -33,7 +35,8 @@ class MainActivity : ComponentActivity() {
     private lateinit var coordinator: EmergencyCoordinatorImpl
 
     private lateinit var audioModule: AudioModuleStub
-    private val motionStub = MotionModuleStub()
+    private lateinit var motionDetector: MotionAnomalyDetectorImpl
+    private lateinit var fusionEngine: MultimodalFusionEngineImpl
     private lateinit var communicator: EmergencyCommunicator
 
     // Hardware volume key triple-press stealth activation tracker
@@ -63,19 +66,26 @@ class MainActivity : ComponentActivity() {
             smsSender = MockSmsSender()
         )
 
-        // Initialize audio subsystem facade
+        // Initialize audio subsystem facade (concurrent scream + KWS)
         audioModule = AudioModuleStub(
             cacheDirectory = cacheDir,
             modelDirectory = filesDir
         )
 
-        // Initialize EmergencyCoordinator with dynamic location provider, communicator, and audio detector
+        // Initialize real Android motion hardware sensor source & anomaly detector
+        val motionSensorSource = AndroidMotionSensorSource(this)
+        motionDetector = MotionAnomalyDetectorImpl(sensorSource = motionSensorSource)
+        fusionEngine = MultimodalFusionEngineImpl()
+
+        // Initialize EmergencyCoordinator with dynamic location provider, communicator, audio detector, motion detector, and fusion engine
         coordinator = EmergencyCoordinatorImpl(
             locationProvider = {
                 locationManager.lastLocation.value ?: locationManager.getLastKnownLocation()
             },
             communicator = communicator,
-            audioDetector = audioModule
+            audioDetector = audioModule,
+            motionDetector = motionDetector,
+            fusionEngine = fusionEngine
         )
 
         // Sync initial permission states
@@ -94,7 +104,7 @@ class MainActivity : ComponentActivity() {
                         coordinator = coordinator,
                         locationManager = locationManager,
                         audioModule = audioModule,
-                        motionStub = motionStub,
+                        motionDetector = motionDetector,
                         communicator = communicator,
                         onRequestPermissions = { requestAppPermissions() }
                     )

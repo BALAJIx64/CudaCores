@@ -52,13 +52,6 @@ class MotionModuleStub(
      * Testing utility to simulate a detected motion anomaly.
      */
     suspend fun emitSimulatedMotionAnomaly(confidence: Float, type: DistressType = DistressType.FALL_IMPACT) {
-        val signal = DistressSignal(
-            id = UUID.randomUUID().toString(),
-            type = type,
-            confidence = confidence,
-            source = "MotionStub",
-            metadata = mapOf("stub" to "true")
-        )
-        signalFlow.emit(signal)
+        realDetector.emitSimulatedAnomaly(confidence, type)
     }
 }

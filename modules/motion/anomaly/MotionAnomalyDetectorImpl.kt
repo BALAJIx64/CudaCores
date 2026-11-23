@@ -205,4 +205,20 @@ class MotionAnomalyDetectorImpl(
     private fun sanitizeConfidence(value: Float): Float {
         return if (value.isNaN() || value.isInfinite()) 0.0f else value.coerceIn(0.0f, 1.0f)
     }
+
+    /**
+     * Testing / simulation bridge to emit a simulated motion anomaly through the detector's flow.
+     */
+    suspend fun emitSimulatedAnomaly(confidence: Float, type: DistressType = DistressType.FALL_IMPACT) {
+        val signal = DistressSignal(
+            id = UUID.randomUUID().toString(),
+            type = type,
+            confidence = confidence.coerceIn(0.0f, 1.0f),
+            timestampEpochMs = System.currentTimeMillis(),
+            source = "SimulatedMotionAnomaly",
+            rawScore = confidence,
+            metadata = mapOf("simulation" to "true")
+        )
+        signalFlow.emit(signal)
+    }
 }

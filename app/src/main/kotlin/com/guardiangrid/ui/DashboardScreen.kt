@@ -70,7 +70,7 @@ import com.guardiangrid.core.state.EmergencyStateHolder
 import com.guardiangrid.core.state.ProtectionMode
 import com.guardiangrid.location.GuardianLocationManager
 import com.guardiangrid.modules.audio.AudioModuleStub
-import com.guardiangrid.modules.motion.MotionModuleStub
+import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
 import com.guardiangrid.ui.permissions.PermissionOnboardingDialog
 import com.guardiangrid.ui.theme.DarkSurface
 import com.guardiangrid.ui.theme.DarkSurfaceElevated
@@ -92,7 +92,7 @@ fun DashboardScreen(
     coordinator: EmergencyCoordinatorImpl,
     locationManager: GuardianLocationManager,
     audioModule: AudioModuleStub,
-    motionStub: MotionModuleStub,
+    motionDetector: MotionAnomalyDetectorImpl,
     communicator: EmergencyCommunicator,
     onRequestPermissions: () -> Unit
 ) {
@@ -403,6 +403,11 @@ fun DashboardScreen(
             }
         }
 
+        // Live Detection Diagnostics Section
+        item {
+            LiveDiagnosticsCard(state = state)
+        }
+
         // Cross-Module Simulation & Verification Controls
         item {
             Card(
@@ -441,7 +446,7 @@ fun DashboardScreen(
                         OutlinedButton(
                             onClick = {
                                 scope.launch {
-                                    motionStub.emitSimulatedMotionAnomaly(0.89f, DistressType.FALL_IMPACT)
+                                    motionDetector.emitSimulatedAnomaly(0.89f, DistressType.FALL_IMPACT)
                                 }
                             },
                             modifier = Modifier.weight(1f)
@@ -807,5 +812,164 @@ fun SubsystemIndicator(
                 color = if (isActive) SafeGreen else WarningAmber
             )
         }
+    }
+}
+
+@Composable
+fun LiveDiagnosticsCard(state: com.guardiangrid.core.state.EmergencyState) {
+    val lastSignal = state.lastDetectedSignal
+    val isSimulated = lastSignal?.metadata?.get("simulation") == "true" ||
+            lastSignal?.source?.contains("Simulat", ignoreCase = true) == true ||
+            lastSignal?.metadata?.containsKey("stub") == true
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Text(
+                    text = "Live Detection Diagnostics",
+                    fontSize = 13.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = TextPrimary
+                )
+                Text(
+                    text = state.emergencyLevel.name,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = when (state.emergencyLevel) {
+                        EmergencyLevel.CONFIRMED_EMERGENCY -> EmergencyRed
+                        EmergencyLevel.VERIFYING -> WarningAmber
+                        EmergencyLevel.SUSPICIOUS -> WarningAmber
+                        EmergencyLevel.MONITORING -> SafeGreen
+                        else -> TextSecondary
+                    }
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Subsystem Status Badges
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                DiagnosticBadge(
+                    label = "Audio: ${if (state.isAudioMonitoringRunning) "ACTIVE" else "STANDBY"}",
+                    isActive = state.isAudioMonitoringRunning,
+                    modifier = Modifier.weight(1f)
+                )
+                DiagnosticBadge(
+                    label = "Motion: ${if (state.isMotionMonitoringRunning) "ACTIVE" else "STANDBY"}",
+                    isActive = state.isMotionMonitoringRunning,
+                    modifier = Modifier.weight(1f)
+                )
+            }
+
+            // Verification Countdown Banner (Active when verifying)
+            if (state.verificationCountdownRemainingMs > 0) {
+                Spacer(modifier = Modifier.height(8.dp))
+                Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).background(WarningAmber.copy(alpha = 0.15f))) {
+                    Row(
+                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Text(
+                            text = "⏳ Verification Countdown Active",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.SemiBold,
+                            color = WarningAmber
+                        )
+                        Text(
+                            text = "${(state.verificationCountdownRemainingMs + 999) / 1000}s remaining",
+                            fontSize = 12.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = WarningAmber
+                        )
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Last Detected Event Info
+            if (lastSignal != null) {
+                val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
+                val timeStr = timeFormat.format(Date(lastSignal.timestampEpochMs))
+                val keyword = lastSignal.metadata["keyword"]
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Column(modifier = Modifier.weight(1f)) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Event: ${lastSignal.type.name}",
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                            if (isSimulated) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text(
+                                    text = "[SIMULATED]",
+                                    fontSize = 9.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    color = WarningAmber
+                                )
+                            }
+                        }
+                        if (keyword != null) {
+                            Text(
+                                text = "Keyword: '$keyword'",
+                                fontSize = 10.sp,
+                                color = InfoBlue
+                            )
+                        }
+                    }
+                    Column(horizontalAlignment = Alignment.End) {
+                        Text(
+                            text = "Confidence: ${(lastSignal.confidence * 100).toInt()}%",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = if (lastSignal.confidence >= 0.80f) EmergencyLightRed else SafeGreen
+                        )
+                        Text(
+                            text = "Time: $timeStr",
+                            fontSize = 9.sp,
+                            color = TextSecondary
+                        )
+                    }
+                }
+            } else {
+                Text(
+                    text = "No detection events recorded. Sensors in standby.",
+                    fontSize = 10.sp,
+                    color = TextSecondary
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun DiagnosticBadge(label: String, isActive: Boolean, modifier: Modifier = Modifier) {
+    Box(modifier = modifier.clip(RoundedCornerShape(6.dp)).background(if (isActive) SafeGreen.copy(alpha = 0.15f) else DarkSurface), contentAlignment = Alignment.Center) {
+        Text(
+            text = label,
+            fontSize = 10.sp,
+            fontWeight = FontWeight.SemiBold,
+            color = if (isActive) SafeGreen else TextSecondary,
+            textAlign = TextAlign.Center,
+            modifier = Modifier.padding(vertical = 4.dp, horizontal = 6.dp)
+        )
     }
 }
