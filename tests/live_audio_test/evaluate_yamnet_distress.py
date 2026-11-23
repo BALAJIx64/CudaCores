@@ -1,13 +1,14 @@
 #!/usr/bin/env python3
 """
-GuardianGrid: MediaPipe YAMNet Vocal Distress Benchmark & Calibration Script
+GuardianGrid: MediaPipe YAMNet Scream Detection Benchmark & Calibration Script
 Evaluates YAMNet (yamnet.tflite) inference via MediaPipe Audio Classifier API
-across positive distress vocalizations and challenging negative acoustic events.
+specifically for Screaming (Class 11) detection only.
+Verifies clean rejection of crying/sobbing, shouting, speech, and environmental noises.
 
 IMPORTANT LIMITATION:
 YAMNet classifies audio sound events; it cannot establish a person's intent
-or confirm that they are actually in danger. Detection represents a 'possible
-distress vocalization' signature, not confirmed legal or physical distress.
+or confirm that they are actually in danger. Detection represents an acoustic
+'scream detected' event, not confirmed legal or physical danger.
 """
 
 import os
@@ -31,41 +32,35 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", ".."))
 MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "audio", "yamnet.tflite")
 
-# Distressed vocalization classes in AudioSet (YAMNet)
-DISTRESS_CLASSES = {
-    "Screaming": 11,
+# Target class: Screaming ONLY
+TARGET_CLASS = "Screaming"
+
+# Negative classes tracked for rejection logging
+NEGATIVE_CLASSES = {
     "Crying, sobbing": 19,
     "Baby cry, infant cry": 20,
-    "Whimper": 21,
-    "Wail, moan": 22,
-    "Groan": 33,
-}
-
-# Non-distress classes that must be reported if active
-NON_DISTRESS_CLASSES = {
-    "Speech": 0,
     "Shout": 6,
     "Yell": 9,
     "Children shouting": 10,
+    "Speech": 0,
     "Music": 132,
     "Silence": 494,
     "Noise": 496,
-    "Sound effect": 498,
 }
 
 SAMPLE_RATE = 16000
 WINDOW_SAMPLES = 15600  # 0.975 seconds
 
 # Calibrated detection parameters:
-# Screaming / crying in real recordings produces scores >= 0.35
+# Real human scream produces Screaming score >= 0.35
 CONFIDENCE_THRESHOLD = 0.35
 # Single high-confidence peak threshold
 HIGH_CONFIDENCE_THRESHOLD = 0.50
-# Minimum persistence required (number of consecutive windows)
+# Minimum persistence required across windows
 MIN_PERSISTENCE_WINDOWS = 2
 
 
-class YamnetDistressEvaluator:
+class YamnetScreamEvaluator:
     def __init__(self, model_path: str = MODEL_PATH):
         if not os.path.exists(model_path):
             raise FileNotFoundError(f"YAMNet model not found at: {model_path}")
@@ -80,7 +75,7 @@ class YamnetDistressEvaluator:
         self.classifier = audio.AudioClassifier.create_from_options(options)
 
     def classify_waveform(self, samples: np.ndarray, sample_rate: int = SAMPLE_RATE):
-        """Runs YAMNet inference on a 1D float32 audio waveform."""
+        """Runs YAMNet inference on a 1D float32 audio waveform for Screaming only."""
         if samples.ndim > 1:
             samples = samples[:, 0]
         if sample_rate != SAMPLE_RATE:
@@ -97,53 +92,42 @@ class YamnetDistressEvaluator:
         results = self.classifier.classify(audio_data)
 
         window_evaluations = []
-        consecutive_distress = 0
-        overall_distress_detected = False
-        top_distress_class = None
-        max_distress_score = 0.0
+        consecutive_scream = 0
+        overall_scream_detected = False
+        max_scream_score = 0.0
 
         for w_idx, window in enumerate(results):
             categories = window.classifications[0].categories
             cat_dict = {c.category_name: c.score for c in categories}
 
-            # Extract distress scores
-            distress_hits = {
-                name: cat_dict.get(name, 0.0)
-                for name in DISTRESS_CLASSES
-                if name in cat_dict
-            }
-            w_max_distress = max(distress_hits.values()) if distress_hits else 0.0
-            w_best_distress_class = (
-                max(distress_hits, key=distress_hits.get) if distress_hits else None
-            )
+            scream_score = cat_dict.get(TARGET_CLASS, 0.0)
+            cry_score = max(cat_dict.get("Crying, sobbing", 0.0), cat_dict.get("Baby cry, infant cry", 0.0))
 
-            # Check if distress threshold exceeded in this window
-            distress_present = w_max_distress >= CONFIDENCE_THRESHOLD
-            if distress_present:
-                consecutive_distress += 1
-                if w_max_distress > max_distress_score:
-                    max_distress_score = w_max_distress
-                    top_distress_class = w_best_distress_class
+            if scream_score > max_scream_score:
+                max_scream_score = scream_score
+
+            # Screaming condition: score >= 0.35 AND must dominate crying
+            scream_present = (scream_score >= CONFIDENCE_THRESHOLD) and (scream_score > cry_score)
+            if scream_present:
+                consecutive_scream += 1
             else:
-                consecutive_distress = 0
+                consecutive_scream = 0
 
             # Persistence criterion: sustained over >= 2 windows OR single peak >= 0.50
-            if (consecutive_distress >= MIN_PERSISTENCE_WINDOWS) or (w_max_distress >= HIGH_CONFIDENCE_THRESHOLD):
-                overall_distress_detected = True
+            if (consecutive_scream >= MIN_PERSISTENCE_WINDOWS) or (scream_score >= HIGH_CONFIDENCE_THRESHOLD):
+                overall_scream_detected = True
 
             window_evaluations.append({
                 "window_index": w_idx,
                 "top_categories": [(c.category_name, round(c.score, 4)) for c in categories[:4]],
-                "distress_score": round(w_max_distress, 4),
-                "distress_class": w_best_distress_class,
-                "distress_present": distress_present,
-                "consecutive_distress_windows": consecutive_distress,
+                "scream_score": round(scream_score, 4),
+                "scream_present": scream_present,
+                "consecutive_scream_windows": consecutive_scream,
             })
 
         return {
-            "distress_detected": overall_distress_detected,
-            "top_distress_class": top_distress_class,
-            "max_distress_score": round(max_distress_score, 4),
+            "scream_detected": overall_scream_detected,
+            "max_scream_score": round(max_scream_score, 4),
             "num_windows": len(results),
             "window_details": window_evaluations,
         }
@@ -152,12 +136,11 @@ class YamnetDistressEvaluator:
         self.classifier.close()
 
 
-def generate_synthetic_test_signals():
-    """Generates synthetic acoustic test waveforms for various scenarios."""
+def generate_synthetic_negative_signals():
+    """Generates synthetic acoustic test waveforms for negative non-scream scenarios."""
     sr = SAMPLE_RATE
     duration = 2.0  # 2 seconds
     t = np.linspace(0, duration, int(sr * duration), endpoint=False, dtype=np.float32)
-
     signals = {}
 
     # 1. Silence / Quiet room noise
@@ -165,7 +148,6 @@ def generate_synthetic_test_signals():
 
     # 2. HVAC / Fan rumble (low-frequency noise + 60 Hz hum)
     fan = 0.08 * np.sin(2 * np.pi * 60 * t) + 0.05 * np.random.normal(0, 1, len(t)).astype(np.float32)
-    # Low-pass filter < 600 Hz
     b, a = signal.butter(4, 600.0 / (sr / 2), btype='low')
     signals["HVAC / Fan Hum"] = signal.lfilter(b, a, fan).astype(np.float32)
 
@@ -201,64 +183,65 @@ def generate_synthetic_test_signals():
 
 def run_full_benchmark():
     print("=" * 75)
-    print("GuardianGrid: MediaPipe YAMNet Vocal Distress Evaluation Benchmark")
+    print("GuardianGrid: MediaPipe YAMNet Scream Detection Evaluation Benchmark")
     print(f"Model: {MODEL_PATH}")
+    print(f"Target Class: {TARGET_CLASS} (Class 11)")
     print(f"Confidence Threshold: {CONFIDENCE_THRESHOLD:.2f} | Min Persistence: {MIN_PERSISTENCE_WINDOWS} windows")
     print("=" * 75)
 
-    evaluator = YamnetDistressEvaluator()
+    evaluator = YamnetScreamEvaluator()
 
-    # Track results
     positive_results = []
     negative_results = []
 
-    # --- A. Positive Distress Audio Samples ---
+    # --- A. Positive Scream Audio Samples ---
     temp_dir = os.environ.get("TEMP", "")
     real_scream_path = os.path.join(temp_dir, "pi_scream.wav")
-    real_crying_path = os.path.join(temp_dir, "crying_real.wav")
 
     test_positives = {}
     if os.path.exists(real_scream_path):
         sr, data = wavfile.read(real_scream_path)
         test_positives["Real Human Scream Recording (pi_scream.wav)"] = (data, sr)
-    if os.path.exists(real_crying_path):
-        sr, data = wavfile.read(real_crying_path)
-        test_positives["Real Infant/Adult Crying Recording (crying_real.wav)"] = (data, sr)
 
-    print("\n--- 1. POSITIVE DISTRESS VOCALIZATIONS ---")
+    print("\n--- 1. POSITIVE SCREAM RECORDINGS ---")
     for name, (data, sr) in test_positives.items():
         if data.ndim > 1:
             data = data[:, 0]
         samples = data.astype(np.float32) / (32768.0 if data.dtype == np.int16 else np.max(np.abs(data)))
         res = evaluator.classify_waveform(samples, sr)
-        status = "PASSED (Detected)" if res["distress_detected"] else "FAILED (Missed)"
+        status = "PASSED (Detected)" if res["scream_detected"] else "FAILED (Missed)"
         print(f"[{status}] {name}")
-        print(f"  Top Distress Class: {res['top_distress_class']} (Score: {res['max_distress_score']:.4f})")
+        print(f"  Scream Detected: {res['scream_detected']} | Max Screaming Score: {res['max_scream_score']:.4f}")
         print(f"  Windows Evaluated: {res['num_windows']}")
         for w in res["window_details"]:
-            print(f"    Window {w['window_index']}: {w['top_categories']} | Distress: {w['distress_class']}={w['distress_score']}")
+            print(f"    Window {w['window_index']}: {w['top_categories']} | Screaming: {w['scream_score']}")
         positive_results.append({
             "name": name,
-            "detected": res["distress_detected"],
-            "max_score": res["max_distress_score"],
-            "class": res["top_distress_class"]
+            "detected": res["scream_detected"],
+            "max_score": res["max_scream_score"],
         })
 
-    # --- B. Negative Non-Distress Audio Samples ---
+    # --- B. Negative Audio Samples (Crying, Speech, Shouting, Noise) ---
     test_negatives = {}
 
-    # Real speech file
+    # Real crying recording (must NOT trigger scream detection)
+    real_crying_path = os.path.join(temp_dir, "crying_real.wav")
+    if os.path.exists(real_crying_path):
+        sr, data = wavfile.read(real_crying_path)
+        test_negatives["Real Infant/Adult Crying Recording (crying_real.wav)"] = (data, sr)
+
+    # Real human speech recording (must NOT trigger scream detection)
     real_speech_path = os.path.join(temp_dir, "speech_16000_hz_mono.wav")
     if os.path.exists(real_speech_path):
         sr, data = wavfile.read(real_speech_path)
         test_negatives["Real Continuous Human Speech (speech_16000_hz_mono.wav)"] = (data, sr)
 
     # Synthetic negative sounds
-    synthetic_signals = generate_synthetic_test_signals()
+    synthetic_signals = generate_synthetic_negative_signals()
     for name, wave in synthetic_signals.items():
         test_negatives[name] = (wave, SAMPLE_RATE)
 
-    print("\n--- 2. NEGATIVE ACOUSTIC SCENARIOS (NON-DISTRESS) ---")
+    print("\n--- 2. NEGATIVE ACOUSTIC SCENARIOS (CRYING, SPEECH, SHOUTING, NOISE) ---")
     for name, (data, sr) in test_negatives.items():
         if data.ndim > 1:
             data = data[:, 0]
@@ -271,39 +254,38 @@ def run_full_benchmark():
                 samples = samples / max_val
 
         res = evaluator.classify_waveform(samples, sr)
-        # For negative tests: distress_detected == False is a PASS
-        status = "PASSED (Rejected)" if not res["distress_detected"] else "FAILED (False Trigger)"
+        # For negative tests: scream_detected == False is a PASS
+        status = "PASSED (Rejected)" if not res["scream_detected"] else "FAILED (False Trigger)"
         print(f"[{status}] {name}")
-        print(f"  Distress Triggered: {res['distress_detected']} | Max Distress Score: {res['max_distress_score']:.4f}")
+        print(f"  Scream Triggered: {res['scream_detected']} | Max Screaming Score: {res['max_scream_score']:.4f}")
         for w in res["window_details"][:2]:
             print(f"    Window {w['window_index']}: {w['top_categories']}")
         negative_results.append({
             "name": name,
-            "false_trigger": res["distress_detected"],
-            "max_score": res["max_distress_score"],
-            "class": res["top_distress_class"]
+            "false_trigger": res["scream_detected"],
+            "max_score": res["max_scream_score"],
         })
 
     evaluator.close()
 
     # --- Summary Report ---
     print("\n" + "=" * 75)
-    print("BENCHMARK SUMMARY RESULTS")
+    print("BENCHMARK SUMMARY RESULTS (SCREAM DETECTION ONLY)")
     print("=" * 75)
     pos_total = len(positive_results)
     pos_passed = sum(1 for p in positive_results if p["detected"])
-    missed_detections = pos_total - pos_passed
+    missed_screams = pos_total - pos_passed
 
     neg_total = len(negative_results)
     neg_passed = sum(1 for n in negative_results if not n["false_trigger"])
     false_triggers = neg_total - neg_passed
 
-    print(f"Positive Distress Trials: {pos_passed}/{pos_total} detected ({missed_detections} missed)")
-    print(f"Negative Non-Distress Trials: {neg_passed}/{neg_total} rejected ({false_triggers} false triggers)")
+    print(f"Positive Scream Trials: {pos_passed}/{pos_total} detected ({missed_screams} missed)")
+    print(f"Negative Non-Scream Trials: {neg_passed}/{neg_total} rejected ({false_triggers} false triggers)")
 
-    print("\nMissed Detections:")
-    if missed_detections == 0:
-        print("  None. All authentic distress vocalizations successfully detected.")
+    print("\nMissed Screams:")
+    if missed_screams == 0:
+        print("  None. All authentic scream vocalizations successfully detected.")
     else:
         for p in positive_results:
             if not p["detected"]:
@@ -311,17 +293,20 @@ def run_full_benchmark():
 
     print("\nFalse Triggers:")
     if false_triggers == 0:
-        print("  None. 100% of non-distress sounds cleanly rejected.")
+        print("  None. 100% of non-scream sounds (crying, shouting, speech, noise) cleanly rejected.")
     else:
         for n in negative_results:
             if n["false_trigger"]:
-                print(f"  - {n['name']}: Triggered on {n['class']} with score {n['max_score']:.4f}")
+                print(f"  - {n['name']}: Triggered on Screaming with score {n['max_score']:.4f}")
 
     print("\nImportant Operational Limitation:")
     print("  YAMNet classifies audio acoustic event categories from Google AudioSet.")
     print("  It CANNOT establish a person's intent or confirm legal or physical danger.")
-    print("  Detections should be presented as 'Possible Distress Vocalization'.")
+    print("  Detections represent an acoustic 'scream detected' signature, not confirmed danger.")
     print("=" * 75)
+
+    if missed_screams > 0 or false_triggers > 0:
+        sys.exit(1)
 
 
 if __name__ == "__main__":

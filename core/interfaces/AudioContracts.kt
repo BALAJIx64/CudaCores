@@ -33,27 +33,6 @@ interface AudioDistressDetector {
 }
 
 /**
- * Interface for configurable distress keyword spotting.
- * Owned by Member 1 (modules/audio).
- */
-interface KeywordSpotter {
-    /**
-     * Start listening for emergency hotwords (e.g. "help", "bachao", "stop").
-     */
-    fun startListening(targetKeywords: List<String>): Flow<DistressSignal>
-
-    /**
-     * Stop hotword detection.
-     */
-    fun stopListening()
-
-    /**
-     * Check if hotword detection is running.
-     */
-    fun isListening(): Boolean
-}
-
-/**
  * Interface for two-stage emergency audio intelligence and recording.
  * Owned by Member 1 (modules/audio).
  */

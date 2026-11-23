@@ -2,7 +2,6 @@ package com.guardiangrid.modules.audio
 
 import com.guardiangrid.core.interfaces.AudioDistressDetector
 import com.guardiangrid.core.interfaces.AudioEvidenceRecorder
-import com.guardiangrid.core.interfaces.KeywordSpotter
 import com.guardiangrid.core.models.AudioSegment
 import com.guardiangrid.core.models.DistressSignal
 import com.guardiangrid.core.models.DistressType
@@ -13,8 +12,7 @@ import java.io.File
  * Unified production facade for GuardianGrid's Audio Intelligence subsystem.
  *
  * Implements:
- * - [AudioDistressDetector]: Pretrained-compatible AI & acoustic sound-event scream/distress classifier.
- * - [KeywordSpotter]: Multi-language emergency hotword spotter (English, Tamil, Hindi).
+ * - [AudioDistressDetector]: Pretrained-compatible AI & acoustic sound-event scream classifier.
  * - [AudioEvidenceRecorder]: Two-stage privacy-preserving audio evidence capture protocol.
  *
  * Maintains 100% backward compatibility with [MainActivity], Compose UI simulation controls,
@@ -25,13 +23,12 @@ import java.io.File
 class AudioModuleStub(
     cacheDirectory: File? = null,
     modelDirectory: File? = null
-) : AudioDistressDetector, KeywordSpotter, AudioEvidenceRecorder {
+) : AudioDistressDetector, AudioEvidenceRecorder {
 
     // Core Subsystem Components
     val circularBuffer: CircularAudioBuffer = CircularAudioBuffer(durationMs = 5000L, sampleRate = 16000)
     val captureManager: AudioCaptureManager = AudioCaptureManager(sampleRate = 16000, circularBuffer = circularBuffer)
     val screamClassifier: ScreamDistressClassifier = ScreamDistressClassifier(modelDirectory, circularBuffer)
-    val keywordSpotter: DistressKeywordSpotter = DistressKeywordSpotter(circularBuffer)
     val evidenceRecorder: TwoStageAudioEvidenceRecorder = TwoStageAudioEvidenceRecorder(circularBuffer, captureManager, cacheDirectory)
 
     // --- AudioDistressDetector Implementation ---
@@ -43,9 +40,7 @@ class AudioModuleStub(
 
     override fun stopMonitoring() {
         screamClassifier.stopMonitoring()
-        if (!keywordSpotter.isListening()) {
-            captureManager.stopCapture()
-        }
+        captureManager.stopCapture()
     }
 
     override fun isMonitoring(): Boolean = screamClassifier.isMonitoring()
@@ -53,22 +48,6 @@ class AudioModuleStub(
     override fun setSensitivity(sensitivity: Float) {
         screamClassifier.setSensitivity(sensitivity)
     }
-
-    // --- KeywordSpotter Implementation ---
-
-    override fun startListening(targetKeywords: List<String>): Flow<DistressSignal> {
-        captureManager.startCapture()
-        return keywordSpotter.startListening(targetKeywords)
-    }
-
-    override fun stopListening() {
-        keywordSpotter.stopListening()
-        if (!screamClassifier.isMonitoring()) {
-            captureManager.stopCapture()
-        }
-    }
-
-    override fun isListening(): Boolean = keywordSpotter.isListening()
 
     // --- AudioEvidenceRecorder Implementation ---
 
@@ -89,11 +68,7 @@ class AudioModuleStub(
     /**
      * Testing and simulation bridge used by Compose Dashboard buttons to simulate distress detection.
      */
-    suspend fun emitSimulatedDistress(type: DistressType, confidence: Float, source: String = "AudioIntelligenceFacade") {
-        when (type) {
-            DistressType.SCREAM -> screamClassifier.emitSimulatedDistress(confidence, source)
-            DistressType.KEYWORD -> keywordSpotter.emitSimulatedKeyword("help", confidence)
-            else -> screamClassifier.emitSimulatedDistress(confidence, source)
-        }
+    suspend fun emitSimulatedDistress(type: DistressType = DistressType.SCREAM, confidence: Float = 0.92f, source: String = "AudioIntelligenceFacade") {
+        screamClassifier.emitSimulatedDistress(confidence, source)
     }
 }
