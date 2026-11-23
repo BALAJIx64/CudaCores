@@ -53,7 +53,7 @@ WINDOW_SAMPLES = 15600  # 0.975 seconds
 
 # Calibrated detection parameters:
 # Responsive scream detection calibrated against real recordings
-CONFIDENCE_THRESHOLD = 0.18
+CONFIDENCE_THRESHOLD = 0.15
 # Single high-confidence peak threshold
 HIGH_CONFIDENCE_THRESHOLD = 0.25
 # Minimum persistence required across windows
