@@ -19,15 +19,19 @@ import kotlinx.coroutines.runBlocking
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNotNull
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 import java.util.UUID
 
 /**
  * Comprehensive independent unit and integration tests for Member 2's Motion and Multimodal Intelligence module.
- * Tests motion anomaly detection, false-alarm logic, multimodal fusion, and emergency state machine.
+ * Tests motion anomaly detection, false-alarm logic, multimodal fusion, emergency state machine,
+ * and edge cases (missing hardware, boundary conditions, out-of-order timestamps, resource cleanup).
  */
 class MotionModuleIntegrationTest {
+
+    // --- KINEMATIC FEATURE EXTRACTION TESTS ---
 
     @Test
     fun testKinematicFeatureExtractorCalculations() {
@@ -53,6 +57,43 @@ class MotionModuleIntegrationTest {
     }
 
     @Test
+    fun testEmptySensorInputHandling() {
+        val extractor = MotionFeatureExtractor()
+        // Feature extractor initialized with zero samples must handle first sample gracefully
+        val firstSample = MotionSample(1000L, 0f, 0f, 0f)
+        val features = extractor.processSample(firstSample)
+
+        assertEquals(0f, features.currentMagnitude, 0.001f)
+        assertEquals(0f, features.currentAngularSpeed, 0.001f)
+        assertEquals(0f, features.currentJerk, 0.001f)
+        assertFalse(features.currentMagnitude.isNaN())
+        assertFalse(features.currentJerk.isNaN())
+    }
+
+    @Test
+    fun testDuplicateAndOutOfOrderTimestamps() {
+        val extractor = MotionFeatureExtractor(windowCapacityMs = 1000L)
+        val baseTime = 10000L
+
+        // Normal sample
+        val s1 = MotionSample(baseTime, 0f, 9.8f, 0f)
+        extractor.processSample(s1)
+
+        // Duplicate timestamp (dt = 0): must NOT divide by zero
+        val s2 = MotionSample(baseTime, 1.0f, 9.8f, 0f)
+        val f2 = extractor.processSample(s2)
+        assertFalse("Jerk must not be NaN on duplicate timestamp", f2.currentJerk.isNaN())
+        assertFalse("Jerk must not be Infinite on duplicate timestamp", f2.currentJerk.isInfinite())
+        assertEquals(0f, f2.currentJerk, 0.001f)
+
+        // Out-of-order timestamp (backwards in time): must be handled safely
+        val s3 = MotionSample(baseTime - 500L, 2.0f, 12.0f, 0f)
+        val f3 = extractor.processSample(s3)
+        assertFalse(f3.currentMagnitude.isNaN())
+        assertFalse(f3.currentJerk.isNaN())
+    }
+
+    @Test
     fun testBaselineCalibratorAdaptsToGravity() {
         val calibrator = MotionBaselineCalibrator()
         assertFalse(calibrator.isCalibrated)
@@ -66,13 +107,14 @@ class MotionModuleIntegrationTest {
         assertEquals(9.81f, calibrator.baselineGravity, 0.05f)
     }
 
+    // --- FALSE ALARM FILTER TESTS ---
+
     @Test
     fun testFalseAlarmFilterSuppressesTablePlacement() {
         val filter = FalseAlarmFilter()
         val extractor = MotionFeatureExtractor()
         val now = 5000L
 
-        // Phone gently placed on table: impact mag ~ 14 m/s^2, no freefall, minimal gyro
         val s1 = MotionSample(now, 0f, 9.8f, 0f)
         extractor.processSample(s1)
         val s2 = MotionSample(now + 20L, 2.0f, 14.0f, 1.0f, 0.1f, 0.2f, 0.1f)
@@ -100,6 +142,68 @@ class MotionModuleIntegrationTest {
         val isFalseAlarm = filter.isFalseAlarm(lastFeatures, DistressType.MOTION_ANOMALY)
         assertTrue("Normal walking gait should be suppressed", isFalseAlarm)
     }
+
+    // --- SENSOR HARDWARE AND RESOURCE LIFECYCLE TESTS ---
+
+    @Test
+    fun testMissingGyroscopeHardwareFallback() = runBlocking {
+        val syntheticSource = SyntheticMotionSensorSource()
+        syntheticSource.setGyroscopeAvailable(false)
+        assertFalse(syntheticSource.hasGyroscope())
+
+        val detector = MotionAnomalyDetectorImpl(sensorSource = syntheticSource)
+        val flow = detector.startMonitoring()
+        assertTrue(detector.isMonitoring())
+
+        var detectedSignal: DistressSignal? = null
+        val job = launch {
+            flow.collect { signal ->
+                detectedSignal = signal
+            }
+        }
+
+        // Simulate violent struggle with accelerometer variance and directional reversals alone
+        val baseTime = System.currentTimeMillis()
+        for (i in 0 until 20) {
+            val sign = if (i % 2 == 0) 1.0f else -1.0f
+            val ax = sign * 14.0f
+            val ay = 9.8f + sign * 10.0f
+            val az = sign * 8.0f
+            // Gyroscope is zero
+            syntheticSource.emitSample(MotionSample(baseTime + i * 50L, ax, ay, az, 0f, 0f, 0f))
+            kotlinx.coroutines.delay(10)
+        }
+        kotlinx.coroutines.delay(150)
+
+        // Detector must identify struggle even without gyroscope hardware
+        detector.stopMonitoring()
+        job.cancel()
+
+        assertNotNull("Violent struggle must be detected with accelerometer fallback", detectedSignal)
+        assertEquals(DistressType.MOTION_ANOMALY, detectedSignal?.type)
+        assertEquals("false", detectedSignal?.metadata?.get("sensorHasGyro"))
+    }
+
+    @Test
+    fun testRepeatedMonitoringStartStopLifecycle() {
+        val syntheticSource = SyntheticMotionSensorSource()
+        val detector = MotionAnomalyDetectorImpl(sensorSource = syntheticSource)
+
+        for (i in 0 until 5) {
+            assertFalse(detector.isMonitoring())
+            assertFalse(syntheticSource.isStreaming())
+
+            detector.startMonitoring()
+            assertTrue(detector.isMonitoring())
+            assertTrue(syntheticSource.isStreaming())
+
+            detector.stopMonitoring()
+            assertFalse(detector.isMonitoring())
+            assertFalse(syntheticSource.isStreaming())
+        }
+    }
+
+    // --- MULTIMODAL FUSION & CONFIDENCE THRESHOLD BOUNDARY TESTS ---
 
     @Test
     fun testMultimodalFusionCorrelatedAudioAndMotion() {
@@ -149,6 +253,69 @@ class MotionModuleIntegrationTest {
     }
 
     @Test
+    fun testMultimodalFusionEscalationThresholdBoundaries() {
+        val fusionEngine = MultimodalFusionEngineImpl(
+            escalationThreshold = 0.80f,
+            strongAudioThreshold = 0.85f
+        )
+        val now = System.currentTimeMillis()
+
+        // 1. Audio confidence right below 0.85 (0.849f): must NOT escalate alone
+        val subThresholdAudio = DistressSignal(
+            id = "sub-audio",
+            type = DistressType.SCREAM,
+            confidence = 0.849f,
+            timestampEpochMs = now,
+            source = "Audio"
+        )
+        val subResult = fusionEngine.evaluateSignals(listOf(subThresholdAudio))
+        assertFalse("Audio at 0.849 must not escalate alone", subResult.isEscalationTriggered)
+        assertTrue(subResult.combinedConfidence < 0.80f)
+
+        // 2. Audio confidence exactly at 0.850f: MUST escalate alone
+        val thresholdAudio = DistressSignal(
+            id = "thresh-audio",
+            type = DistressType.SCREAM,
+            confidence = 0.850f,
+            timestampEpochMs = now,
+            source = "Audio"
+        )
+        val threshResult = fusionEngine.evaluateSignals(listOf(thresholdAudio))
+        assertTrue("Audio at 0.850 must escalate alone", threshResult.isEscalationTriggered)
+        assertEquals(0.850f, threshResult.combinedConfidence, 0.001f)
+    }
+
+    @Test
+    fun testStaleAudioEvidencePrunedFromWindow() {
+        val fusionEngine = MultimodalFusionEngineImpl()
+        val now = System.currentTimeMillis()
+
+        // Stale audio occurred 5000ms ago (window is 3000ms)
+        val staleAudio = DistressSignal(
+            id = "stale-audio",
+            type = DistressType.SCREAM,
+            confidence = 0.80f,
+            timestampEpochMs = now - 5000L,
+            source = "Audio"
+        )
+
+        // New motion occurred now
+        val currentMotion = DistressSignal(
+            id = "curr-motion",
+            type = DistressType.FALL_IMPACT,
+            confidence = 0.85f,
+            timestampEpochMs = now,
+            source = "Motion"
+        )
+
+        val result = fusionEngine.evaluateSignals(listOf(staleAudio, currentMotion), timeWindowMs = 3000L)
+        // Stale audio must not correlate with current motion!
+        assertFalse("Stale audio must not trigger multimodal escalation with fresh motion", result.isEscalationTriggered)
+        assertEquals(1, result.contributingSignals.size)
+        assertEquals("curr-motion", result.contributingSignals[0].id)
+    }
+
+    @Test
     fun testMultimodalFusionIsolatedMotionDoesNotImmediatelyEscalate() {
         val fusionEngine = MultimodalFusionEngineImpl()
         val now = System.currentTimeMillis()
@@ -185,6 +352,8 @@ class MotionModuleIntegrationTest {
         assertEquals(1.0f, result.combinedConfidence, 0.01f)
     }
 
+    // --- EMERGENCY STATE MACHINE TESTS ---
+
     @Test
     fun testEmergencyStateMachineAllRequiredStatesAndTransitions() {
         val stateMachine = EmergencyStateMachine()
@@ -212,9 +381,10 @@ class MotionModuleIntegrationTest {
         stateMachine.resetToNormal()
         assertEquals(MotionEmergencyState.NORMAL, stateMachine.state.value)
 
-        // 5. Manual SOS triggers ALERTED directly
+        // 5. Manual SOS triggers ALERTED directly (bypassing countdown)
         stateMachine.triggerManualSos()
         assertEquals(MotionEmergencyState.ALERTED, stateMachine.state.value)
+        assertEquals(0L, stateMachine.activeCountdownRemainingMs)
 
         // 6. Responders resolve incident -> RESOLVED
         stateMachine.resolveEmergency("First responders on scene")

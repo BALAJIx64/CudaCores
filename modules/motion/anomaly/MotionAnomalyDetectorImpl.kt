@@ -45,7 +45,7 @@ class MotionAnomalyDetectorImpl(
     )
 
     private var lastAnomalyTimestampMs = 0L
-    private val anomalyCooldownMs = 1200L
+    private val anomalyCooldownMs = 1000L
 
     fun setSensorSource(source: MotionSensorSource) {
         val wasActive = isMonitoring.get()
@@ -63,7 +63,7 @@ class MotionAnomalyDetectorImpl(
     }
 
     override fun startMonitoring(): Flow<DistressSignal> {
-        if (isMonitoring.getAndSet(true)) {
+        if (!isMonitoring.compareAndSet(false, true)) {
             return signalFlow.asSharedFlow()
         }
 
@@ -83,7 +83,7 @@ class MotionAnomalyDetectorImpl(
     }
 
     override fun stopMonitoring() {
-        if (!isMonitoring.getAndSet(false)) return
+        if (!isMonitoring.compareAndSet(true, false)) return
 
         sensorSource.stop()
         detectorScope?.cancel()
@@ -116,7 +116,7 @@ class MotionAnomalyDetectorImpl(
         val now = sample.timestampEpochMs
 
         // Avoid spamming duplicate anomalies within cooldown window
-        if (now - lastAnomalyTimestampMs < anomalyCooldownMs) {
+        if (now - lastAnomalyTimestampMs in 1..anomalyCooldownMs) {
             return
         }
 
@@ -129,10 +129,12 @@ class MotionAnomalyDetectorImpl(
 
         lastAnomalyTimestampMs = now
 
+        val sanitizedConfidence = sanitizeConfidence(classified.second)
+
         val signal = DistressSignal(
             id = UUID.randomUUID().toString(),
             type = classified.first,
-            confidence = classified.second,
+            confidence = sanitizedConfidence,
             timestampEpochMs = now,
             source = "MotionAnomalyDetector",
             rawScore = features.currentMagnitude,
@@ -151,31 +153,37 @@ class MotionAnomalyDetectorImpl(
 
     /**
      * Anomaly classification rules evaluating fall impact, struggle, and snatch patterns.
+     * Incorporates graceful accelerometer-only fallback when gyroscope is missing.
      */
     private fun detectAnomaly(features: MotionFeatures): Pair<DistressType, Float>? {
         val effImpact = config.effectiveImpactThreshold()
         val effVariance = config.effectiveShakeVarianceThreshold()
         val effAngular = config.effectiveAngularSpeedThreshold()
         val effSnatchJerk = config.effectiveSnatchJerkThreshold()
+        val hasGyro = sensorSource.hasGyroscope()
 
         // 1. Fall Detection: Freefall valley followed by sharp impact spike
         if (features.currentMagnitude >= effImpact && features.hasFreefallPrecedingImpact) {
-            // Confidence scaled by impact severity
             val confidence = ((features.currentMagnitude - effImpact) / 20.0f + 0.80f).coerceIn(0.80f, 0.98f)
             return Pair(DistressType.FALL_IMPACT, confidence)
         }
 
-        // Severe standalone impact without explicit freefall (e.g. violent crash or direct hit)
+        // Severe standalone impact without explicit freefall
         if (features.currentMagnitude >= effImpact * 1.25f) {
             val confidence = ((features.currentMagnitude - effImpact) / 25.0f + 0.75f).coerceIn(0.75f, 0.95f)
             return Pair(DistressType.FALL_IMPACT, confidence)
         }
 
         // 2. Violent Struggle / Frantic Shaking:
-        // High magnitude variance + high direction reversals + high angular speed
-        val isViolentShake = features.varianceMagnitude >= effVariance &&
-                features.directionReversals >= config.violentShakeReversalThreshold &&
-                features.peakAngularSpeed >= effAngular
+        val isViolentShake = if (hasGyro) {
+            features.varianceMagnitude >= effVariance &&
+                    features.directionReversals >= config.violentShakeReversalThreshold &&
+                    features.peakAngularSpeed >= effAngular
+        } else {
+            // Accelerometer fallback when gyroscope hardware is absent
+            features.varianceMagnitude >= effVariance * 1.25f &&
+                    features.directionReversals >= (config.violentShakeReversalThreshold + 1)
+        }
 
         if (isViolentShake) {
             val confidence = ((features.varianceMagnitude - effVariance) / 20.0f + 0.78f).coerceIn(0.78f, 0.94f)
@@ -192,5 +200,9 @@ class MotionAnomalyDetectorImpl(
         }
 
         return null
+    }
+
+    private fun sanitizeConfidence(value: Float): Float {
+        return if (value.isNaN() || value.isInfinite()) 0.0f else value.coerceIn(0.0f, 1.0f)
     }
 }

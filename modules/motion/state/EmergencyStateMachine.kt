@@ -22,9 +22,10 @@ data class StateTransitionRecord(
 )
 
 /**
- * Production implementation of the GuardianGrid Motion & Multimodal Emergency State Machine.
+ * Internal Motion & Multimodal Verification State Machine.
  * Manages deterministic state transitions across:
  * NORMAL -> SUSPECTED_DISTRESS -> VERIFYING -> HIGH_CONCERN -> ALERTED -> CANCELLED -> RESOLVED.
+ * Does not replace application-wide coordinator; maps to EmergencyLevel for integration.
  */
 class EmergencyStateMachine(
     private val fusionEngine: MultimodalFusionEngineImpl = MultimodalFusionEngineImpl(),
@@ -47,14 +48,9 @@ class EmergencyStateMachine(
      */
     @Synchronized
     fun onSignal(signal: DistressSignal): MotionEmergencyState {
-        signalBuffer.add(signal)
-
-        // Prune buffer to temporal correlation window (3000ms)
-        val cutoff = signal.timestampEpochMs - 3000L
-        signalBuffer.removeAll { it.timestampEpochMs < cutoff }
-
-        // Immediate check for Manual SOS / Silent trigger
+        // Immediate check for Manual SOS or Silent trigger: bypasses buffer & countdown
         if (signal.type == DistressType.MANUAL_SOS || signal.type == DistressType.SILENT_ACTIVATION) {
+            activeCountdownRemainingMs = 0L
             transitionTo(
                 to = MotionEmergencyState.ALERTED,
                 reason = "Manual SOS initiated: ${signal.source}",
@@ -62,6 +58,12 @@ class EmergencyStateMachine(
             )
             return _state.value
         }
+
+        signalBuffer.add(signal)
+
+        // Prune buffer to temporal correlation window (3000ms), purging stale signals
+        val cutoff = signal.timestampEpochMs - 3000L
+        signalBuffer.removeAll { it.timestampEpochMs < cutoff || it.timestampEpochMs > signal.timestampEpochMs }
 
         // Run multimodal fusion evaluation
         val fusionResult = fusionEngine.evaluateSignals(signalBuffer, 3000L)
@@ -83,6 +85,7 @@ class EmergencyStateMachine(
         when {
             // Immediate escalation triggered (e.g. correlated audio+motion or strong scream >= 0.85)
             result.isEscalationTriggered -> {
+                activeCountdownRemainingMs = 0L
                 transitionTo(
                     to = MotionEmergencyState.ALERTED,
                     reason = result.explanation,
@@ -158,6 +161,7 @@ class EmergencyStateMachine(
     fun onVerificationTimeout(): MotionEmergencyState {
         val current = _state.value
         if (current == MotionEmergencyState.VERIFYING || current == MotionEmergencyState.HIGH_CONCERN) {
+            activeCountdownRemainingMs = 0L
             transitionTo(
                 to = MotionEmergencyState.ALERTED,
                 reason = "Verification countdown expired without cancellation. Automatic emergency dispatch confirmed."

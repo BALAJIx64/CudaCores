@@ -5,8 +5,6 @@ import com.guardiangrid.core.interfaces.MultimodalFusionEngine
 import com.guardiangrid.core.models.DistressSignal
 import com.guardiangrid.core.models.DistressType
 import kotlin.math.abs
-import kotlin.math.max
-import kotlin.math.min
 
 /**
  * Production implementation of [MultimodalFusionEngine].
@@ -34,12 +32,12 @@ class MultimodalFusionEngineImpl(
 
         val windowDuration = if (timeWindowMs > 0) timeWindowMs else defaultTimeWindowMs
 
-        // Find the most recent signal timestamp
+        // Current evaluation time based on latest signal
         val latestTimestamp = signals.maxOf { it.timestampEpochMs }
         val windowCutoff = latestTimestamp - windowDuration
 
-        // Filter signals within temporal window
-        val windowSignals = signals.filter { it.timestampEpochMs >= windowCutoff }
+        // Filter signals strictly within temporal window (pruning stale / out-of-window signals)
+        val windowSignals = signals.filter { it.timestampEpochMs in windowCutoff..latestTimestamp }
         if (windowSignals.isEmpty()) {
             return FusionResult(
                 combinedConfidence = 0.0f,
@@ -79,9 +77,8 @@ class MultimodalFusionEngineImpl(
             val temporalWeight = (1.0f - (deltaMs.toFloat() / windowDuration.toFloat())).coerceIn(0.1f, 1.0f)
 
             // Independent probability fusion formula with multimodal boost
-            // P(A U B) = 1 - (1 - P(A)) * (1 - P(B))
-            val baseFused = 1.0f - (1.0f - bestAudio.confidence) * (1.0f - bestMotion.confidence)
-            val combined = (baseFused + 0.08f * temporalWeight).coerceIn(0.85f, 0.99f)
+            val baseFused = 1.0f - (1.0f - sanitize(bestAudio.confidence)) * (1.0f - sanitize(bestMotion.confidence))
+            val combined = sanitize(baseFused + 0.08f * temporalWeight).coerceIn(0.85f, 0.99f)
             val shouldEscalate = combined >= escalationThreshold
 
             return FusionResult(
@@ -100,7 +97,7 @@ class MultimodalFusionEngineImpl(
         // 3. Strong Distress Audio Evidence Alone
         // Strong audio evidence must be capable of escalation without mandatory motion confirmation
         if (bestAudio != null) {
-            val audioConf = bestAudio.confidence
+            val audioConf = sanitize(bestAudio.confidence)
             if (audioConf >= strongAudioThreshold) {
                 return FusionResult(
                     combinedConfidence = audioConf,
@@ -113,7 +110,7 @@ class MultimodalFusionEngineImpl(
                 )
             } else {
                 // Moderate audio alone: starts verification, but does not immediately trigger full confirmed escalation
-                val moderatedConfidence = (audioConf * 0.90f).coerceIn(0.50f, 0.79f)
+                val moderatedConfidence = sanitize(audioConf * 0.90f).coerceIn(0.50f, 0.79f)
                 return FusionResult(
                     combinedConfidence = moderatedConfidence,
                     isEscalationTriggered = false,
@@ -125,14 +122,13 @@ class MultimodalFusionEngineImpl(
             }
         }
 
-        // 4. Isolated Motion Anomaly Alone (e.g. phone drop, random shake, pocket movement)
+        // 4. Isolated Motion Anomaly Alone (phone drop, random shake, pocket movement)
         // Must NOT automatically equate a random phone shake to an attack
         if (bestMotion != null) {
-            val motionConf = bestMotion.confidence
-            // Penalize motion confidence when uncorroborated by audio
+            val motionConf = sanitize(bestMotion.confidence)
             val cappedConfidence = when (bestMotion.type) {
-                DistressType.FALL_IMPACT -> (motionConf * 0.75f).coerceIn(0.50f, 0.68f)
-                DistressType.MOTION_ANOMALY -> (motionConf * 0.65f).coerceIn(0.40f, 0.58f)
+                DistressType.FALL_IMPACT -> sanitize(motionConf * 0.75f).coerceIn(0.50f, 0.68f)
+                DistressType.MOTION_ANOMALY -> sanitize(motionConf * 0.65f).coerceIn(0.40f, 0.58f)
                 else -> 0.40f
             }
 
@@ -149,12 +145,16 @@ class MultimodalFusionEngineImpl(
 
         // 5. Unclassified or fallback signals
         val highest = windowSignals.maxByOrNull { it.confidence } ?: windowSignals.first()
-        val conf = (highest.confidence * 0.50f).coerceIn(0.10f, 0.49f)
+        val conf = sanitize(highest.confidence * 0.50f).coerceIn(0.10f, 0.49f)
         return FusionResult(
             combinedConfidence = conf,
             isEscalationTriggered = false,
             contributingSignals = windowSignals,
             explanation = "Signals below escalation threshold (max confidence %.2f). No emergency escalation triggered.".format(conf)
         )
+    }
+
+    private fun sanitize(value: Float): Float {
+        return if (value.isNaN() || value.isInfinite()) 0.0f else value.coerceIn(0.0f, 1.0f)
     }
 }

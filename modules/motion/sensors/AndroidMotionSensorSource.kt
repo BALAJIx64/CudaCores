@@ -11,6 +11,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 /**
  * Production sensor source connecting to Android's SensorManager.
  * Registers Sensor.TYPE_ACCELEROMETER and Sensor.TYPE_GYROSCOPE.
+ * Ensures consistent timestamp correlation, resource cleanup, and handles missing gyroscope gracefully.
  */
 class AndroidMotionSensorSource(
     private val context: Context,
@@ -27,14 +28,20 @@ class AndroidMotionSensorSource(
     @Volatile private var latestGx: Float = 0f
     @Volatile private var latestGy: Float = 0f
     @Volatile private var latestGz: Float = 0f
+    @Volatile private var latestGyroTimestampMs: Long = 0L
 
-    private var hasGyro: Boolean = false
+    @Volatile private var hasGyro: Boolean = false
 
     override fun start(onSample: (MotionSample) -> Unit) {
-        if (streaming.getAndSet(true)) return
+        if (!streaming.compareAndSet(false, true)) return
         this.sampleListener = onSample
 
-        val sm = sensorManager ?: return
+        val sm = sensorManager
+        if (sm == null) {
+            streaming.set(false)
+            return
+        }
+
         val accelerometer = sm.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
         val gyroscope = sm.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
 
@@ -49,9 +56,13 @@ class AndroidMotionSensorSource(
     }
 
     override fun stop() {
-        if (!streaming.getAndSet(false)) return
+        if (!streaming.compareAndSet(true, false)) return
         sensorManager?.unregisterListener(this)
         sampleListener = null
+        latestGx = 0f
+        latestGy = 0f
+        latestGz = 0f
+        latestGyroTimestampMs = 0L
     }
 
     override fun isStreaming(): Boolean = streaming.get()
@@ -68,20 +79,27 @@ class AndroidMotionSensorSource(
                 latestGx = event.values.getOrElse(0) { 0f }
                 latestGy = event.values.getOrElse(1) { 0f }
                 latestGz = event.values.getOrElse(2) { 0f }
+                latestGyroTimestampMs = now
             }
             Sensor.TYPE_ACCELEROMETER -> {
                 val ax = event.values.getOrElse(0) { 0f }
                 val ay = event.values.getOrElse(1) { 0f }
                 val az = event.values.getOrElse(2) { 0f }
 
+                // Discard stale gyroscope readings older than 350ms
+                val isGyroStale = (now - latestGyroTimestampMs) > 350L
+                val gx = if (hasGyro && !isGyroStale) latestGx else 0f
+                val gy = if (hasGyro && !isGyroStale) latestGy else 0f
+                val gz = if (hasGyro && !isGyroStale) latestGz else 0f
+
                 val sample = MotionSample(
                     timestampEpochMs = now,
                     ax = ax,
                     ay = ay,
                     az = az,
-                    gx = latestGx,
-                    gy = latestGy,
-                    gz = latestGz
+                    gx = gx,
+                    gy = gy,
+                    gz = gz
                 )
                 sampleListener?.invoke(sample)
             }
