@@ -422,22 +422,22 @@ public class LiveAudioTestRunner {
 
     private boolean checkScreamDistress(AudioFrame frame, float snr) {
         // Biomechanical vocal distress criteria (True to ScreamDistressClassifier.kt):
-        // 1. Genuine high sound pressure level (SPL): dBFS > -22 dBFS AND SNR >= 14 dB above room noise
-        // 2. High scream-band energy ratio (1.5 kHz - 4.5 kHz concentration >= 35%)
-        // 3. Elevated spectral centroid (frequency center of mass >= 1850 Hz)
+        // 1. Genuine high sound pressure level (SPL): dBFS > -18 dBFS AND SNR >= 14 dB above room noise
+        // 2. High scream-band energy ratio (1.5 kHz - 4.5 kHz concentration >= 45%)
+        // 3. Elevated spectral centroid (frequency center of mass >= 2100 Hz)
         // 4. Temporal persistence: MUST sustain for at least 8 consecutive frames (>= 128 ms).
         //    Transients, consonant bursts (/s/, /t/, /ch/), and speech formants only last 30-70 ms.
 
-        boolean highEnergy = (frame.dbfs > -22.0f && snr >= 14.0f);
-        boolean highResonance = (frame.screamBandRatio >= 0.35f && frame.centroid >= 1850.0f);
+        boolean highEnergy = (frame.dbfs > -18.0f && snr >= 14.0f);
+        boolean highResonance = (frame.screamBandRatio >= 0.45f && frame.centroid >= 2100.0f);
 
         // Combined scream score matching ScreamDistressClassifier.kt weights
-        float bandScore = Math.max(0.0f, Math.min(1.0f, (frame.screamBandRatio - 0.25f) / 0.40f));
-        float centroidScore = Math.max(0.0f, Math.min(1.0f, (frame.centroid - 1400.0f) / 1600.0f));
-        float energyScore = Math.max(0.0f, Math.min(1.0f, (snr - 10.0f) / 16.0f));
+        float bandScore = Math.max(0.0f, Math.min(1.0f, (frame.screamBandRatio - 0.30f) / 0.40f));
+        float centroidScore = Math.max(0.0f, Math.min(1.0f, (frame.centroid - 1600.0f) / 1600.0f));
+        float energyScore = Math.max(0.0f, Math.min(1.0f, (snr - 12.0f) / 16.0f));
         float frameDistressScore = (bandScore * 0.40f) + (centroidScore * 0.35f) + (energyScore * 0.25f);
 
-        if (highEnergy && highResonance && frameDistressScore >= 0.60f) {
+        if (highEnergy && highResonance && frameDistressScore >= 0.65f) {
             consecutiveScreamFrames++;
         } else {
             consecutiveScreamFrames = Math.max(0, consecutiveScreamFrames - 1);
@@ -541,21 +541,25 @@ public class LiveAudioTestRunner {
         }
 
         // C. Acoustic Phonetic Feature Extraction
-        // 1. Onset Sibilant Detection: Inspect first ~160 ms of active speech (up to 10 frames)
-        int onsetFrames = Math.min(10, wordFrames.size());
+        // 1. Onset Sibilant Detection: Inspect first ~80 ms of active speech (first 5 frames)
+        int onsetFrames = Math.min(5, wordFrames.size());
         float onsetMaxZcr = 0.0f;
-        float onsetAvgZcr = 0.0f;
+        float onsetSumZcr = 0.0f;
+        float onsetHighMelSum = 0.0f;
         for (int i = 0; i < onsetFrames; i++) {
-            float z = wordFrames.get(i).zcr;
-            if (z > onsetMaxZcr) onsetMaxZcr = z;
-            onsetAvgZcr += z;
+            AudioFrame f = wordFrames.get(i);
+            if (f.zcr > onsetMaxZcr) onsetMaxZcr = f.zcr;
+            onsetSumZcr += f.zcr;
+            float highMel = 0.0f;
+            for (int b = 11; b < 16; b++) highMel += f.mel16[b];
+            onsetHighMelSum += (highMel / 5.0f);
         }
-        onsetAvgZcr /= onsetFrames;
+        float onsetAvgHighMel = onsetHighMelSum / onsetFrames;
 
         // An initial sibilant (/s/ in "save me" or "stop") produces high-frequency friction
-        boolean hasInitialSibilant = (onsetMaxZcr >= 0.16f || onsetAvgZcr >= 0.13f);
+        boolean hasInitialSibilant = (onsetMaxZcr >= 0.20f && onsetAvgHighMel >= -4.5f);
 
-        // 2. Syllable Peak Counting
+        // 2. Syllable Peak Counting with Hysteresis
         int syllables = countSyllablePeaks(wordFrames);
 
         // 3. Peak Vowel Formant / Centroid
@@ -576,13 +580,13 @@ public class LiveAudioTestRunner {
 
         // GROUP 1: Words with initial /s/ sibilant ("stop", "save me")
         if (hasInitialSibilant) {
-            // "save me" -> 2 syllables or longer phrase (>= 450 ms)
-            if (syllables >= 2 || durationMs >= 450) {
+            // "save me" -> 2 syllables or longer phrase (>= 500 ms)
+            if (syllables >= 2 || durationMs >= 500) {
                 matchedWord = "save me";
                 matchedLang = "EN";
                 confidence = 0.93f;
             }
-            // "stop" -> 1 syllable, short, compact duration (180 - 520 ms)
+            // "stop" -> 1 syllable, compact duration (180 - 520 ms)
             else {
                 matchedWord = "stop";
                 matchedLang = "EN";
@@ -591,26 +595,26 @@ public class LiveAudioTestRunner {
         }
         // GROUP 2: Words without initial /s/ sibilant ("help", "bachao", "udhavi", "kaapaathunga")
         else {
-            // 2.1 "kaapaathunga" (Tamil) -> Longest multi-syllable word (>= 580 ms, 3-4 syllables)
-            if ((syllables >= 3 && durationMs >= 580) || (syllables >= 4 && durationMs >= 500) || durationMs >= 850) {
+            // 2.1 "kaapaathunga" (Tamil) -> 4 syllables or long multi-syllable word (>= 750 ms)
+            if (syllables >= 4 || (syllables >= 3 && durationMs >= 750)) {
                 matchedWord = "kaapaathunga";
                 matchedLang = "TA";
                 confidence = 0.94f;
             }
             // 2.2 "udhavi" (Tamil) -> 3 syllables, duration 360 - 850 ms
-            else if (syllables == 3 && durationMs >= 360 && durationMs <= 850) {
+            else if (syllables == 3 || (durationMs >= 480 && syllables >= 2 && nucleusCentroid < 1200)) {
                 matchedWord = "udhavi";
                 matchedLang = "TA";
                 confidence = 0.90f;
             }
             // 2.3 "bachao" (Hindi) -> 2 syllables (ba - chao), duration 300 - 750 ms
-            else if (syllables == 2 && durationMs >= 300 && durationMs <= 750) {
+            else if (syllables == 2 && durationMs >= 300) {
                 matchedWord = "bachao";
                 matchedLang = "HI";
                 confidence = 0.89f;
             }
-            // 2.4 "help" (English) -> 1 syllable (or quick 1-2 bursts), duration 180 - 580 ms
-            else if (durationMs >= 180 && durationMs <= 580) {
+            // 2.4 "help" (English) -> 1 syllable, duration 180 - 580 ms
+            else if (syllables <= 1 && durationMs >= 180 && durationMs <= 580) {
                 matchedWord = "help";
                 matchedLang = "EN";
                 confidence = 0.91f;
@@ -662,26 +666,41 @@ public class LiveAudioTestRunner {
         }
 
         int peaks = 0;
-        boolean inPeak = false;
+        String state = "IDLE";
         float peakMax = -100.0f;
-        float valleyDipRequired = 3.5f; // 3.5 dB valley separation between syllables
+        float valleyMin = 100.0f;
+        float valleyDipRequired = 3.0f; // 3.0 dB valley separation between syllables
+        float threshold = adaptiveNoiseFloorDbfs + 6.0f;
 
-        for (int i = 0; i < smoothed.length; i++) {
-            float val = smoothed[i];
-            if (!inPeak) {
-                if (val > adaptiveNoiseFloorDbfs + 6.0f) {
-                    inPeak = true;
-                    peaks++;
-                    peakMax = val;
-                }
-            } else {
-                if (val > peakMax) {
-                    peakMax = val;
-                } else if (val < peakMax - valleyDipRequired) {
-                    // Dip into inter-syllable valley detected
-                    inPeak = false;
-                }
+        for (float v : smoothed) {
+            switch (state) {
+                case "IDLE":
+                    if (v >= threshold) {
+                        state = "RISING";
+                        peakMax = v;
+                    }
+                    break;
+                case "RISING":
+                    if (v > peakMax) {
+                        peakMax = v;
+                    } else if (v < peakMax - valleyDipRequired) {
+                        peaks++;
+                        state = "FALLING";
+                        valleyMin = v;
+                    }
+                    break;
+                case "FALLING":
+                    if (v < valleyMin) {
+                        valleyMin = v;
+                    } else if (v > valleyMin + valleyDipRequired && v >= threshold) {
+                        state = "RISING";
+                        peakMax = v;
+                    }
+                    break;
             }
+        }
+        if ("RISING".equals(state) && peakMax >= threshold) {
+            peaks++;
         }
 
         return Math.max(1, peaks);

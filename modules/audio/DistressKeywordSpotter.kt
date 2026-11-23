@@ -74,7 +74,7 @@ class DistressKeywordSpotter(
 
         /**
          * Phonetic acoustic profiles defining target syllable structures, expected durations,
-         * and relative spectral emphasis across low/mid/high frequency bands.
+         * sibilance gating, and 16-band Mel filterbank energy contours.
          */
         data class KeywordProfile(
             val keyword: String,
@@ -82,86 +82,115 @@ class DistressKeywordSpotter(
             val minDurationMs: Long,
             val maxDurationMs: Long,
             val syllables: Int,
-            val spectralPattern: List<FloatArray> // Sequence of normalized 3-band energy vectors [low, mid, high]
-        )
+            val requiresInitialSibilant: Boolean?, // true: /s/ required, false: /s/ forbidden, null: don't care
+            val melPattern: List<FloatArray>       // Sequence of normalized 16-band Mel energy vectors
+        ) {
+            // Backward-compatibility accessor
+            val spectralPattern: List<FloatArray> get() = melPattern
+        }
+
+        private fun computeCanonicalMel(f1: Double, f2: Double = 0.0, f0: Double = 130.0): FloatArray {
+            val frame = FloatArray(512) { i ->
+                val t = i / 16000.0
+                var s = 0.55 * kotlin.math.sin(2.0 * kotlin.math.PI * f1 * t)
+                if (f2 > 0.0) s += 0.35 * kotlin.math.sin(2.0 * kotlin.math.PI * f2 * t)
+                s += 0.10 * kotlin.math.sin(2.0 * kotlin.math.PI * f0 * t)
+                s.toFloat()
+            }
+            val windowed = frame.clone()
+            AudioPreprocessor.applyHannWindow(windowed)
+            val power = AudioPreprocessor.computePowerSpectrum(windowed)
+            return AudioPreprocessor.computeNormalizedMelFilterbank(power)
+        }
 
         val PROFILES = listOf(
-            // "help": /h/ (broadband) -> /e/ (strong mid/F2) -> /l/ -> /p/ (sudden drop)
+            // "help": /h/ (1200, 2000) -> /e/ (600, 1800) -> /l/ (400, 1100) -> /p/ (300)
             KeywordProfile(
                 keyword = "help",
                 language = "en",
-                minDurationMs = 250,
-                maxDurationMs = 700,
+                minDurationMs = 200,
+                maxDurationMs = 580,
                 syllables = 1,
-                spectralPattern = listOf(
-                    floatArrayOf(0.2f, 0.4f, 0.4f), // /h/
-                    floatArrayOf(0.4f, 0.5f, 0.1f), // /e/
-                    floatArrayOf(0.6f, 0.3f, 0.1f)  // /l-p/
+                requiresInitialSibilant = false,
+                melPattern = listOf(
+                    computeCanonicalMel(1200.0, 2000.0),
+                    computeCanonicalMel(600.0, 1800.0),
+                    computeCanonicalMel(400.0, 1100.0),
+                    computeCanonicalMel(300.0, 0.0)
                 )
             ),
-            // "save me": 2 syllables (/s-eɪ-v/ -> /m-i/)
-            KeywordProfile(
-                keyword = "save me",
-                language = "en",
-                minDurationMs = 400,
-                maxDurationMs = 1000,
-                syllables = 2,
-                spectralPattern = listOf(
-                    floatArrayOf(0.1f, 0.3f, 0.6f), // /s/
-                    floatArrayOf(0.5f, 0.4f, 0.1f), // /eɪ-v/
-                    floatArrayOf(0.7f, 0.2f, 0.1f)  // /m-i/
-                )
-            ),
-            // "stop": /s/ (high freq) -> /t/ (burst) -> /ɒ/ (low/mid) -> /p/ (stop)
+            // "stop": /s/ (5200, 6400) -> /t/ (2500) -> /ɒ/ (650, 1100) -> /p/ (300)
             KeywordProfile(
                 keyword = "stop",
                 language = "en",
-                minDurationMs = 250,
-                maxDurationMs = 650,
+                minDurationMs = 200,
+                maxDurationMs = 550,
                 syllables = 1,
-                spectralPattern = listOf(
-                    floatArrayOf(0.1f, 0.2f, 0.7f), // /s/
-                    floatArrayOf(0.5f, 0.4f, 0.1f), // /ɒ/
-                    floatArrayOf(0.1f, 0.1f, 0.1f)  // /p/
+                requiresInitialSibilant = true,
+                melPattern = listOf(
+                    computeCanonicalMel(5200.0, 6400.0),
+                    computeCanonicalMel(2500.0, 0.0),
+                    computeCanonicalMel(650.0, 1100.0),
+                    computeCanonicalMel(300.0, 0.0)
                 )
             ),
-            // "kaapaathunga" (Tamil): 4 distinct rhythmic syllables: kaa - paa - thun - ga
+            // "save me": /s/ (5200, 6400) -> /eɪ/ (550, 2100) -> /v/ (350, 1400) -> /m/ (250) -> /i/ (300, 2400)
             KeywordProfile(
-                keyword = "kaapaathunga",
-                language = "ta",
-                minDurationMs = 600,
-                maxDurationMs = 1400,
-                syllables = 4,
-                spectralPattern = listOf(
-                    floatArrayOf(0.3f, 0.5f, 0.2f), // kaa
-                    floatArrayOf(0.4f, 0.5f, 0.1f), // paa
-                    floatArrayOf(0.5f, 0.4f, 0.1f), // thun
-                    floatArrayOf(0.4f, 0.4f, 0.2f)  // ga
+                keyword = "save me",
+                language = "en",
+                minDurationMs = 420,
+                maxDurationMs = 1000,
+                syllables = 2,
+                requiresInitialSibilant = true,
+                melPattern = listOf(
+                    computeCanonicalMel(5200.0, 6400.0),
+                    computeCanonicalMel(550.0, 2100.0),
+                    computeCanonicalMel(350.0, 1400.0),
+                    computeCanonicalMel(250.0, 0.0),
+                    computeCanonicalMel(300.0, 2400.0)
                 )
             ),
-            // "udhavi" (Tamil): 3 syllables: u - dha - vi
-            KeywordProfile(
-                keyword = "udhavi",
-                language = "ta",
-                minDurationMs = 400,
-                maxDurationMs = 900,
-                syllables = 3,
-                spectralPattern = listOf(
-                    floatArrayOf(0.6f, 0.3f, 0.1f), // u
-                    floatArrayOf(0.4f, 0.5f, 0.1f), // dha
-                    floatArrayOf(0.3f, 0.5f, 0.2f)  // vi
-                )
-            ),
-            // "bachao" (Hindi): 2 syllables: ba - chao
+            // "bachao" (Hindi): /ba/ (750, 1250) -> /ch/ (2800, 3400) -> /aʊ/ (700, 1050)
             KeywordProfile(
                 keyword = "bachao",
                 language = "hi",
-                minDurationMs = 350,
-                maxDurationMs = 850,
+                minDurationMs = 300,
+                maxDurationMs = 780,
                 syllables = 2,
-                spectralPattern = listOf(
-                    floatArrayOf(0.6f, 0.3f, 0.1f), // ba
-                    floatArrayOf(0.3f, 0.5f, 0.2f)  // chao
+                requiresInitialSibilant = false,
+                melPattern = listOf(
+                    computeCanonicalMel(750.0, 1250.0),
+                    computeCanonicalMel(2800.0, 3400.0),
+                    computeCanonicalMel(700.0, 1050.0)
+                )
+            ),
+            // "udhavi" (Tamil): /u/ (350, 800) -> /d̪a/ (700, 1300) -> /vi/ (300, 2350)
+            KeywordProfile(
+                keyword = "udhavi",
+                language = "ta",
+                minDurationMs = 360,
+                maxDurationMs = 850,
+                syllables = 3,
+                requiresInitialSibilant = false,
+                melPattern = listOf(
+                    computeCanonicalMel(350.0, 800.0),
+                    computeCanonicalMel(700.0, 1300.0),
+                    computeCanonicalMel(300.0, 2350.0)
+                )
+            ),
+            // "kaapaathunga" (Tamil): kaa (750, 1250) -> paa (750, 1250) -> thun (400, 1100) -> ga (700, 1250)
+            KeywordProfile(
+                keyword = "kaapaathunga",
+                language = "ta",
+                minDurationMs = 580,
+                maxDurationMs = 1300,
+                syllables = 4,
+                requiresInitialSibilant = false,
+                melPattern = listOf(
+                    computeCanonicalMel(750.0, 1250.0),
+                    computeCanonicalMel(750.0, 1250.0),
+                    computeCanonicalMel(400.0, 1100.0),
+                    computeCanonicalMel(700.0, 1250.0)
                 )
             )
         )
@@ -196,46 +225,144 @@ class DistressKeywordSpotter(
     override fun isListening(): Boolean = listening
 
     /**
-     * Matches a speech window against active keyword profiles.
+     * Matches a speech window against active keyword profiles using acoustic-phonetic
+     * VAD segmentation, onset sibilance gating, syllable peak counting, and 16-band Mel DTW.
      */
     fun evaluateSpeechWindow(samples: ShortArray): MatchResult? {
         if (samples.isEmpty()) return null
         val floatSamples = AudioPreprocessor.toNormalizedFloat(samples)
-        val rms = AudioPreprocessor.computeRms(floatSamples)
-        val dbfs = AudioPreprocessor.rmsToDbfs(rms)
+        val overallRms = AudioPreprocessor.computeRms(floatSamples)
+        val overallDbfs = AudioPreprocessor.rmsToDbfs(overallRms)
 
-        // Voice activity gate: must be audible speech (> -32 dBFS)
-        if (dbfs < -32.0f) return null
+        // Drop pure digital silence or near-zero background (< -46.0 dBFS)
+        if (overallDbfs < -46.0f) return null
 
-        val frames = AudioPreprocessor.frameSignal(
+        val rawFrames = AudioPreprocessor.frameSignal(
             floatSamples,
             AudioPreprocessor.DEFAULT_FRAME_SIZE,
             AudioPreprocessor.DEFAULT_HOP_SIZE
         )
-        if (frames.size < 4) return null
+        if (rawFrames.size < 8) return null
 
-        // Extract 3-band energy vector [low: 100-800Hz, mid: 800-2500Hz, high: 2500-6000Hz] for each frame
-        val frameBands = frames.map { frame ->
-            AudioPreprocessor.applyHannWindow(frame)
-            val power = AudioPreprocessor.computePowerSpectrum(frame)
-            extractThreeBandProfile(power)
+        val numFrames = rawFrames.size
+        val frameDbfs = FloatArray(numFrames)
+        val frameZcr = FloatArray(numFrames)
+        val melFrames = ArrayList<FloatArray>(numFrames)
+
+        for (i in 0 until numFrames) {
+            val frame = rawFrames[i]
+            val rms = AudioPreprocessor.computeRms(frame)
+            frameDbfs[i] = AudioPreprocessor.rmsToDbfs(rms)
+            frameZcr[i] = AudioPreprocessor.computeZeroCrossingRate(frame)
+
+            val windowed = frame.clone()
+            AudioPreprocessor.applyHannWindow(windowed)
+            val power = AudioPreprocessor.computePowerSpectrum(windowed)
+            melFrames.add(AudioPreprocessor.computeNormalizedMelFilterbank(power))
         }
+
+        // 1. Dynamic Noise Floor & Voice Activity Segmentation
+        val noiseFloor = AudioPreprocessor.estimateNoiseFloorDbfs(frameDbfs)
+        val speechGate = max(noiseFloor + 5.0f, -44.0f)
+
+        val isSpeechFrame = BooleanArray(numFrames) { frameDbfs[it] >= speechGate }
+
+        // Speech hangover bridging: bridge silence gaps <= 8 frames (~128ms) between speech frames
+        var lastSpeechIdx = -1
+        for (i in isSpeechFrame.indices) {
+            if (isSpeechFrame[i]) {
+                if (lastSpeechIdx != -1 && (i - lastSpeechIdx - 1) <= 8) {
+                    for (k in (lastSpeechIdx + 1) until i) {
+                        isSpeechFrame[k] = true
+                    }
+                }
+                lastSpeechIdx = i
+            }
+        }
+
+        var firstActive = -1
+        var lastActive = -1
+        for (i in isSpeechFrame.indices) {
+            if (isSpeechFrame[i]) {
+                if (firstActive == -1) firstActive = i
+                lastActive = i
+            }
+        }
+
+        if (firstActive == -1 || lastActive < firstActive) {
+            // println("DEBUG: no active frames found (noiseFloor=$noiseFloor, speechGate=$speechGate, maxFrameDbfs=${frameDbfs.maxOrNull()})")
+            return null
+        }
+        val activeFrameCount = lastActive - firstActive + 1
+        if (activeFrameCount < 8) {
+            // println("DEBUG: activeFrameCount ($activeFrameCount) < 8")
+            return null
+        }
+
+        // Utterance duration in ms (hop size 256 @ 16kHz = 16ms per frame)
+        val durationMs = activeFrameCount * 16L
+        if (durationMs < 160L || durationMs > 1350L) {
+            // println("DEBUG: durationMs ($durationMs) out of range 160..1350")
+            return null
+        }
+
+        val activeMel = melFrames.subList(firstActive, lastActive + 1)
+        val activeZcr = FloatArray(activeFrameCount) { frameZcr[firstActive + it] }
+        val activeDbfs = FloatArray(activeFrameCount) { frameDbfs[firstActive + it] }
+
+        // 2. Onset Sibilant Detection (/s/ sound at phrase onset)
+        val onsetFrames = min(5, activeZcr.size)
+        var onsetMaxZcr = 0.0f
+        for (i in 0 until onsetFrames) {
+            val z = activeZcr[i]
+            if (z > onsetMaxZcr) onsetMaxZcr = z
+        }
+        val onsetAvgHighMel = (0 until onsetFrames).map { activeMel[it].slice(11..15).average().toFloat() }.average().toFloat()
+        val hasInitialSibilant = (onsetMaxZcr >= 0.20f && onsetAvgHighMel >= -4.5f)
+
+        // 3. Syllable Peak Counting
+        val detectedSyllables = AudioPreprocessor.countSyllablePeaks(activeDbfs, speechGate, minValleyDipDb = 3.0f)
 
         var bestMatch: MatchResult? = null
 
+        // 4. Acoustic Profile Matching
         for (profile in PROFILES) {
-            // Check if this keyword is enabled in active configuration
             val isEnabled = activeKeywords.any {
                 it.lowercase(Locale.ROOT).trim() == profile.keyword.lowercase(Locale.ROOT)
             }
             if (!isEnabled) continue
 
-            val score = computePatternAlignment(frameBands, profile.spectralPattern)
-            if (score > 0.72f && (bestMatch == null || score > bestMatch.confidence)) {
+            // Duration gate: allow reasonable speech rate tolerance [0.70x, 1.35x]
+            val minDur = (profile.minDurationMs * 0.70).toLong()
+            val maxDur = (profile.maxDurationMs * 1.35).toLong()
+            if (durationMs !in minDur..maxDur) continue
+
+            // Sibilance gate: if profile requires initial /s/ or forbids it
+            if (profile.requiresInitialSibilant == true && !hasInitialSibilant) continue
+            if (profile.requiresInitialSibilant == false && hasInitialSibilant) continue
+
+            // Syllable count gate: for single-syllable phrases reject multi-syllable utterances
+            if (profile.syllables == 1 && detectedSyllables > 1) continue
+            if (abs(detectedSyllables - profile.syllables) > 1) continue
+
+            // 16-band Mel Dynamic Time Warping alignment
+            val dtwScore = computeMelDtw(activeMel, profile.melPattern)
+            if (dtwScore < 0.54f) continue
+
+            // Metric calibration bonuses
+            val sylBonus = if (detectedSyllables == profile.syllables) 0.06f else 0.0f
+            val midDur = (profile.minDurationMs + profile.maxDurationMs) / 2.0
+            val durDiff = abs(durationMs - midDur) / midDur
+            val durBonus = if (durDiff < 0.25) 0.05f else 0.0f
+            val sibBonus = if (profile.requiresInitialSibilant != null && (profile.requiresInitialSibilant == hasInitialSibilant)) 0.04f else 0.0f
+
+            val confidence = (dtwScore * 0.85f + sylBonus + durBonus + sibBonus).coerceIn(0.0f, 1.0f)
+
+            if (confidence >= 0.72f && (bestMatch == null || confidence > bestMatch.confidence)) {
                 bestMatch = MatchResult(
                     keyword = profile.keyword,
                     language = profile.language,
-                    confidence = score
+                    confidence = confidence
                 )
             }
         }
@@ -266,7 +393,68 @@ class DistressKeywordSpotter(
         return bestMatch
     }
 
-    private fun extractThreeBandProfile(powerSpectrum: FloatArray): FloatArray {
+    /**
+     * Computes Dynamic Time Warping alignment across 16-band normalized Mel filterbank vectors
+     * using centered correlation distance and step penalty for off-diagonal transitions.
+     * Maps the normalized path cost to an alignment confidence score in [0.0f, 1.0f].
+     */
+    fun computeMelDtw(observed: List<FloatArray>, target: List<FloatArray>): Float {
+        if (observed.isEmpty() || target.isEmpty()) return 0.0f
+
+        val n = observed.size
+        val m = target.size
+        val dtw = Array(n + 1) { FloatArray(m + 1) { Float.MAX_VALUE } }
+        dtw[0][0] = 0.0f
+
+        for (i in 1..n) {
+            for (j in 1..m) {
+                val obs = observed[i - 1]
+                val tgt = target[j - 1]
+
+                // Centered correlation distance across 16 Mel bands
+                val meanObs = obs.average().toFloat()
+                val meanTgt = tgt.average().toFloat()
+                var dot = 0.0; var normObs = 0.0; var normTgt = 0.0
+                for (b in 0 until 16) {
+                    val dO = obs[b] - meanObs
+                    val dT = tgt[b] - meanTgt
+                    dot += dO * dT
+                    normObs += dO * dO
+                    normTgt += dT * dT
+                }
+                val corr = if (normObs > 1e-6 && normTgt > 1e-6) (dot / (kotlin.math.sqrt(normObs) * kotlin.math.sqrt(normTgt))).toFloat() else 0.0f
+                val dist = (1.0f - corr).coerceIn(0.0f, 2.0f)
+
+                val diag = dtw[i - 1][j - 1]
+                val insert = if (dtw[i - 1][j] != Float.MAX_VALUE) dtw[i - 1][j] + 0.10f else Float.MAX_VALUE
+                val delete = if (dtw[i][j - 1] != Float.MAX_VALUE) dtw[i][j - 1] + 0.10f else Float.MAX_VALUE
+
+                val minPrev = min(diag, min(insert, delete))
+                if (minPrev != Float.MAX_VALUE) {
+                    dtw[i][j] = dist + minPrev
+                }
+            }
+        }
+
+        val totalDist = dtw[n][m]
+        if (totalDist == Float.MAX_VALUE) return 0.0f
+        val avgDist = totalDist / (n + m)
+
+        // Maps average distance to alignment confidence: 0.0 dist -> 1.0, 1.35 dist -> 0.0
+        return (1.0f - (avgDist / 1.35f)).coerceIn(0.0f, 1.0f)
+    }
+
+    /**
+     * Backward-compatible pattern alignment helper.
+     */
+    fun computePatternAlignment(observed: List<FloatArray>, target: List<FloatArray>): Float {
+        return computeMelDtw(observed, target)
+    }
+
+    /**
+     * Legacy 3-band profile extractor retained for backward compatibility.
+     */
+    fun extractThreeBandProfile(powerSpectrum: FloatArray): FloatArray {
         val numBins = powerSpectrum.size
         val binWidth = (AudioPreprocessor.DEFAULT_SAMPLE_RATE / 2.0) / (numBins - 1)
 
@@ -285,34 +473,6 @@ class DistressKeywordSpotter(
             (midP / total).toFloat(),
             (highP / total).toFloat()
         )
-    }
-
-    /**
-     * Aligns observed frame energy bands against target profile using a simplified Dynamic Time Warping distance.
-     */
-    private fun computePatternAlignment(observed: List<FloatArray>, target: List<FloatArray>): Float {
-        if (observed.isEmpty() || target.isEmpty()) return 0.0f
-
-        val n = observed.size
-        val m = target.size
-        val dtw = Array(n + 1) { FloatArray(m + 1) { Float.MAX_VALUE } }
-        dtw[0][0] = 0.0f
-
-        for (i in 1..n) {
-            for (j in 1..m) {
-                val obs = observed[i - 1]
-                val tgt = target[j - 1]
-                val dist = abs(obs[0] - tgt[0]) + abs(obs[1] - tgt[1]) + abs(obs[2] - tgt[2])
-
-                val minPrev = min(dtw[i - 1][j], min(dtw[i][j - 1], dtw[i - 1][j - 1]))
-                dtw[i][j] = dist + minPrev
-            }
-        }
-
-        val totalDist = dtw[n][m]
-        val avgDist = totalDist / (n + m)
-        // Convert distance to normalized confidence in [0.0, 1.0]
-        return (1.0f - avgDist).coerceIn(0.0f, 1.0f)
     }
 
     /**

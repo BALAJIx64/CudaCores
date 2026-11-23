@@ -178,24 +178,299 @@ object AudioModuleTestHarness {
     fun testDistressKeywordSpotter(): TestResult {
         return try {
             val spotter = DistressKeywordSpotter()
-            val flow = spotter.startListening(listOf("help", "kaapaathunga", "bachao"))
+            spotter.startListening(DistressKeywordSpotter.DEFAULT_KEYWORDS)
             check(spotter.isListening()) { "Spotter should report listening active" }
 
-            // Generate synthetic speech-like window for "help"
-            val helpSamples = ShortArray(8000) { i ->
-                val envelope = if (i < 2000) 0.3 else if (i < 6000) 0.8 else 0.2
-                (sin(2.0 * PI * 1200.0 * i / 16000.0) * envelope * 12000).toInt().toShort()
+            var positiveTested = 0
+            var positivePassed = 0
+            var negativeTested = 0
+            var negativePassed = 0
+            val failureDetails = mutableListOf<String>()
+
+            // 1. Positive Tests for all 6 supported phrases across 3 languages
+            val supportedPhrases = listOf(
+                "help" to "en",
+                "stop" to "en",
+                "save me" to "en",
+                "bachao" to "hi",
+                "udhavi" to "ta",
+                "kaapaathunga" to "ta"
+            )
+
+            for ((keyword, expectedLang) in supportedPhrases) {
+                // Base standard utterance
+                positiveTested++
+                val baseAudio = synthesizeKeywordWindow(keyword)
+                val match = spotter.evaluateSpeechWindow(baseAudio)
+                if (match != null && match.keyword == keyword && match.confidence >= 0.72f) {
+                    positivePassed++
+                } else {
+                    failureDetails.add("Missed positive: '$keyword' (got: ${match?.keyword} conf: ${match?.confidence})")
+                }
+
+                // Variation A: Female speaker (+15% pitch/formant shift)
+                positiveTested++
+                val femaleAudio = synthesizeKeywordWindow(keyword, f0 = 220.0, formantScale = 1.15)
+                val femaleMatch = spotter.evaluateSpeechWindow(femaleAudio)
+                if (femaleMatch != null && femaleMatch.keyword == keyword && femaleMatch.confidence >= 0.70f) {
+                    positivePassed++
+                } else {
+                    failureDetails.add("Missed female variation: '$keyword' (got: ${femaleMatch?.keyword} conf: ${femaleMatch?.confidence})")
+                }
+
+                // Variation B: Fast speech rate (0.85x duration)
+                positiveTested++
+                val fastAudio = synthesizeKeywordWindow(keyword, durationScale = 0.85)
+                val fastMatch = spotter.evaluateSpeechWindow(fastAudio)
+                if (fastMatch != null && fastMatch.keyword == keyword && fastMatch.confidence >= 0.70f) {
+                    positivePassed++
+                } else {
+                    failureDetails.add("Missed fast variation: '$keyword' (got: ${fastMatch?.keyword} conf: ${fastMatch?.confidence})")
+                }
+
+                // Variation C: Slow speech rate (1.18x duration)
+                positiveTested++
+                val slowAudio = synthesizeKeywordWindow(keyword, durationScale = 1.18)
+                val slowMatch = spotter.evaluateSpeechWindow(slowAudio)
+                if (slowMatch != null && slowMatch.keyword == keyword && slowMatch.confidence >= 0.70f) {
+                    positivePassed++
+                } else {
+                    failureDetails.add("Missed slow variation: '$keyword' (got: ${slowMatch?.keyword} conf: ${slowMatch?.confidence})")
+                }
+
+                // Variation D: Quiet speech (-30 dBFS)
+                positiveTested++
+                val quietAudio = synthesizeKeywordWindow(keyword, amplitudeScale = 0.35)
+                val quietMatch = spotter.evaluateSpeechWindow(quietAudio)
+                if (quietMatch != null && quietMatch.keyword == keyword && quietMatch.confidence >= 0.70f) {
+                    positivePassed++
+                } else {
+                    failureDetails.add("Missed quiet variation: '$keyword' (got: ${quietMatch?.keyword} conf: ${quietMatch?.confidence})")
+                }
             }
 
-            val matchResult = spotter.evaluateSpeechWindow(helpSamples)
-            // Even if match distance varies with synthetic tones, engine must evaluate safely without exceptions
+            // 2. Negative Tests (Silence, Room Noise, Keyboard Clicks, Conversational Speech)
+            // Negative Case 1: Pure digital silence
+            negativeTested++
+            val silence = ShortArray(19200) { 0 }
+            val silenceMatch = spotter.evaluateSpeechWindow(silence)
+            if (silenceMatch == null) {
+                negativePassed++
+            } else {
+                failureDetails.add("False positive on silence: '${silenceMatch.keyword}' (${silenceMatch.confidence})")
+            }
+
+            // Negative Case 2: Room background noise (50/100 Hz hum + low-freq hiss at -35 dBFS)
+            // Specifically verifies that room noise NO LONGER matches "save me"!
+            negativeTested++
+            val roomNoise = ShortArray(19200) { i ->
+                val hum50 = sin(2.0 * PI * 50.0 * i / 16000.0) * 800.0
+                val hum100 = sin(2.0 * PI * 100.0 * i / 16000.0) * 400.0
+                val hiss = ((i * 1103515245 + 12345) % 300).toDouble()
+                (hum50 + hum100 + hiss).toInt().toShort()
+            }
+            val roomMatch = spotter.evaluateSpeechWindow(roomNoise)
+            if (roomMatch == null) {
+                negativePassed++
+            } else {
+                failureDetails.add("False positive on room noise: '${roomMatch.keyword}' (${roomMatch.confidence})")
+            }
+
+            // Negative Case 3: Keyboard clicks (impulsive transient clicks)
+            negativeTested++
+            val keyboardClicks = ShortArray(19200) { 0 }
+            val clickLocations = listOf(3000, 8000, 14000)
+            for (clickStart in clickLocations) {
+                for (k in 0 until 120) { // ~7.5 ms click
+                    keyboardClicks[clickStart + k] = (sin(2.0 * PI * 3500.0 * k / 16000.0) * 14000 * Math.exp(-k / 20.0)).toInt().toShort()
+                }
+            }
+            val clickMatch = spotter.evaluateSpeechWindow(keyboardClicks)
+            if (clickMatch == null) {
+                negativePassed++
+            } else {
+                failureDetails.add("False positive on keyboard clicks: '${clickMatch.keyword}' (${clickMatch.confidence})")
+            }
+
+            // Negative Case 4: Ordinary conversational words ("hello", "tomorrow", "weather", "table")
+            val conversationalWords = listOf("hello", "tomorrow", "weather", "table")
+            for (word in conversationalWords) {
+                negativeTested++
+                val nonKeywordAudio = synthesizeConversationalWord(word)
+                val convMatch = spotter.evaluateSpeechWindow(nonKeywordAudio)
+                if (convMatch == null) {
+                    negativePassed++
+                } else {
+                    failureDetails.add("False positive on conversational word '$word': '${convMatch.keyword}' (${convMatch.confidence})")
+                }
+            }
+
             spotter.stopListening()
             check(!spotter.isListening()) { "Spotter should report inactive" }
 
-            TestResult("testDistressKeywordSpotter", true, "Multi-language keyword spotting engine verified.")
+            val positiveAcc = (positivePassed.toDouble() / positiveTested) * 100.0
+            val falsePositives = negativeTested - negativePassed
+            val message = "Positive: $positivePassed/$positiveTested (%.1f%%), False Positives: $falsePositives/$negativeTested. Details: ${failureDetails.joinToString("; ")}".format(positiveAcc)
+
+            val passed = (positivePassed >= (positiveTested * 0.85).toInt()) && (falsePositives == 0)
+            TestResult("testDistressKeywordSpotter", passed, message)
         } catch (e: Throwable) {
             TestResult("testDistressKeywordSpotter", false, "Failed: ${e.message}")
         }
+    }
+
+    // --- Synthetic Acoustic Speech Generator for Positive & Negative Tests ---
+    private data class Phone(val f1: Double, val f2: Double, val durMs: Int)
+    private data class Syllable(val phones: List<Phone>)
+
+    private fun synthesizeKeywordWindow(
+        keyword: String,
+        f0: Double = 130.0,
+        formantScale: Double = 1.0,
+        durationScale: Double = 1.0,
+        amplitudeScale: Double = 1.0
+    ): ShortArray {
+        val syllables = when (keyword) {
+            "help" -> listOf(
+                Syllable(listOf(
+                    Phone(1200.0, 2000.0, 70), // /h/
+                    Phone(600.0, 1800.0, 170),  // /e/
+                    Phone(400.0, 1100.0, 80),   // /l/
+                    Phone(300.0, 0.0, 50)       // /p/
+                ))
+            )
+            "stop" -> listOf(
+                Syllable(listOf(
+                    Phone(5200.0, 6400.0, 100), // /s/
+                    Phone(2500.0, 0.0, 30),     // /t/
+                    Phone(650.0, 1100.0, 170),  // /ɒ/
+                    Phone(300.0, 0.0, 60)       // /p/
+                ))
+            )
+            "save me" -> listOf(
+                Syllable(listOf(
+                    Phone(5200.0, 6400.0, 110), // /s/
+                    Phone(550.0, 2100.0, 180),  // /eɪ/
+                    Phone(350.0, 1400.0, 60)    // /v/
+                )),
+                Syllable(listOf(
+                    Phone(250.0, 0.0, 70),      // /m/
+                    Phone(300.0, 2400.0, 180)   // /i/
+                ))
+            )
+            "bachao" -> listOf(
+                Syllable(listOf(
+                    Phone(750.0, 1250.0, 180)   // /ba/
+                )),
+                Syllable(listOf(
+                    Phone(2800.0, 3400.0, 80),  // /ch/
+                    Phone(700.0, 1050.0, 220)   // /aʊ/
+                ))
+            )
+            "udhavi" -> listOf(
+                Syllable(listOf(
+                    Phone(350.0, 800.0, 160)    // /u/
+                )),
+                Syllable(listOf(
+                    Phone(700.0, 1300.0, 180)   // /d̪a/
+                )),
+                Syllable(listOf(
+                    Phone(300.0, 2350.0, 220)   // /vi/
+                ))
+            )
+            "kaapaathunga" -> listOf(
+                Syllable(listOf(Phone(750.0, 1250.0, 220))), // kaa
+                Syllable(listOf(Phone(750.0, 1250.0, 200))), // paa
+                Syllable(listOf(Phone(400.0, 1100.0, 180))), // thun
+                Syllable(listOf(Phone(700.0, 1250.0, 180)))  // ga
+            )
+            else -> emptyList()
+        }
+
+        val isSibilant = (keyword == "stop" || keyword == "save me")
+        return renderSyllableSequence(syllables, f0, formantScale, durationScale, amplitudeScale, unvoicedFirst = isSibilant)
+    }
+
+    private fun synthesizeConversationalWord(word: String): ShortArray {
+        val syllables = when (word) {
+            "hello" -> listOf(
+                Syllable(listOf(Phone(1200.0, 0.0, 60), Phone(600.0, 1800.0, 160))),
+                Syllable(listOf(Phone(500.0, 900.0, 200)))
+            )
+            "tomorrow" -> listOf(
+                Syllable(listOf(Phone(2000.0, 0.0, 25), Phone(500.0, 1400.0, 120))),
+                Syllable(listOf(Phone(700.0, 1100.0, 180))),
+                Syllable(listOf(Phone(500.0, 900.0, 200)))
+            )
+            "weather" -> listOf(
+                Syllable(listOf(Phone(400.0, 1000.0, 140))),
+                Syllable(listOf(Phone(600.0, 1800.0, 160), Phone(500.0, 1300.0, 140)))
+            )
+            "table" -> listOf(
+                Syllable(listOf(Phone(2500.0, 0.0, 30), Phone(550.0, 2000.0, 200))),
+                Syllable(listOf(Phone(400.0, 1100.0, 120)))
+            )
+            else -> emptyList()
+        }
+        return renderSyllableSequence(syllables, 130.0, 1.0, 1.0, 1.0, unvoicedFirst = false)
+    }
+
+    private fun renderSyllableSequence(
+        syllables: List<Syllable>,
+        f0: Double,
+        formantScale: Double,
+        durationScale: Double,
+        amplitudeScale: Double,
+        unvoicedFirst: Boolean
+    ): ShortArray {
+        // Standard snapshot window: 1.2s at 16000 Hz = 19200 samples
+        val window = ShortArray(19200)
+
+        // Add 250ms quiet lead-in noise (-55 dBFS)
+        val leadInSamples = 4000
+        for (i in 0 until 19200) {
+            val dither = ((i * 1103515245 + 12345) % 15).toDouble()
+            window[i] = dither.toInt().toShort()
+        }
+
+        var offset = leadInSamples
+        val interSyllableDipSamples = (25 * 16.0).toInt() // 25ms dip between syllables
+
+        for ((sylIdx, syl) in syllables.withIndex()) {
+            val sylMs = (syl.phones.sumOf { it.durMs } * durationScale).toInt()
+            val sylSamples = (sylMs * 16.0).toInt()
+            var phoneOffset = 0
+
+            for ((pIdx, phone) in syl.phones.withIndex()) {
+                val pSamples = ((phone.durMs * durationScale) * 16.0).toInt()
+                val isUnvoiced = (sylIdx == 0 && pIdx == 0 && unvoicedFirst)
+                val phoneAmp = if (phone.f1 > 2000.0 || (phone.f2 == 0.0 && phone.f1 < 400.0)) 0.45 else 1.0
+
+                for (i in 0 until pSamples) {
+                    if (offset + phoneOffset + i >= 19200) break
+                    val t = i / 16000.0
+
+                    // Syllable-level envelope
+                    val posInSyl = phoneOffset + i
+                    val sylRamp = when {
+                        posInSyl < sylSamples * 0.12 -> posInSyl / (sylSamples * 0.12)
+                        posInSyl > sylSamples * 0.88 -> (sylSamples - posInSyl) / (sylSamples * 0.12)
+                        else -> 1.0
+                    }
+
+                    var s = 0.55 * sin(2.0 * PI * (phone.f1 * formantScale) * t)
+                    if (phone.f2 > 0.0) s += 0.35 * sin(2.0 * PI * (phone.f2 * formantScale) * t)
+                    if (!isUnvoiced) s += 0.10 * sin(2.0 * PI * f0 * t)
+
+                    val value = (s * sylRamp * 14000.0 * amplitudeScale * phoneAmp).toInt().coerceIn(-32768, 32767).toShort()
+                    window[offset + phoneOffset + i] = value
+                }
+                phoneOffset += pSamples
+            }
+            offset += sylSamples + interSyllableDipSamples
+        }
+
+        return window
     }
 
     // --- Test 6: Two-Stage Audio Evidence Recorder ---
@@ -259,18 +534,23 @@ object AudioModuleTestHarness {
             TestResult("testErrorHandlingAndInterruption", false, "Failed: ${e.message}")
         }
     }
+
+    @JvmStatic
+    fun main(args: Array<String>) {
+        val result = runAllTests()
+        println("=== AUDIO MODULE TEST RESULTS ===")
+        println("Total: ${result.total}, Passed: ${result.passed}, Failed: ${result.failed}")
+        for (r in result.results) {
+            val status = if (r.passed) "[PASS]" else "[FAIL]"
+            println("$status ${r.name}: ${r.message}")
+        }
+        if (result.failed > 0) {
+            System.exit(1)
+        }
+    }
 }
 
 fun main() {
-    val result = AudioModuleTestHarness.runAllTests()
-    println("=== AUDIO MODULE TEST RESULTS ===")
-    println("Total: ${result.total}, Passed: ${result.passed}, Failed: ${result.failed}")
-    for (r in result.results) {
-        val status = if (r.passed) "[PASS]" else "[FAIL]"
-        println("$status ${r.name}: ${r.message}")
-    }
-    if (result.failed > 0) {
-        System.exit(1)
-    }
+    AudioModuleTestHarness.main(emptyArray())
 }
 
