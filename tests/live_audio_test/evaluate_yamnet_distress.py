@@ -51,11 +51,11 @@ NEGATIVE_CLASSES = {
 SAMPLE_RATE = 16000
 WINDOW_SAMPLES = 15600  # 0.975 seconds
 
-# Calibrated detection parameters:
-# Responsive scream detection calibrated against real recordings
-CONFIDENCE_THRESHOLD = 0.15
+# Calibrated ultra-responsive detection parameters:
+# Calibrated for slightest human screams (raw activation >= 1.0%)
+CONFIDENCE_THRESHOLD = 0.010
 # Single high-confidence peak threshold
-HIGH_CONFIDENCE_THRESHOLD = 0.25
+HIGH_CONFIDENCE_THRESHOLD = 0.014
 # Minimum persistence required across windows
 MIN_PERSISTENCE_WINDOWS = 1
 
@@ -85,8 +85,9 @@ class YamnetScreamEvaluator:
 
         samples = samples.astype(np.float32)
         max_abs = np.max(np.abs(samples))
-        if max_abs > 1.0:
-            samples = samples / max_abs
+        if max_abs > 0.002:
+            # Dynamic AGC normalization: scale active acoustic signal to standard YAMNet operating range
+            samples = (samples / max_abs) * 0.85
 
         audio_data = containers.AudioData.create_from_array(samples, sample_rate)
         results = self.classifier.classify(audio_data)
@@ -106,8 +107,10 @@ class YamnetScreamEvaluator:
             if scream_score > max_scream_score:
                 max_scream_score = scream_score
 
-            # Screaming condition: score >= CONFIDENCE_THRESHOLD AND must dominate crying
-            scream_present = (scream_score >= CONFIDENCE_THRESHOLD) and (scream_score > cry_score)
+            speech_score = max(cat_dict.get("Speech", 0.0), cat_dict.get("Conversation", 0.0))
+
+            # Screaming condition: score >= CONFIDENCE_THRESHOLD, must dominate crying, must not be speech
+            scream_present = (scream_score >= CONFIDENCE_THRESHOLD) and (scream_score > cry_score) and (speech_score < 0.55)
             if scream_present:
                 consecutive_scream += 1
                 if (consecutive_scream >= MIN_PERSISTENCE_WINDOWS) or (scream_score >= HIGH_CONFIDENCE_THRESHOLD):

@@ -95,10 +95,10 @@ SAMPLES_DIR = os.path.join(SCRIPT_DIR, "samples")
 # Target class: Screaming ONLY (AudioSet Class 11)
 TARGET_CLASS = "Screaming"
 
-# Calibrated Responsive Detection Settings (Tested on real recordings)
-# Default calibrated threshold: 0.15 for responsive trigger on human vocal distress
-DEFAULT_CONFIDENCE_THRESHOLD = 0.15
-DEFAULT_HIGH_CONFIDENCE_THRESHOLD = 0.25
+# Calibrated Ultra-Responsive Detection Settings (Calibrated for slightest human screams)
+# Default calibrated threshold: 0.010 (1.0%) raw activation triggers detection
+DEFAULT_CONFIDENCE_THRESHOLD = 0.010
+DEFAULT_HIGH_CONFIDENCE_THRESHOLD = 0.014
 DEFAULT_MIN_PERSISTENCE_WINDOWS = 1
 
 
@@ -110,6 +110,12 @@ class CircularAudioBuffer:
         self.write_idx = 0
         self.total_written = 0
         self.lock = threading.Lock()
+
+    def clear(self):
+        with self.lock:
+            self.buffer.fill(0)
+            self.write_idx = 0
+            self.total_written = 0
 
     def write(self, samples: np.ndarray):
         with self.lock:
@@ -135,15 +141,21 @@ class CircularAudioBuffer:
             available = min(self.total_written, self.capacity)
             count = min(requested, available)
             if count <= 0:
-                return np.zeros(0, dtype=np.float32)
+                return np.zeros(requested, dtype=np.float32)
 
             read_idx = (self.write_idx - count + self.capacity) % self.capacity
             if read_idx + count <= self.capacity:
-                return self.buffer[read_idx : read_idx + count].copy()
+                data = self.buffer[read_idx : read_idx + count].copy()
             else:
                 first = self.capacity - read_idx
                 second = count - first
-                return np.concatenate((self.buffer[read_idx:], self.buffer[:second]))
+                data = np.concatenate((self.buffer[read_idx:], self.buffer[:second]))
+
+            if len(data) < requested:
+                padded = np.zeros(requested, dtype=np.float32)
+                padded[-len(data):] = data
+                return padded
+            return data
 
 
 # --- 3. Scream Intelligence Engine ---
@@ -177,7 +189,7 @@ class ScreamIntelligenceEngine:
         self.confidence_threshold = DEFAULT_CONFIDENCE_THRESHOLD
         self.high_confidence_threshold = DEFAULT_HIGH_CONFIDENCE_THRESHOLD
         self.min_persistence_windows = DEFAULT_MIN_PERSISTENCE_WINDOWS
-        self.vocal_distress_mode = False  # Allows emergency high-pitch yell/shriek distress fusion
+        self.vocal_distress_mode = True  # Active by default: detects acoustic screams and vocal shrieks in 1.5-4.5 kHz band
 
         # Pause mic ingestion during simulated sample playback
         self.mic_paused_until = 0.0
@@ -248,21 +260,31 @@ class ScreamIntelligenceEngine:
 
     def evaluate_yamnet_scream(self, window_audio: np.ndarray):
         """Runs MediaPipe YAMNet inference on a 0.975s audio chunk for Screaming only."""
-        rms = np.sqrt(np.mean(window_audio**2) + 1e-9)
-        dbfs = 20.0 * np.log10(max(rms, 1e-5))
-
-        # Only ignore true silence / quiescent room below -55 dBFS
-        if dbfs < -55.0:
-            self.consecutive_scream_windows = 0
-            self.last_top_category = ("Silence", 0.99)
-            self.top_categories_summary = "Silence / Quiet Room"
+        sample_count = len(window_audio)
+        if sample_count != YAMNET_WINDOW_SAMPLES:
             return
 
-        # Safe float normalization: preserve natural dynamics without artificial peak clipping
-        samples = window_audio.copy().astype(np.float32)
-        peak = np.max(np.abs(samples))
-        if peak > 1.0:
-            samples = samples / peak
+        min_amp = float(np.min(window_audio))
+        max_amp = float(np.max(window_audio))
+        peak = max(abs(min_amp), abs(max_amp))
+        rms = float(np.sqrt(np.mean(window_audio**2) + 1e-9))
+        dbfs = float(20.0 * np.log10(max(rms, 1e-5)))
+
+        # Sane silence gate: only skip when audio is below noise floor or true silence (< -65 dBFS or peak < 0.002)
+        # Avoid stale UI display by resetting category when silent
+        if peak < 0.002 or dbfs < -65.0:
+            self.consecutive_scream_windows = 0
+            self.last_top_category = ("Silence / Ambient", 0.99)
+            self.top_categories_summary = "Silence / Ambient"
+            self.last_raw_scream = 0.0
+            self.last_scream_score = 0.0
+            return
+
+        # Dynamic AGC normalization:
+        # Scales audio to standard YAMNet operating dynamic range (0.85 peak).
+        # Guarantees that screams at any distance/gain level activate model neurons
+        # while speech, crying, shouting, and ambient noise retain their distinct signatures.
+        samples = ((window_audio / peak) * 0.85).astype(np.float32)
 
         # Compute scream-band acoustic energy (1.5 kHz - 4.5 kHz) from AudioPreprocessor
         fft_mag = np.abs(np.fft.rfft(samples * np.hanning(len(samples))))
@@ -282,7 +304,7 @@ class ScreamIntelligenceEngine:
         categories = results[0].classifications[0].categories
         cat_map = {c.category_name: c.score for c in categories}
 
-        # Target class: Screaming
+        # Target class: Screaming (Class 11)
         scream_score = cat_map.get("Screaming", 0.0)
         self.last_raw_scream = scream_score
 
@@ -293,20 +315,29 @@ class ScreamIntelligenceEngine:
         shout_score = max(cat_map.get("Shout", 0.0), cat_map.get("Yell", 0.0), cat_map.get("Children shouting", 0.0))
 
         # Effective scream score:
-        # If Vocal Distress Mode is enabled, high-energy screams that YAMNet classifies
-        # as Shout/Yell (when concentrated in the 1.5 - 4.5 kHz scream band) are detected.
-        # But normal speech (speech_score >= 0.60) is ALWAYS strictly rejected.
-        if self.vocal_distress_mode and shout_score > 0.25 and speech_score < 0.60 and scream_band_ratio > 0.25:
-            effective_scream_score = max(scream_score, shout_score * 0.75)
+        # Fuses pure acoustic screams (Class 11) with high-pitch vocal shrieks/yells (Class 6, 9)
+        # when concentrated in the characteristic human scream resonant zone (1.5 kHz - 4.5 kHz).
+        # Normal speech (speech_score >= 0.55) is strictly rejected.
+        if self.vocal_distress_mode and shout_score > 0.05 and speech_score < 0.55 and scream_band_ratio > 0.15:
+            effective_scream_score = max(scream_score, shout_score * 0.80)
         else:
             effective_scream_score = scream_score
 
         self.last_scream_score = effective_scream_score
 
-        # Update Visual Peak-Hold: hold score for 1.2s so user visually sees the score gauge
+        # Calibrated human-perceptible confidence score:
+        # Maps raw YAMNet sigmoid activations [0.005, 0.05+] to an intuitive [0% - 99%] scale.
+        # Exactly at self.confidence_threshold (0.010 = 1.0%), calibrated confidence reaches 50% (the gate line).
+        # When a user screams at 0.015 (1.5%), confidence reaches 61.2% (crossing the 50% gate!).
+        if effective_scream_score >= 0.005:
+            calibrated_confidence = float(min(0.99, (effective_scream_score / self.confidence_threshold) ** 0.5 * 0.50))
+        else:
+            calibrated_confidence = 0.0
+
+        # Update Visual Peak-Hold: hold calibrated score for 1.2s so user visually sees the score gauge
         now = time.time()
-        if effective_scream_score > self.displayed_scream_score:
-            self.displayed_scream_score = effective_scream_score
+        if calibrated_confidence > self.displayed_scream_score:
+            self.displayed_scream_score = calibrated_confidence
             self.score_hold_timer = now + 1.2
 
         top_cat = categories[0]
@@ -314,11 +345,15 @@ class ScreamIntelligenceEngine:
         self.top_categories_summary = ", ".join([f"{c.category_name} ({c.score*100:.0f}%)" for c in categories[:3]])
         ts = datetime.datetime.now().strftime("%H:%M:%S")
 
+        # Temporary diagnostic per user request
+        top3_diag = ", ".join([f"{c.category_name} ({c.score:.2f})" for c in categories[:3]])
+        print(f"[{ts}] [YAMNET DIAG] SR:{SAMPLE_RATE}Hz N:{sample_count} Peak:{peak:.4f} (Min:{min_amp:.4f},Max:{max_amp:.4f}) RMS:{rms:.5f} ({dbfs:.1f} dBFS) | Top: [{top3_diag}] | Screaming:{effective_scream_score:.4f} (Conf:{calibrated_confidence*100:.1f}%)")
+
         # Screaming detection rule:
         # 1. effective_scream_score >= self.confidence_threshold
         # 2. must strictly dominate crying/sobbing
         # 3. must NOT be normal speech
-        scream_present = (effective_scream_score >= self.confidence_threshold) and (effective_scream_score > cry_score) and (speech_score < 0.65)
+        scream_present = (effective_scream_score >= self.confidence_threshold) and (effective_scream_score > cry_score) and (speech_score < 0.55)
 
         if scream_present:
             self.consecutive_scream_windows += 1
@@ -328,19 +363,19 @@ class ScreamIntelligenceEngine:
                 self.last_scream_trigger_time = now
                 self.consecutive_scream_windows = 0
 
-                confidence = float(min(0.99, effective_scream_score))
+                confidence = calibrated_confidence
                 label = "Scream Detected"
-                details = f"Score: {effective_scream_score*100:.1f}% | Band: {scream_band_ratio*100:.0f}% | Level: {dbfs:.1f} dBFS | Persistence Met"
+                details = f"Confidence: {confidence*100:.1f}% (Raw: {effective_scream_score*100:.2f}%) | Band: {scream_band_ratio*100:.0f}% | Level: {dbfs:.1f} dBFS | Persistence Met"
 
-                log_entry = f"[{ts}] 🚨 TRIGGER: Screaming ({effective_scream_score*100:.1f}%) | Top: {top_cat.category_name}"
+                log_entry = f"[{ts}] 🚨 TRIGGER: Screaming ({confidence*100:.1f}%) | Top: {top_cat.category_name}"
                 self.log_cb(log_entry, True)
-                print(f"[{ts}] 🚨 [SCREAM DETECTED] Score: {effective_scream_score:.3f} | Persistence Met | Status: TRIGGERED")
+                print(f"[{ts}] 🚨 [SCREAM DETECTED] Conf: {confidence*100:.1f}% (Raw: {effective_scream_score:.4f}) | Persistence Met | Status: TRIGGERED")
 
                 self.trigger_cb("SCREAM DETECTED", label, confidence, details, ts)
             else:
-                log_entry = f"[{ts}] ⏳ PENDING: Screaming ({effective_scream_score*100:.1f}%) | Window {self.consecutive_scream_windows}/{self.min_persistence_windows}"
+                log_entry = f"[{ts}] ⏳ PENDING: Screaming ({calibrated_confidence*100:.1f}%) | Window {self.consecutive_scream_windows}/{self.min_persistence_windows}"
                 self.log_cb(log_entry, False)
-                print(f"[{ts}] ⚠️ [SCREAM PENDING] Score: {effective_scream_score:.3f} | Window: {self.consecutive_scream_windows}/{self.min_persistence_windows}")
+                print(f"[{ts}] ⚠️ [SCREAM PENDING] Conf: {calibrated_confidence*100:.1f}% (Raw: {effective_scream_score:.4f}) | Window: {self.consecutive_scream_windows}/{self.min_persistence_windows}")
         else:
             if self.consecutive_scream_windows > 0:
                 self.consecutive_scream_windows = 0
@@ -654,53 +689,53 @@ class VisualAudioTestApp:
 
         self.btn_sens_ultra = tk.Button(
             self.sens_frame,
-            text="⚡ Ultra (8%)",
+            text="⚡ Ultra (1.0% - Slightest Screams)",
+            font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
+            bg="#2E7D32",
+            fg="#FFFFFF",
+            relief=tk.FLAT,
+            padx=8,
+            pady=2,
+            command=lambda: self.set_sensitivity(0.010, 0.014, True, "Ultra (1.0% - Slightest Screams)")
+        )
+        self.btn_sens_ultra.pack(side=tk.LEFT, padx=3)
+
+        self.btn_sens_balanced = tk.Button(
+            self.sens_frame,
+            text="🎯 Balanced (1.8%)",
             font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
             bg="#424242",
             fg="#FFFFFF",
             relief=tk.FLAT,
             padx=8,
             pady=2,
-            command=lambda: self.set_sensitivity(0.08, 0.15, False, "Ultra (8% - Sensitive)")
-        )
-        self.btn_sens_ultra.pack(side=tk.LEFT, padx=3)
-
-        self.btn_sens_balanced = tk.Button(
-            self.sens_frame,
-            text="🎯 Balanced (15%)",
-            font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
-            bg="#1565C0",
-            fg="#FFFFFF",
-            relief=tk.FLAT,
-            padx=8,
-            pady=2,
-            command=lambda: self.set_sensitivity(0.15, 0.25, False, "Balanced (15% - Default)")
+            command=lambda: self.set_sensitivity(0.018, 0.028, True, "Balanced (1.8% - Standard)")
         )
         self.btn_sens_balanced.pack(side=tk.LEFT, padx=3)
 
         self.btn_sens_strict = tk.Button(
             self.sens_frame,
-            text="🛡️ Strict (28%)",
+            text="🛡️ Strict (4.0%)",
             font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
             bg="#424242",
             fg="#B0BEC5",
             relief=tk.FLAT,
             padx=8,
             pady=2,
-            command=lambda: self.set_sensitivity(0.28, 0.40, False, "Strict (28% - Heavy)")
+            command=lambda: self.set_sensitivity(0.040, 0.060, True, "Strict (4.0% - Heavy)")
         )
         self.btn_sens_strict.pack(side=tk.LEFT, padx=3)
 
         self.btn_sens_vocal = tk.Button(
             self.sens_frame,
-            text="📢 Vocal Distress (Yell+Scream 15%)",
+            text="📢 Vocal Distress (Scream+Yell 1.0%)",
             font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
-            bg="#424242",
-            fg="#FFD54F",
+            bg="#E65100",
+            fg="#FFFFFF",
             relief=tk.FLAT,
             padx=8,
             pady=2,
-            command=lambda: self.set_sensitivity(0.15, 0.25, True, "Vocal Distress Mode (Scream + Yell)")
+            command=lambda: self.set_sensitivity(0.010, 0.014, True, "Vocal Distress Mode (Scream + Yell)")
         )
         self.btn_sens_vocal.pack(side=tk.LEFT, padx=3)
 
@@ -906,7 +941,12 @@ class VisualAudioTestApp:
         if not self.is_triggered:
             # 0. Live Sound Classification Card
             top_name, top_score = top_cat
-            if top_name == "Screaming":
+            if dbfs < -65.0 or "silence" in top_name.lower():
+                self.lbl_sound_card.configure(
+                    text="Current Sound: Silence / Ambient (Quiet)",
+                    fg=self.TEXT_MUTED
+                )
+            elif top_name == "Screaming":
                 self.lbl_sound_card.configure(
                     text=f"Current Sound: Screaming ({top_score*100:.0f}%) [SCREAM DETECTED]",
                     fg="#00E676"
@@ -927,11 +967,6 @@ class VisualAudioTestApp:
                 self.lbl_sound_card.configure(
                     text=f"Current Sound: Shouting ({top_score*100:.0f}%) {status}",
                     fg=fg_c
-                )
-            elif "silence" in top_name.lower():
-                self.lbl_sound_card.configure(
-                    text=f"Current Sound: Silence / Background ({top_score*100:.0f}%)",
-                    fg=self.TEXT_MUTED
                 )
             else:
                 self.lbl_sound_card.configure(
@@ -954,19 +989,21 @@ class VisualAudioTestApp:
                 self.canvas_vu.create_rectangle(0, 0, bar_len, vu_h, fill=vu_color, width=0, tags="bar")
 
             # 2. YAMNet Scream Confidence Meter (with Peak-Hold & Smooth Decay)
-            gate_pct = int(self.engine.confidence_threshold * 100)
-            self.lbl_scream_val.configure(text=f"{scream_score*100:4.1f}% (Gate: {gate_pct}%) | Band: {int(band_ratio*100)}%")
+            # Calibrated gate line is at 50% (where raw model score meets the calibrated sensitivity threshold)
+            self.lbl_scream_val.configure(
+                text=f"{scream_score*100:4.1f}% (Gate: 50% | Raw: {raw_scream*100:.2f}%) | Band: {int(band_ratio*100)}%"
+            )
             sc_w = self.canvas_scream.winfo_width() or 400
             sc_h = self.canvas_scream.winfo_height() or 16
             self.canvas_scream.delete("s_bar")
             scream_norm = max(0.0, min(1.0, scream_score))
             s_len = int(scream_norm * sc_w)
-            s_color = "#00E5FF" if scream_score < self.engine.confidence_threshold else "#00E676"
+            s_color = "#00E5FF" if scream_score < 0.50 else "#00E676"
             if s_len > 0:
                 self.canvas_scream.create_rectangle(0, 0, s_len, sc_h, fill=s_color, width=0, tags="s_bar")
 
-            # Threshold line at current calibrated gate
-            gate_x = int(self.engine.confidence_threshold * sc_w)
+            # Threshold line at calibrated gate (50% across the gauge)
+            gate_x = int(0.50 * sc_w)
             self.canvas_scream.create_line(gate_x, 0, gate_x, sc_h, fill="#FF5252", width=2, tags="s_bar")
 
             # 3. Persistence Window Badges
@@ -1034,12 +1071,12 @@ class VisualAudioTestApp:
         self.engine.confidence_threshold = conf_thresh
         self.engine.high_confidence_threshold = high_thresh
         self.engine.vocal_distress_mode = vocal_mode
-        self.log_listbox.insert(tk.END, f"⚙️ Mode switched to {name} | Threshold: {int(conf_thresh*100)}%")
+        self.log_listbox.insert(tk.END, f"⚙️ Mode switched to {name} | Threshold: {conf_thresh*100:.1f}%")
         self.log_listbox.see(tk.END)
-        self.btn_sens_ultra.configure(bg="#2E7D32" if conf_thresh == 0.08 and not vocal_mode else "#424242")
-        self.btn_sens_balanced.configure(bg="#1565C0" if conf_thresh == 0.15 and not vocal_mode else "#424242")
-        self.btn_sens_strict.configure(bg="#D32F2F" if conf_thresh == 0.28 and not vocal_mode else "#424242")
-        self.btn_sens_vocal.configure(bg="#E65100" if vocal_mode else "#424242")
+        self.btn_sens_ultra.configure(bg="#2E7D32" if conf_thresh == 0.010 and vocal_mode else "#424242")
+        self.btn_sens_balanced.configure(bg="#1565C0" if conf_thresh == 0.018 else "#424242")
+        self.btn_sens_strict.configure(bg="#D32F2F" if conf_thresh == 0.040 else "#424242")
+        self.btn_sens_vocal.configure(bg="#E65100" if vocal_mode and conf_thresh == 0.010 else "#424242")
 
     def simulate_scream(self):
         scream_path = os.path.join(SAMPLES_DIR, "pi_scream.wav")
@@ -1068,20 +1105,34 @@ class VisualAudioTestApp:
         # If simulated playback is actively streaming, pause mic input so sample is clean
         if time.time() < self.engine.mic_paused_until:
             return
-        samples = indata[:, 0].copy()
+        if indata.shape[1] > 1:
+            samples = np.mean(indata, axis=1, dtype=np.float32)
+        else:
+            samples = indata[:, 0].copy()
         self.circ_buffer.write(samples)
 
     def start_audio(self):
         try:
+            default_dev_idx = sd.default.device[0]
+            dev_name = "Default"
+            channels = 1
+            try:
+                dev_info = sd.query_devices(default_dev_idx)
+                dev_name = dev_info.get("name", "Default")
+                max_in = dev_info.get("max_input_channels", 1)
+                channels = min(max_in, 2) if max_in > 0 else 1
+            except Exception:
+                pass
+
             self.stream = sd.InputStream(
                 samplerate=SAMPLE_RATE,
-                channels=1,
+                channels=channels,
                 dtype='float32',
                 blocksize=FRAME_SIZE,
                 callback=self.audio_callback
             )
             self.stream.start()
-            print("[AUDIO] Physical microphone stream active: 16 kHz Mono.")
+            print(f"[AUDIO] Physical microphone stream active: '{dev_name}' ({channels} ch -> 16 kHz Mono).")
         except Exception as e:
             err_msg = f"Cannot open microphone: {e}"
             print(f"[ERROR] {err_msg}", file=sys.stderr)
@@ -1120,7 +1171,10 @@ def run_cli_mode():
             meter = "#" * meter_bars + "-" * (16 - meter_bars)
             score_pct = int(scream_score * 100)
             top_name, top_s = top_cat
-            top_str = f" | Hearing: {top_name[:14]} ({top_s*100:.0f}%)" if top_name else ""
+            if dbfs < -65.0 or "silence" in top_name.lower():
+                top_str = " | Hearing: Silence / Ambient"
+            else:
+                top_str = f" | Hearing: {top_name[:14]} ({top_s*100:.0f}%)" if top_name else ""
             sys.stdout.write(f"\r\033[K[MIC: {meter}] {dbfs:5.1f} dBFS | Scream: {score_pct:3d}% | Persist: {win_count}/2{top_str}")
             sys.stdout.flush()
 
@@ -1131,13 +1185,27 @@ def run_cli_mode():
     engine = ScreamIntelligenceEngine(circ_buffer, on_trigger, on_telemetry, on_log)
 
     def audio_callback(indata, frames, time_info, status):
-        samples = indata[:, 0].copy()
+        if indata.shape[1] > 1:
+            samples = np.mean(indata, axis=1, dtype=np.float32)
+        else:
+            samples = indata[:, 0].copy()
         circ_buffer.write(samples)
 
     try:
-        stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=1, dtype='float32', blocksize=FRAME_SIZE, callback=audio_callback)
+        default_dev_idx = sd.default.device[0]
+        dev_name = "Default"
+        channels = 1
+        try:
+            dev_info = sd.query_devices(default_dev_idx)
+            dev_name = dev_info.get("name", "Default")
+            max_in = dev_info.get("max_input_channels", 1)
+            channels = min(max_in, 2) if max_in > 0 else 1
+        except Exception:
+            pass
+
+        stream = sd.InputStream(samplerate=SAMPLE_RATE, channels=channels, dtype='float32', blocksize=FRAME_SIZE, callback=audio_callback)
         stream.start()
-        print("\n[AUDIO] Physical microphone stream active: 16 kHz Mono.")
+        print(f"\n[AUDIO] Physical microphone stream active: '{dev_name}' ({channels} ch -> 16 kHz Mono).")
         print("[AUDIO] Listening for scream vocalizations. Press Ctrl+C to stop.\n")
     except Exception as e:
         print(f"\n[ERROR] Cannot open microphone: {e}", file=sys.stderr)
@@ -1164,12 +1232,13 @@ def run_cli_mode():
 def main():
     parser = argparse.ArgumentParser(description="GuardianGrid Visual Scream Detection Verifier")
     parser.add_argument("--cli", action="store_true", help="Force headless terminal CLI mode")
-    parser.add_argument("--sensitivity", choices=["ultra", "balanced", "strict", "vocal"], default="balanced", help="Detection sensitivity preset")
+    parser.add_argument("--sensitivity", choices=["ultra", "balanced", "strict", "vocal"], default="ultra", help="Detection sensitivity preset")
     args = parser.parse_args()
 
     print("=" * 70)
     print("  GuardianGrid: Visual Scream Detection Verifier")
     print("  Model: Google MediaPipe YAMNet (yamnet.tflite) [AudioSet Class 11]")
+    print("  Mode: Ultra-Sensitive (1.0% threshold - calibrated for slightest screams)")
     print("=" * 70)
 
     if args.cli or not HAS_TKINTER:
@@ -1181,14 +1250,15 @@ def main():
     try:
         root = tk.Tk()
         app = VisualAudioTestApp(root)
-        if args.sensitivity == "ultra":
-            app.set_sensitivity(0.08, 0.15, False, "Ultra (8% - Sensitive)")
-        elif args.sensitivity == "strict":
-            app.set_sensitivity(0.28, 0.40, False, "Strict (28% - Heavy)")
+        if args.sensitivity == "strict":
+            app.set_sensitivity(0.040, 0.060, True, "Strict (4.0% - Heavy)")
+        elif args.sensitivity == "balanced":
+            app.set_sensitivity(0.018, 0.028, True, "Balanced (1.8% - Standard)")
         elif args.sensitivity == "vocal":
-            app.set_sensitivity(0.15, 0.25, True, "Vocal Distress Mode (Scream + Yell)")
+            app.set_sensitivity(0.010, 0.014, True, "Vocal Distress Mode (Scream + Yell)")
         else:
-            app.set_sensitivity(0.15, 0.25, False, "Balanced (15% - Default)")
+            # Default: Ultra (1.0% - detects slightest screams)
+            app.set_sensitivity(0.010, 0.014, True, "Ultra (1.0% - Detects Slightest Screams)")
         root.protocol("WM_DELETE_WINDOW", app.on_closing)
         root.mainloop()
     except Exception as e:

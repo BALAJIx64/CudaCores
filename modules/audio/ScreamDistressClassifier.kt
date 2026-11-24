@@ -47,7 +47,7 @@ class ScreamDistressClassifier(
 ) : AudioDistressDetector {
 
     private var monitoring = false
-    private var sensitivity: Float = 0.70f // Default sensitivity
+    private var sensitivity: Float = 0.90f // Default high sensitivity to detect slight screams
     private val signalFlow = MutableSharedFlow<DistressSignal>(extraBufferCapacity = 64)
 
     private var analysisJob: Job? = null
@@ -145,8 +145,8 @@ class ScreamDistressClassifier(
             val rms = AudioPreprocessor.computeRms(frame)
             val dbfs = AudioPreprocessor.rmsToDbfs(rms)
 
-            // Silence / ambient threshold: Screams must have sufficient amplitude (> -28 dBFS)
-            if (dbfs < -28.0f) continue
+            // Silence / ambient threshold: Screams must have sufficient amplitude (> -45 dBFS)
+            if (dbfs < -45.0f) continue
 
             AudioPreprocessor.applyHannWindow(frame)
             val powerSpectrum = AudioPreprocessor.computePowerSpectrum(frame)
@@ -162,11 +162,11 @@ class ScreamDistressClassifier(
             val centroidScore = ((centroid - 1400.0f) / 1600.0f).coerceIn(0.0f, 1.0f)
 
             // 3. Amplitude / Energy (weight 0.25): High loudness relative to ambient
-            val energyScore = ((dbfs + 28.0f) / 20.0f).coerceIn(0.0f, 1.0f)
+            val energyScore = ((dbfs + 45.0f) / 35.0f).coerceIn(0.0f, 1.0f)
 
             val frameScore = (bandScore * 0.40f) + (centroidScore * 0.35f) + (energyScore * 0.25f)
 
-            if (frameScore > 0.60f) {
+            if (frameScore > 0.40f) {
                 screamFrameCount++
             }
             if (frameScore > maxFrameConfidence) {
@@ -183,8 +183,8 @@ class ScreamDistressClassifier(
      * Checks if a score exceeds the sensitivity threshold and emits a structured DistressSignal.
      */
     suspend fun checkAndEmitDistress(rawScore: Float, customSource: String? = null) {
-        // Sensitivity maps: sensitivity 1.0 -> threshold 0.45, sensitivity 0.0 -> threshold 0.90
-        val effectiveThreshold = 0.90f - (sensitivity * 0.45f)
+        // Sensitivity maps: sensitivity 1.0 -> threshold 0.35, sensitivity 0.0 -> threshold 0.80
+        val effectiveThreshold = 0.80f - (sensitivity * 0.45f)
 
         if (rawScore >= effectiveThreshold) {
             consecutiveDistressFrames++
