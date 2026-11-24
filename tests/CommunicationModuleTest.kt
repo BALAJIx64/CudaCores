@@ -221,10 +221,10 @@ class CommunicationModuleTest {
 
         val payload = AlertPayload(
             incidentId = "INC-1005",
-            distressType = DistressType.KEYWORD,
+            distressType = DistressType.SCREAM,
             confidence = 0.95f,
             location = sampleLocation,
-            emergencyMessage = "Hotword 'Help' spotted.",
+            emergencyMessage = "Acoustic scream distress detected.",
             recipientContacts = listOf(sampleContact)
         )
 

@@ -71,7 +71,7 @@ class MultimodalFusionEngineImpl(
 
         // Partition signals into Audio and Motion categories
         val audioSignals = activeSignals.filter {
-            it.type == DistressType.SCREAM || it.type == DistressType.KEYWORD
+            it.type == DistressType.SCREAM
         }
         val motionSignals = activeSignals.filter {
             it.type == DistressType.MOTION_ANOMALY || it.type == DistressType.FALL_IMPACT

@@ -72,24 +72,21 @@ class Milestone2IntegrationTest {
         val audioStub = AudioModuleStub()
         assertFalse(audioStub.isMonitoring())
         assertFalse(audioStub.screamClassifier.isMonitoring())
-        assertFalse(audioStub.keywordSpotter.isListening())
         assertFalse(audioStub.captureManager.isCapturing)
 
         val flow = audioStub.startMonitoring()
         assertNotNull(flow)
         assertTrue(audioStub.isMonitoring())
         assertTrue(audioStub.screamClassifier.isMonitoring())
-        assertTrue(audioStub.keywordSpotter.isListening())
         assertTrue(audioStub.captureManager.isCapturing)
 
         audioStub.stopMonitoring()
         assertFalse(audioStub.isMonitoring())
         assertFalse(audioStub.screamClassifier.isMonitoring())
-        assertFalse(audioStub.keywordSpotter.isListening())
         assertFalse(audioStub.captureManager.isCapturing)
     }
 
-    // --- Scenario 2: Single Supported Keyword Produces Signal with Metadata ---
+    // --- Scenario 2: Single Supported Vocal Distress Produces Signal ---
 
     @Test
     fun testSingleSupportedKeywordProducesSignal() = runBlocking {
@@ -99,7 +96,7 @@ class Milestone2IntegrationTest {
         var detectedSignal: DistressSignal? = null
         val job = launch {
             flow.collect { signal ->
-                if (signal.type == DistressType.KEYWORD) {
+                if (signal.type == DistressType.SCREAM) {
                     detectedSignal = signal
                 }
             }
@@ -108,7 +105,7 @@ class Milestone2IntegrationTest {
         // Give collector coroutine time to subscribe to SharedFlow
         delay(100)
 
-        audioStub.keywordSpotter.emitSimulatedKeyword("help", 0.94f, "en")
+        audioStub.screamClassifier.emitSimulatedDistress(0.94f, "VocalDistressClassifier")
 
         var attempts = 0
         while (detectedSignal == null && attempts < 25) {
@@ -119,10 +116,8 @@ class Milestone2IntegrationTest {
         job.cancel()
         audioStub.stopMonitoring()
 
-        assertNotNull("Keyword signal must be emitted", detectedSignal)
-        assertEquals(DistressType.KEYWORD, detectedSignal?.type)
-        assertEquals("help", detectedSignal?.metadata?.get("keyword"))
-        assertEquals("en", detectedSignal?.metadata?.get("language"))
+        assertNotNull("Vocal distress signal must be emitted", detectedSignal)
+        assertEquals(DistressType.SCREAM, detectedSignal?.type)
         assertTrue(detectedSignal!!.confidence >= 0.90f)
     }
 

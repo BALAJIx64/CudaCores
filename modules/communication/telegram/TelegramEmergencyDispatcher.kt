@@ -23,6 +23,16 @@ import java.util.TimeZone
 import java.util.UUID
 
 /**
+ * Result of Telegram Bot API verification.
+ */
+data class TelegramVerificationResult(
+    val isSuccess: Boolean,
+    val botUsername: String? = null,
+    val botId: Long? = null,
+    val errorMessage: String? = null
+)
+
+/**
  * Result of a Telegram alert dispatch operation.
  */
 data class TelegramDispatchResult(
@@ -235,6 +245,95 @@ class TelegramEmergencyDispatcher(
         } catch (e: Exception) {
             null
         }
+    }
+
+    /**
+     * Actively tests and verifies a Bot Token against Telegram's getMe endpoint.
+     */
+    fun verifyBotToken(token: String): TelegramVerificationResult {
+        val trimmed = token.trim()
+        if (trimmed.isBlank()) {
+            return TelegramVerificationResult(isSuccess = false, errorMessage = "Bot token is blank")
+        }
+        val creds = TelegramCredentials(trimmed)
+        if (!creds.isValid()) {
+            return TelegramVerificationResult(
+                isSuccess = false,
+                errorMessage = "Invalid bot token format. Expected: <bot_id>:<secret_hash> with at least 20 secret characters"
+            )
+        }
+
+        val endpoint = "$TELEGRAM_API_BASE/bot$trimmed/getMe"
+        return try {
+            val response = transport.getJson(endpoint)
+            if (response.isSuccessful) {
+                val (botId, username) = parseBotInfoFromResponse(response.body)
+                TelegramVerificationResult(
+                    isSuccess = true,
+                    botUsername = username,
+                    botId = botId
+                )
+            } else {
+                val errorMsg = parseErrorMessageFromResponse(response.statusCode, response.body)
+                TelegramVerificationResult(
+                    isSuccess = false,
+                    errorMessage = "Telegram Bot API error ($errorMsg)"
+                )
+            }
+        } catch (e: Exception) {
+            TelegramVerificationResult(
+                isSuccess = false,
+                errorMessage = "Network error: ${e.message ?: "Failed to connect to Telegram"}"
+            )
+        }
+    }
+
+    /**
+     * Verifies recipient chat ID syntax and reachability.
+     */
+    fun verifyRecipientChatId(token: String, chatId: String): TelegramVerificationResult {
+        val trimmedToken = token.trim()
+        val trimmedChatId = chatId.trim()
+        if (trimmedChatId.isBlank()) {
+            return TelegramVerificationResult(isSuccess = false, errorMessage = "Chat ID is blank")
+        }
+        val isNumeric = (trimmedChatId.startsWith("-") && trimmedChatId.substring(1).all { it.isDigit() }) ||
+                trimmedChatId.all { it.isDigit() }
+        val isChannelHandle = trimmedChatId.startsWith("@") && trimmedChatId.length >= 4
+
+        if (!isNumeric && !isChannelHandle) {
+            return TelegramVerificationResult(
+                isSuccess = false,
+                errorMessage = "Invalid Telegram chat ID format. Must be numeric (e.g. -100123456789) or channel handle (@channel)"
+            )
+        }
+
+        val endpoint = "$TELEGRAM_API_BASE/bot$trimmedToken/getChat?chat_id=$trimmedChatId"
+        return try {
+            val response = transport.getJson(endpoint)
+            if (response.isSuccessful) {
+                TelegramVerificationResult(isSuccess = true)
+            } else {
+                val errorMsg = parseErrorMessageFromResponse(response.statusCode, response.body)
+                TelegramVerificationResult(
+                    isSuccess = false,
+                    errorMessage = "Chat reachability failed ($errorMsg). Ensure bot is in this chat."
+                )
+            }
+        } catch (e: Exception) {
+            TelegramVerificationResult(
+                isSuccess = false,
+                errorMessage = "Network error verifying chat: ${e.message}"
+            )
+        }
+    }
+
+    private fun parseBotInfoFromResponse(json: String): Pair<Long?, String?> {
+        val idRegex = """"id"\s*:\s*(\d+)""".toRegex()
+        val usernameRegex = """"username"\s*:\s*"([^"]+)"""".toRegex()
+        val id = idRegex.find(json)?.groupValues?.get(1)?.toLongOrNull()
+        val username = usernameRegex.find(json)?.groupValues?.get(1)
+        return Pair(id, username)
     }
 
     /**

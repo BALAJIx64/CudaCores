@@ -95,6 +95,8 @@ dependencies {
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
 
+    implementation("androidx.work:work-runtime-ktx:2.9.1")
+
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
 
     testImplementation(libs.junit)

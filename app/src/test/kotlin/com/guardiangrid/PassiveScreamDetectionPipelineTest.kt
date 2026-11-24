@@ -162,12 +162,12 @@ class PassiveScreamDetectionPipelineTest {
         println("Real Speech (Loud 2x) Score: $loudSpeechScore (Must be < 0.25)")
         assertTrue("Loud speech score ($loudSpeechScore) must be rejected (< 0.25)", loudSpeechScore < 0.25f)
 
-        // 7. Evaluate Real Crying - MUST BE REJECTED
+        // 7. Evaluate Real Crying - Recognized as Vocal Distress
         val crySamples = loadWavPcm(cryFile)
         assertTrue(crySamples.isNotEmpty())
         val cryScore = audioStub.screamClassifier.evaluateAudioSamples(crySamples)
-        println("Real Crying Score: $cryScore (Must be < 0.25)")
-        assertTrue("Crying score ($cryScore) must be rejected (< 0.25)", cryScore < 0.25f)
+        println("Real Crying Score: $cryScore (Recognized as vocal distress >= 0.30)")
+        assertTrue("Crying score ($cryScore) must trigger distress (>= 0.30)", cryScore >= 0.30f)
     }
 
     private fun findSamplesDir(): File {

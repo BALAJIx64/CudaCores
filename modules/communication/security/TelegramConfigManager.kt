@@ -9,6 +9,7 @@ import java.util.concurrent.atomic.AtomicReference
 object TelegramConfigManager {
 
     private val credentialsRef = AtomicReference<TelegramCredentials?>(null)
+    private var persistentStorage: SecureCredentialStorage? = null
 
     init {
         // Attempt fallback to environment variable on initialization
@@ -19,10 +20,25 @@ object TelegramConfigManager {
     }
 
     /**
-     * Programmatically configures Telegram credentials (e.g. from user settings or tests).
+     * Initializes the manager with Keystore-backed secure storage.
+     * Loads any pre-existing encrypted credentials.
+     */
+    @Synchronized
+    fun initializeWithStorage(storage: SecureCredentialStorage) {
+        this.persistentStorage = storage
+        val loaded = storage.loadCredentials()
+        if (loaded != null && loaded.isValid()) {
+            credentialsRef.set(loaded)
+        }
+    }
+
+    /**
+     * Programmatically configures Telegram credentials (e.g. from user settings or tests)
+     * and persists them to Keystore-backed storage if initialized.
      */
     fun setCredentials(credentials: TelegramCredentials) {
         credentialsRef.set(credentials)
+        persistentStorage?.saveCredentials(credentials)
     }
 
     /**
@@ -43,9 +59,25 @@ object TelegramConfigManager {
     fun isConfigured(): Boolean = credentialsRef.get()?.isValid() == true
 
     /**
-     * Clears stored credentials from memory (e.g., on user logout or privacy reset).
+     * Clears stored credentials from memory and deletes from encrypted persistent storage.
      */
     fun clear() {
         credentialsRef.set(null)
+        persistentStorage?.deleteCredentials()
+    }
+
+    /**
+     * Verifies currently stored credentials by connecting to Telegram Bot API.
+     */
+    fun testConnection(
+        transport: com.guardiangrid.modules.communication.network.HttpTransport = com.guardiangrid.modules.communication.network.DefaultHttpTransport()
+    ): com.guardiangrid.modules.communication.telegram.TelegramVerificationResult {
+        val creds = getCredentials()
+            ?: return com.guardiangrid.modules.communication.telegram.TelegramVerificationResult(
+                isSuccess = false,
+                errorMessage = "No Telegram credentials configured"
+            )
+        val dispatcher = com.guardiangrid.modules.communication.telegram.TelegramEmergencyDispatcher(transport)
+        return dispatcher.verifyBotToken(creds.botToken)
     }
 }

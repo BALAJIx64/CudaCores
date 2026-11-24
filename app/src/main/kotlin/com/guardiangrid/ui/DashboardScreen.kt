@@ -1,6 +1,13 @@
 package com.guardiangrid.ui
 
+import android.Manifest
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -16,7 +23,6 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -24,13 +30,15 @@ import androidx.compose.material.icons.automirrored.filled.DirectionsRun
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Sensors
+import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
@@ -38,11 +46,12 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -53,42 +62,71 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import com.guardiangrid.core.interfaces.EmergencyCoordinator
+import com.guardiangrid.GuardianGridApp
 import com.guardiangrid.core.interfaces.EmergencyCommunicator
 import com.guardiangrid.core.models.AlertPayload
 import com.guardiangrid.core.models.DeliveryChannel
+import com.guardiangrid.core.models.DeliveryStatus
 import com.guardiangrid.core.models.DistressType
 import com.guardiangrid.core.models.EmergencyIncident
-import com.guardiangrid.core.models.EmergencyLevel
 import com.guardiangrid.core.models.LocationData
+import com.guardiangrid.core.state.DurableIncident
 import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.core.state.EmergencyStateHolder
-import com.guardiangrid.core.state.ProtectionMode
+import com.guardiangrid.core.state.MonitoringServiceState
 import com.guardiangrid.location.GuardianLocationManager
+import com.guardiangrid.modules.audio.AudioCaptureStatus
 import com.guardiangrid.modules.audio.AudioModuleStub
+import com.guardiangrid.modules.audio.LiveAudioMetrics
+import com.guardiangrid.modules.communication.EmergencyCommunicatorImpl
+import com.guardiangrid.modules.communication.security.TelegramConfigManager
 import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
+import com.guardiangrid.service.GuardianForegroundService
+import com.guardiangrid.ui.brand.GuardianGridWordmark
+import com.guardiangrid.ui.brand.MonitoringStatusBadge
+import com.guardiangrid.ui.permissions.PermissionManager
 import com.guardiangrid.ui.permissions.PermissionOnboardingDialog
+import com.guardiangrid.ui.theme.BrandMagenta
+import com.guardiangrid.ui.theme.BrandMagentaDark
+import com.guardiangrid.ui.theme.DarkBackground
+import com.guardiangrid.ui.theme.DarkBorder
 import com.guardiangrid.ui.theme.DarkSurface
 import com.guardiangrid.ui.theme.DarkSurfaceElevated
+import com.guardiangrid.ui.theme.DarkSurfaceHighlight
 import com.guardiangrid.ui.theme.EmergencyDarkRed
 import com.guardiangrid.ui.theme.EmergencyLightRed
 import com.guardiangrid.ui.theme.EmergencyRed
 import com.guardiangrid.ui.theme.InfoBlue
 import com.guardiangrid.ui.theme.SafeGreen
+import com.guardiangrid.ui.theme.TextDisabled
 import com.guardiangrid.ui.theme.TextPrimary
 import com.guardiangrid.ui.theme.TextSecondary
+import com.guardiangrid.ui.theme.TextTertiary
 import com.guardiangrid.ui.theme.WarningAmber
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
+/**
+ * Redesigned GuardianGrid Production Dashboard (Main Control Centre).
+ *
+ * Implements:
+ * A. Header: Official GuardianGrid emblem & wordmark, real service monitoring badge, settings access.
+ * B. Protection Status: Clear ACTIVE / INACTIVE representation tied to actual foreground service state.
+ * C. Emergency SOS: Immediate tactile manual dispatch and discreet stealth SOS.
+ * D. Subsystem Health Grid: Real microphone, motion, location, and communication/queue states.
+ * E. Recent Activity: Latest durable incident with empty state handling and navigation to full history.
+ */
 @Composable
 fun DashboardScreen(
     coordinator: EmergencyCoordinatorImpl,
@@ -96,31 +134,31 @@ fun DashboardScreen(
     audioModule: AudioModuleStub,
     motionDetector: MotionAnomalyDetectorImpl,
     communicator: EmergencyCommunicator,
-    onRequestPermissions: () -> Unit
+    onRequestPermissions: () -> Unit,
+    onNavigateToSettings: () -> Unit = {},
+    onNavigateToIncidents: () -> Unit = {}
 ) {
+    val context = LocalContext.current
+    val container = (context.applicationContext as? GuardianGridApp)?.container
     val state by EmergencyStateHolder.state.collectAsState()
     val scope = rememberCoroutineScope()
     var showPermissionDialog by remember { mutableStateOf(false) }
 
-    // --- Autonomous Passive Audio Scream Monitoring Lifecycle ---
-    // Ingests real-time microphone stream when Protection Mode is active.
-    // Automatically routes detected screams to the Emergency Coordinator.
-    LaunchedEffect(state.isProtectionActive) {
-        if (state.isProtectionActive) {
-            audioStub.startMonitoring().collect { signal ->
-                if (signal.type == DistressType.SCREAM) {
-                    coordinator.handleDistressSignal(signal)
-                }
-            }
-        } else {
-            audioStub.stopMonitoring()
-        }
+    // Fetch latest incident from durable repository
+    var latestIncident by remember { mutableStateOf<DurableIncident?>(null) }
+    var pendingQueueCount by remember { mutableStateOf(0) }
+
+    fun refreshDashboardData() {
+        latestIncident = container?.incidentRepository?.getAllIncidents()
+            ?.maxByOrNull { it.startTimeEpochMs }
+        val commImpl = container?.communicator as? EmergencyCommunicatorImpl
+        pendingQueueCount = commImpl?.queueRepository?.getAll()?.count {
+            it.status == DeliveryStatus.PENDING || it.status == DeliveryStatus.FAILED_RETRYING
+        } ?: 0
     }
 
-    DisposableEffect(Unit) {
-        onDispose {
-            audioStub.stopMonitoring()
-        }
+    LaunchedEffect(state.activeIncident, state.incidentHistory.size) {
+        refreshDashboardData()
     }
 
     if (showPermissionDialog) {
@@ -133,14 +171,25 @@ fun DashboardScreen(
         )
     }
 
+    val infiniteTransition = rememberInfiniteTransition(label = "dashPulse")
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 1.0f,
+        targetValue = 1.05f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(900, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "dashPulseScale"
+    )
+
     LazyColumn(
         modifier = Modifier
             .fillMaxSize()
-            .background(MaterialTheme.colorScheme.background)
-            .padding(16.dp),
+            .background(DarkBackground)
+            .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // App Header & Connectivity Status Badge
+        // --- A. Header: Emblem, Wordmark, Real Badge, Settings ---
         item {
             Row(
                 modifier = Modifier
@@ -149,39 +198,33 @@ fun DashboardScreen(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Column {
-                    Text(
-                        text = "GuardianGrid",
-                        fontSize = 26.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary
-                    )
-                    Text(
-                        text = "Multimodal Distress & Resilient Emergency Net",
-                        fontSize = 11.sp,
-                        color = TextSecondary
-                    )
-                }
+                GuardianGridWordmark(
+                    emblemSize = 36.dp,
+                    subtitle = "AUTONOMOUS SAFETY NET"
+                )
 
-                // Connectivity / Mode Chip
-                Card(
-                    colors = CardDefaults.cardColors(
-                        containerColor = if (state.isProtectionActive) SafeGreen.copy(alpha = 0.2f) else DarkSurfaceElevated
-                    ),
-                    shape = RoundedCornerShape(16.dp)
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
                 ) {
-                    Text(
-                        text = if (state.isProtectionActive) "PROTECTED" else "STANDBY",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = if (state.isProtectionActive) SafeGreen else TextSecondary,
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
-                    )
+                    MonitoringStatusBadge(state = state.monitoringServiceState)
+
+                    IconButton(
+                        onClick = onNavigateToSettings,
+                        modifier = Modifier.size(36.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Settings,
+                            contentDescription = "Settings",
+                            tint = TextSecondary,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
                 }
             }
         }
 
-        // Permission Health Reminder Card (when permissions missing)
+        // --- Permission Warning Banner (if required permissions missing) ---
         val missingPermissions = !state.isAudioPermissionGranted || !state.isLocationPermissionGranted
         if (missingPermissions) {
             item {
@@ -189,11 +232,14 @@ fun DashboardScreen(
                     modifier = Modifier
                         .fillMaxWidth()
                         .clickable { showPermissionDialog = true },
-                    colors = CardDefaults.cardColors(containerColor = WarningAmber.copy(alpha = 0.15f)),
-                    shape = RoundedCornerShape(12.dp)
+                    colors = CardDefaults.cardColors(containerColor = WarningAmber.copy(alpha = 0.12f)),
+                    shape = RoundedCornerShape(12.dp),
+                    border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(WarningAmber.copy(alpha = 0.35f)))
                 ) {
                     Row(
-                        modifier = Modifier.fillMaxWidth().padding(12.dp),
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         Icon(
@@ -211,7 +257,7 @@ fun DashboardScreen(
                                 color = WarningAmber
                             )
                             Text(
-                                text = "Microphone & Location required for full protection. Tap to configure.",
+                                text = "Microphone & Location required for full background protection. Tap to grant.",
                                 fontSize = 10.sp,
                                 color = TextPrimary
                             )
@@ -221,24 +267,151 @@ fun DashboardScreen(
             }
         }
 
-        // Live Protection Status Banner
+        // --- B. Protection Status (Large, immediately understandable ACTIVE/INACTIVE) ---
         item {
-            StatusBanner(state.emergencyLevel, state.statusMessage)
-        }
+            val isServiceActive = state.monitoringServiceState == MonitoringServiceState.ACTIVE
+            val isTransitioning = state.monitoringServiceState == MonitoringServiceState.STARTING ||
+                    state.monitoringServiceState == MonitoringServiceState.STOPPING
 
-        // Active Incident Information Card (if emergency in progress)
-        state.activeIncident?.let { incident ->
-            item {
-                ActiveIncidentCard(incident = incident, onCancel = {
-                    coordinator.cancelEmergency("User Cancelled via Dashboard")
-                })
+            val (statusTitle, statusDescription, statusAccent) = when (state.monitoringServiceState) {
+                MonitoringServiceState.ACTIVE -> Triple(
+                    "PROTECTION ACTIVE",
+                    "Acoustic scream & motion anomaly detection running in foreground service.",
+                    SafeGreen
+                )
+                MonitoringServiceState.STARTING -> Triple(
+                    "INITIALIZING SENSORS",
+                    "Connecting hardware listeners and calibrating baseline...",
+                    WarningAmber
+                )
+                MonitoringServiceState.STOPPING -> Triple(
+                    "STOPPING SERVICE",
+                    "Safely unregistering sensor listeners and flushing buffers...",
+                    WarningAmber
+                )
+                MonitoringServiceState.PERMISSION_REQUIRED -> Triple(
+                    "PERMISSION REQUIRED",
+                    "Microphone permission is required to analyze ambient distress sounds.",
+                    WarningAmber
+                )
+                MonitoringServiceState.ERROR -> Triple(
+                    "MONITORING ERROR",
+                    state.statusMessage.ifBlank { "Unable to activate hardware sensors. Check permissions." },
+                    EmergencyRed
+                )
+                MonitoringServiceState.STOPPED -> Triple(
+                    "PROTECTION INACTIVE",
+                    "Continuous safety monitoring is paused. Tap below to activate background guard.",
+                    TextDisabled
+                )
+            }
+
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                shape = RoundedCornerShape(18.dp),
+                border = CardDefaults.outlinedCardBorder().copy(
+                    brush = androidx.compose.ui.graphics.SolidColor(
+                        if (isServiceActive) SafeGreen.copy(alpha = 0.3f) else DarkBorder
+                    )
+                )
+            ) {
+                Column(
+                    modifier = Modifier.padding(18.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(44.dp)
+                                .clip(CircleShape)
+                                .background(statusAccent.copy(alpha = 0.15f))
+                                .border(1.5.dp, statusAccent.copy(alpha = 0.4f), CircleShape),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (isServiceActive) Icons.Default.Security else Icons.Default.Security,
+                                contentDescription = null,
+                                tint = statusAccent,
+                                modifier = Modifier.size(24.dp)
+                            )
+                        }
+
+                        Spacer(modifier = Modifier.width(14.dp))
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = statusTitle,
+                                fontSize = 15.sp,
+                                fontWeight = FontWeight.Black,
+                                color = if (isServiceActive) TextPrimary else TextSecondary,
+                                letterSpacing = 0.5.sp
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = statusDescription,
+                                fontSize = 11.sp,
+                                color = TextSecondary,
+                                lineHeight = 15.sp
+                            )
+                        }
+                    }
+
+                    Spacer(modifier = Modifier.height(16.dp))
+
+                    // Protection Toggle Button (never fakes state)
+                    Button(
+                        onClick = {
+                            if (isServiceActive) {
+                                GuardianForegroundService.stop(context)
+                            } else {
+                                if (!PermissionManager.isPermissionGranted(context, Manifest.permission.RECORD_AUDIO)) {
+                                    EmergencyStateHolder.setMonitoringServiceState(
+                                        MonitoringServiceState.PERMISSION_REQUIRED,
+                                        "Microphone permission required for audio distress monitoring."
+                                    )
+                                    onRequestPermissions()
+                                } else {
+                                    GuardianForegroundService.start(context)
+                                }
+                            }
+                        },
+                        enabled = !isTransitioning,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(44.dp),
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isServiceActive) DarkSurfaceHighlight else BrandMagenta,
+                            disabledContainerColor = DarkSurfaceHighlight
+                        ),
+                        shape = RoundedCornerShape(10.dp)
+                    ) {
+                        Text(
+                            text = when (state.monitoringServiceState) {
+                                MonitoringServiceState.ACTIVE -> "Stop Active Protection"
+                                MonitoringServiceState.STARTING -> "Starting..."
+                                MonitoringServiceState.STOPPING -> "Stopping..."
+                                MonitoringServiceState.PERMISSION_REQUIRED -> "Grant Microphone Permission"
+                                MonitoringServiceState.ERROR -> "Retry Activation"
+                                MonitoringServiceState.STOPPED -> "Activate Protection"
+                            },
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 13.sp,
+                            color = if (isServiceActive) EmergencyLightRed else Color.White
+                        )
+                    }
+                }
             }
         }
 
-        // Central Emergency SOS Buttons (Tactile Manual SOS & Discreet Stealth SOS)
+        // --- C. SOS Controls: Prominent Manual SOS & Discreet Stealth SOS ---
         item {
             Column(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .padding(vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
                 // Primary Manual SOS Button
@@ -250,19 +423,20 @@ fun DashboardScreen(
 
                             val payload = AlertPayload(
                                 incidentId = "MANUAL-${System.currentTimeMillis()}",
+                                timestampEpochMs = System.currentTimeMillis(),
                                 distressType = DistressType.MANUAL_SOS,
                                 confidence = 1.0f,
-                                location = freshLoc,
-                                emergencyMessage = "MANUAL SOS ACTIVATED: User requires urgent emergency assistance!"
+                                emergencyMessage = "MANUAL SOS ACTIVATED: User requires urgent emergency assistance!",
+                                location = freshLoc
                             )
                             val receipts = communicator.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
                             receipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
                         }
                     },
                     modifier = Modifier
-                        .size(175.dp)
+                        .size(165.dp)
                         .clip(CircleShape)
-                        .border(4.dp, EmergencyLightRed.copy(alpha = 0.7f), CircleShape),
+                        .border(4.dp, EmergencyLightRed.copy(alpha = 0.5f), CircleShape),
                     colors = ButtonDefaults.buttonColors(containerColor = EmergencyRed)
                 ) {
                     Column(
@@ -273,17 +447,18 @@ fun DashboardScreen(
                             imageVector = Icons.Default.Campaign,
                             contentDescription = "SOS",
                             tint = Color.White,
-                            modifier = Modifier.size(46.dp)
+                            modifier = Modifier.size(44.dp)
                         )
                         Spacer(modifier = Modifier.height(2.dp))
                         Text(
                             text = "SOS",
-                            fontSize = 26.sp,
+                            fontSize = 28.sp,
                             fontWeight = FontWeight.Black,
-                            color = Color.White
+                            color = Color.White,
+                            letterSpacing = 1.sp
                         )
                         Text(
-                            text = "PRESS FOR HELP",
+                            text = "TAP FOR HELP",
                             fontSize = 9.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.White.copy(alpha = 0.85f)
@@ -291,9 +466,9 @@ fun DashboardScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(10.dp))
+                Spacer(modifier = Modifier.height(14.dp))
 
-                // Discreet Stealth SOS Button
+                // Discreet Stealth SOS Action
                 OutlinedButton(
                     onClick = {
                         scope.launch {
@@ -301,17 +476,21 @@ fun DashboardScreen(
                             coordinator.triggerDiscreetSos("Stealth_Discreet_Button")
                             val payload = AlertPayload(
                                 incidentId = "DISCREET-${System.currentTimeMillis()}",
+                                timestampEpochMs = System.currentTimeMillis(),
                                 distressType = DistressType.SILENT_ACTIVATION,
                                 confidence = 1.0f,
-                                location = freshLoc,
-                                emergencyMessage = "DISCREET SILENT SOS: User in distress, silent activation."
+                                emergencyMessage = "DISCREET SILENT SOS: User in distress, silent stealth activation.",
+                                location = freshLoc
                             )
                             val receipts = communicator.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
                             receipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
                         }
                     },
                     shape = RoundedCornerShape(20.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary)
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
+                    border = ButtonDefaults.outlinedButtonBorder.copy(
+                        brush = androidx.compose.ui.graphics.SolidColor(DarkBorder)
+                    )
                 ) {
                     Icon(
                         imageVector = Icons.AutoMirrored.Filled.VolumeOff,
@@ -319,680 +498,344 @@ fun DashboardScreen(
                         modifier = Modifier.size(16.dp),
                         tint = WarningAmber
                     )
-                    Spacer(modifier = Modifier.width(6.dp))
+                    Spacer(modifier = Modifier.width(8.dp))
                     Text(
                         text = "Discreet Stealth SOS (Silent)",
-                        fontSize = 11.sp,
+                        fontSize = 12.sp,
                         color = TextPrimary
                     )
                 }
             }
         }
 
-        // Protection Controls Row
+        // --- D. Monitoring Health (Real Subsystem State Grid) ---
         item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Button(
-                    onClick = {
-                        if (state.isProtectionActive) {
-                            coordinator.stopProtection()
-                            locationManager.stopLocationUpdates()
-                        } else {
-                            coordinator.startProtection()
-                            locationManager.startLocationUpdates()
-                        }
-                    },
-                    modifier = Modifier.weight(1f),
-                    colors = ButtonDefaults.buttonColors(
-                        containerColor = if (state.isProtectionActive) WarningAmber else SafeGreen
-                    ),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Icon(
-                        imageVector = if (state.isProtectionActive) Icons.Default.Security else Icons.Default.CheckCircle,
-                        contentDescription = null,
-                        modifier = Modifier.size(18.dp)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = if (state.isProtectionActive) "Stop Protection" else "Activate Protection",
-                        fontWeight = FontWeight.SemiBold,
-                        fontSize = 13.sp
-                    )
-                }
-
-                OutlinedButton(
-                    onClick = { showPermissionDialog = true },
-                    modifier = Modifier.weight(1f),
-                    shape = RoundedCornerShape(10.dp)
-                ) {
-                    Text("Permissions", fontSize = 12.sp)
-                }
-            }
-        }
-
-        // Live GPS Location Telemetry Card
-        item {
-            LocationTelemetryCard(
-                location = state.currentLocation,
-                isGpsEnabled = state.isGpsEnabled,
-                onRefreshLocation = {
-                    scope.launch {
-                        locationManager.acquireFreshLocation(3000L)
-                    }
-                }
-            )
-        }
-
-        // Subsystems Status Indicators Row
-        item {
-            Text(
-                text = "Multimodal Subsystems",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = TextPrimary
-            )
-        }
-
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                SubsystemIndicator(
-                    title = "Audio Intelligence",
-                    icon = Icons.Default.Mic,
-                    isActive = state.isAudioMonitoringRunning,
-                    owner = "Member 1",
-                    modifier = Modifier.weight(1f)
-                )
-                SubsystemIndicator(
-                    title = "Motion Anomaly",
-                    icon = Icons.AutoMirrored.Filled.DirectionsRun,
-                    isActive = state.isMotionMonitoringRunning,
-                    owner = "Member 2",
-                    modifier = Modifier.weight(1f)
-                )
-                SubsystemIndicator(
-                    title = "Resilient Comm",
-                    icon = Icons.Default.Sensors,
-                    isActive = true,
-                    owner = "Member 3",
-                    modifier = Modifier.weight(1f)
-                )
-            }
-        }
-
-        // Live Detection Diagnostics Section
-        item {
-            LiveDiagnosticsCard(state = state)
-        }
-
-        // Cross-Module Simulation & Verification Controls
-        item {
-            Card(
-                colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
-                    Text(
-                        text = "Module Integration Simulation",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary
-                    )
-                    Text(
-                        text = "Simulate detection triggers to verify multimodal contracts and reactive state:",
-                        fontSize = 11.sp,
-                        color = TextSecondary,
-                        modifier = Modifier.padding(bottom = 10.dp)
-                    )
-
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        OutlinedButton(
-                            onClick = {
-                                scope.launch {
-                                    audioModule.emitSimulatedDistress(DistressType.SCREAM, 0.94f)
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Scream (M1)", fontSize = 10.sp)
-                        }
-
-                        OutlinedButton(
-                            onClick = {
-                                scope.launch {
-                                    motionDetector.emitSimulatedAnomaly(0.89f, DistressType.FALL_IMPACT)
-                                }
-                            },
-                            modifier = Modifier.weight(1f)
-                        ) {
-                            Text("Fall Impact (M2)", fontSize = 10.sp)
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    OutlinedButton(
-                        onClick = {
-                            scope.launch {
-                                val freshLoc = locationManager.getLastKnownLocation()
-                                val payload = AlertPayload(
-                                    incidentId = "SIM-${System.currentTimeMillis()}",
-                                    distressType = DistressType.KEYWORD,
-                                    confidence = 0.95f,
-                                    location = freshLoc,
-                                    emergencyMessage = "SIMULATION: Hotword 'Bachao' triggered emergency alert"
-                                )
-                                val receipts = communicator.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
-                                receipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
-                            }
-                        },
-                        modifier = Modifier.fillMaxWidth()
-                    ) {
-                        Text("Simulate Multi-Channel Alert (M3 Telegram/SMS)", fontSize = 11.sp)
-                    }
-                }
-            }
-        }
-
-        // Delivery Audit Trail Section
-        item {
-            Text(
-                text = "Recent Delivery Audit Trail",
-                fontSize = 15.sp,
-                fontWeight = FontWeight.SemiBold,
-                color = TextPrimary
-            )
-        }
-
-        if (state.recentDeliveryReceipts.isEmpty()) {
-            item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                 Text(
-                    text = "No outbound alerts dispatched yet. Dispatchers standby.",
-                    fontSize = 11.sp,
-                    color = TextSecondary
+                    text = "MONITORING HEALTH",
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.Black,
+                    color = TextTertiary,
+                    letterSpacing = 1.sp
                 )
-            }
-        } else {
-            items(state.recentDeliveryReceipts) { receipt ->
-                Card(
+
+                // 2x2 Grid of Subsystems
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                    colors = CardDefaults.cardColors(containerColor = DarkSurface),
-                    shape = RoundedCornerShape(8.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth().padding(10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Channel: ${receipt.channel.name}",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = SafeGreen
-                            )
-                            Text(
-                                text = "Recipient: ${receipt.recipient ?: "Emergency Broadcast"} (${receipt.latencyMs}ms)",
-                                fontSize = 10.sp,
-                                color = TextSecondary
-                            )
-                        }
+                    MicrophoneTelemetryCard(
+                        audioModule = audioModule,
+                        isMonitoringRunning = state.isAudioMonitoringRunning,
+                        hasAudioPermission = state.isAudioPermissionGranted,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                    val isMotionActive = state.isMotionMonitoringRunning
+                    HealthIndicatorCard(
+                        title = "Motion Sensors",
+                        status = if (isMotionActive) "Active" else "Standby",
+                        detail = if (isMotionActive) "Accel + Gyro" else "Idle",
+                        icon = Icons.AutoMirrored.Filled.DirectionsRun,
+                        isActive = isMotionActive,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val hasGps = state.currentLocation != null
+                    val locationDetail = state.currentLocation?.let { "±${it.accuracyMeters.toInt()}m accuracy" } ?: "Searching..."
+                    HealthIndicatorCard(
+                        title = "Location GPS",
+                        status = if (hasGps) "GPS Locked" else "No Fix",
+                        detail = locationDetail,
+                        icon = Icons.Default.LocationOn,
+                        isActive = hasGps,
+                        modifier = Modifier.weight(1f)
+                    )
+
+                    val isTelegramReady = TelegramConfigManager.isConfigured()
+                    val commDetail = if (pendingQueueCount > 0) "$pendingQueueCount Pending" else if (isTelegramReady) "Ready" else "Not Configured"
+                    HealthIndicatorCard(
+                        title = "Emergency Net",
+                        status = if (isTelegramReady) "Telegram Ready" else "Setup Needed",
+                        detail = commDetail,
+                        icon = Icons.Default.Sensors,
+                        isActive = isTelegramReady,
+                        modifier = Modifier.weight(1f)
+                    )
+                }
+            }
+        }
+
+        // --- E. Recent Activity (Latest Real Incident or Empty State) ---
+        item {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Text(
+                        text = "RECENT ACTIVITY",
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Black,
+                        color = TextTertiary,
+                        letterSpacing = 1.sp
+                    )
+
+                    TextButton(onClick = onNavigateToIncidents) {
                         Text(
-                            text = receipt.status.name,
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = TextPrimary
+                            text = "View History",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = BrandMagenta
                         )
                     }
                 }
-            }
-        }
 
-        // Incident History Log Section
-        item {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "Incident History Log",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    color = TextPrimary
-                )
-                Text(
-                    text = "${state.incidentHistory.size} recorded",
-                    fontSize = 11.sp,
-                    color = TextSecondary
-                )
-            }
-        }
+                if (latestIncident != null) {
+                    val inc = latestIncident!!
+                    val dateFormatted = remember(inc.startTimeEpochMs) {
+                        SimpleDateFormat("MMM dd, HH:mm:ss", Locale.getDefault()).format(Date(inc.startTimeEpochMs))
+                    }
 
-        if (state.incidentHistory.isEmpty()) {
-            item {
-                Text(
-                    text = "Incident history is clean. No past incidents recorded.",
-                    fontSize = 11.sp,
-                    color = TextSecondary
-                )
-            }
-        } else {
-            items(state.incidentHistory) { incident ->
-                IncidentHistoryCard(incident = incident)
-            }
-        }
-    }
-}
+                    Card(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { onNavigateToIncidents() },
+                        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                        shape = RoundedCornerShape(12.dp),
+                        border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(DarkBorder))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Row(verticalAlignment = Alignment.CenterVertically) {
+                                    Text(
+                                        text = inc.triggerType.name.replace("_", " "),
+                                        fontSize = 13.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = when (inc.triggerType) {
+                                            DistressType.MANUAL_SOS -> EmergencyLightRed
+                                            DistressType.SCREAM -> WarningAmber
+                                            else -> BrandMagenta
+                                        }
+                                    )
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Text(
+                                        text = inc.incidentId,
+                                        fontSize = 11.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        color = TextSecondary
+                                    )
+                                }
+                                Spacer(modifier = Modifier.height(4.dp))
+                                Text(
+                                    text = "$dateFormatted • Delivery: ${inc.deliveryStatus}",
+                                    fontSize = 11.sp,
+                                    color = TextTertiary
+                                )
+                            }
 
-@Composable
-fun LocationTelemetryCard(
-    location: LocationData?,
-    isGpsEnabled: Boolean,
-    onRefreshLocation: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(12.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Row(
-                verticalAlignment = Alignment.CenterVertically,
-                modifier = Modifier.weight(1f)
-            ) {
-                Icon(
-                    imageVector = Icons.Default.LocationOn,
-                    contentDescription = null,
-                    tint = if (location != null) SafeGreen else WarningAmber,
-                    modifier = Modifier.size(24.dp)
-                )
-                Spacer(modifier = Modifier.width(10.dp))
-                Column {
-                    Text(
-                        text = if (location != null) "GPS: %.4f, %.4f".format(location.latitude, location.longitude)
-                        else if (!isGpsEnabled) "GPS Disabled in Settings"
-                        else "Acquiring GPS fix...",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = TextPrimary
-                    )
-                    Text(
-                        text = if (location != null) "Accuracy: ±%.1fm (${location.provider})".format(location.accuracyMeters)
-                        else "Location will attach to outbound alerts",
-                        fontSize = 10.sp,
-                        color = TextSecondary
-                    )
+                            Icon(
+                                imageVector = Icons.Default.KeyboardArrowRight,
+                                contentDescription = null,
+                                tint = TextSecondary
+                            )
+                        }
+                    }
+                } else {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                        shape = RoundedCornerShape(12.dp),
+                        border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(DarkBorder))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(14.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = null,
+                                tint = SafeGreen,
+                                modifier = Modifier.size(20.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Text(
+                                text = "No recent incidents. All safety systems standing by.",
+                                fontSize = 12.sp,
+                                color = TextSecondary
+                            )
+                        }
+                    }
                 }
             }
+        }
 
-            IconButton(onClick = onRefreshLocation) {
-                Icon(
-                    imageVector = Icons.Default.Refresh,
-                    contentDescription = "Refresh GPS",
-                    tint = TextSecondary,
-                    modifier = Modifier.size(20.dp)
-                )
-            }
+        item {
+            Spacer(modifier = Modifier.height(24.dp))
         }
     }
 }
 
 @Composable
-fun ActiveIncidentCard(
-    incident: EmergencyIncident,
-    onCancel: () -> Unit
-) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = EmergencyDarkRed),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Column(modifier = Modifier.padding(14.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Text(
-                    text = "ACTIVE INCIDENT: ${incident.incidentId}",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-                Text(
-                    text = incident.level.name,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.ExtraBold,
-                    color = Color.White
-                )
-            }
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = incident.notes,
-                fontSize = 11.sp,
-                color = Color.White.copy(alpha = 0.9f)
-            )
-            incident.location?.let { loc ->
-                Text(
-                    text = "Coordinates: %.4f, %.4f (±%.1fm)".format(loc.latitude, loc.longitude, loc.accuracyMeters),
-                    fontSize = 10.sp,
-                    color = Color.White.copy(alpha = 0.8f)
-                )
-            }
-            Spacer(modifier = Modifier.height(8.dp))
-            OutlinedButton(
-                onClick = onCancel,
-                modifier = Modifier.fillMaxWidth(),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = Color.White)
-            ) {
-                Text("Cancel Alert / False Alarm", fontWeight = FontWeight.Bold)
-            }
-        }
-    }
-}
-
-@Composable
-fun IncidentHistoryCard(incident: EmergencyIncident) {
-    val dateFormat = remember { SimpleDateFormat("MMM dd, HH:mm:ss", Locale.getDefault()) }
-    val formattedDate = dateFormat.format(Date(incident.startTimeEpochMs))
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        shape = RoundedCornerShape(8.dp)
-    ) {
-        Column(modifier = Modifier.padding(10.dp)) {
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.SpaceBetween
-            ) {
-                Text(
-                    text = incident.incidentId,
-                    fontSize = 11.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
-                )
-                Text(
-                    text = incident.level.name,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = when (incident.level) {
-                        EmergencyLevel.CONFIRMED_EMERGENCY -> EmergencyLightRed
-                        EmergencyLevel.CANCELLED -> WarningAmber
-                        EmergencyLevel.RESOLVED -> SafeGreen
-                        else -> TextSecondary
-                    }
-                )
-            }
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = "$formattedDate • ${incident.notes}",
-                fontSize = 10.sp,
-                color = TextSecondary
-            )
-        }
-    }
-}
-
-@Composable
-fun StatusBanner(level: EmergencyLevel, message: String) {
-    val (backgroundColor, textColor, icon) = when (level) {
-        EmergencyLevel.CONFIRMED_EMERGENCY -> Triple(EmergencyDarkRed, Color.White, Icons.Default.Warning)
-        EmergencyLevel.VERIFYING -> Triple(WarningAmber.copy(alpha = 0.2f), WarningAmber, Icons.Default.Warning)
-        EmergencyLevel.MONITORING -> Triple(SafeGreen.copy(alpha = 0.15f), SafeGreen, Icons.Default.CheckCircle)
-        EmergencyLevel.SUSPICIOUS -> Triple(WarningAmber.copy(alpha = 0.3f), WarningAmber, Icons.Default.Warning)
-        else -> Triple(DarkSurfaceElevated, TextSecondary, Icons.Default.Security)
-    }
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = backgroundColor),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Row(
-            modifier = Modifier.fillMaxWidth().padding(14.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = null,
-                tint = textColor,
-                modifier = Modifier.size(24.dp)
-            )
-            Spacer(modifier = Modifier.width(10.dp))
-            Column {
-                Text(
-                    text = "STATUS: ${level.name}",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = textColor
-                )
-                Text(
-                    text = message,
-                    fontSize = 11.sp,
-                    color = TextPrimary
-                )
-            }
-        }
-    }
-}
-
-@Composable
-fun SubsystemIndicator(
+private fun HealthIndicatorCard(
     title: String,
+    status: String,
+    detail: String,
     icon: ImageVector,
     isActive: Boolean,
-    owner: String,
     modifier: Modifier = Modifier
 ) {
     Card(
         modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated),
-        shape = RoundedCornerShape(10.dp)
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        shape = RoundedCornerShape(12.dp),
+        border = CardDefaults.outlinedCardBorder().copy(
+            brush = androidx.compose.ui.graphics.SolidColor(
+                if (isActive) SafeGreen.copy(alpha = 0.25f) else DarkBorder
+            )
+        )
     ) {
-        Column(
-            modifier = Modifier.padding(10.dp),
-            horizontalAlignment = Alignment.CenterHorizontally
-        ) {
-            Icon(
-                imageVector = icon,
-                contentDescription = title,
-                tint = if (isActive) SafeGreen else TextSecondary,
-                modifier = Modifier.size(20.dp)
-            )
-            Spacer(modifier = Modifier.height(4.dp))
-            Text(
-                text = title,
-                fontSize = 10.sp,
-                fontWeight = FontWeight.SemiBold,
-                textAlign = TextAlign.Center,
-                color = TextPrimary
-            )
-            Text(
-                text = owner,
-                fontSize = 9.sp,
-                color = TextSecondary
-            )
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(
-                text = if (isActive) "ACTIVE" else "STANDBY",
-                fontSize = 9.sp,
-                fontWeight = FontWeight.Bold,
-                color = if (isActive) SafeGreen else WarningAmber
-            )
-        }
-    }
-}
-
-@Composable
-fun LiveDiagnosticsCard(state: com.guardiangrid.core.state.EmergencyState) {
-    val lastSignal = state.lastDetectedSignal
-    val isSimulated = lastSignal?.metadata?.get("simulation") == "true" ||
-            lastSignal?.source?.contains("Simulat", ignoreCase = true) == true ||
-            lastSignal?.metadata?.containsKey("stub") == true
-
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated),
-        shape = RoundedCornerShape(12.dp)
-    ) {
-        Column(modifier = Modifier.fillMaxWidth().padding(14.dp)) {
+        Column(modifier = Modifier.padding(12.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(
-                    text = "Live Detection Diagnostics",
-                    fontSize = 13.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = TextPrimary
+                Icon(
+                    imageVector = icon,
+                    contentDescription = null,
+                    tint = if (isActive) SafeGreen else TextDisabled,
+                    modifier = Modifier.size(18.dp)
                 )
-                Text(
-                    text = state.emergencyLevel.name,
-                    fontSize = 10.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = when (state.emergencyLevel) {
-                        EmergencyLevel.CONFIRMED_EMERGENCY -> EmergencyRed
-                        EmergencyLevel.VERIFYING -> WarningAmber
-                        EmergencyLevel.SUSPICIOUS -> WarningAmber
-                        EmergencyLevel.MONITORING -> SafeGreen
-                        else -> TextSecondary
-                    }
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(if (isActive) SafeGreen else TextDisabled)
                 )
             }
 
             Spacer(modifier = Modifier.height(8.dp))
 
-            // Subsystem Status Badges
-            Row(
-                modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                DiagnosticBadge(
-                    label = "Audio: ${if (state.isAudioMonitoringRunning) "ACTIVE" else "STANDBY"}",
-                    isActive = state.isAudioMonitoringRunning,
-                    modifier = Modifier.weight(1f)
-                )
-                DiagnosticBadge(
-                    label = "Motion: ${if (state.isMotionMonitoringRunning) "ACTIVE" else "STANDBY"}",
-                    isActive = state.isMotionMonitoringRunning,
-                    modifier = Modifier.weight(1f)
-                )
-            }
-
-            // Verification Countdown Banner (Active when verifying)
-            if (state.verificationCountdownRemainingMs > 0) {
-                Spacer(modifier = Modifier.height(8.dp))
-                Box(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(6.dp)).background(WarningAmber.copy(alpha = 0.15f))) {
-                    Row(
-                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Text(
-                            text = "⏳ Verification Countdown Active",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.SemiBold,
-                            color = WarningAmber
-                        )
-                        Text(
-                            text = "${(state.verificationCountdownRemainingMs + 999) / 1000}s remaining",
-                            fontSize = 12.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = WarningAmber
-                        )
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            // Last Detected Event Info
-            if (lastSignal != null) {
-                val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
-                val timeStr = timeFormat.format(Date(lastSignal.timestampEpochMs))
-                val keyword = lastSignal.metadata["keyword"]
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween
-                ) {
-                    Column(modifier = Modifier.weight(1f)) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Text(
-                                text = "Event: ${lastSignal.type.name}",
-                                fontSize = 11.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimary
-                            )
-                            if (isSimulated) {
-                                Spacer(modifier = Modifier.width(6.dp))
-                                Text(
-                                    text = "[SIMULATED]",
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = WarningAmber
-                                )
-                            }
-                        }
-                        if (keyword != null) {
-                            Text(
-                                text = "Keyword: '$keyword'",
-                                fontSize = 10.sp,
-                                color = InfoBlue
-                            )
-                        }
-                    }
-                    Column(horizontalAlignment = Alignment.End) {
-                        Text(
-                            text = "Confidence: ${(lastSignal.confidence * 100).toInt()}%",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (lastSignal.confidence >= 0.80f) EmergencyLightRed else SafeGreen
-                        )
-                        Text(
-                            text = "Time: $timeStr",
-                            fontSize = 9.sp,
-                            color = TextSecondary
-                        )
-                    }
-                }
-            } else {
-                Text(
-                    text = "No detection events recorded. Sensors in standby.",
-                    fontSize = 10.sp,
-                    color = TextSecondary
-                )
-            }
+            Text(
+                text = title,
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = TextSecondary
+            )
+            Text(
+                text = status,
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (isActive) TextPrimary else TextDisabled
+            )
+            Text(
+                text = detail,
+                fontSize = 10.sp,
+                color = TextTertiary,
+                maxLines = 1
+            )
         }
     }
 }
 
 @Composable
-private fun DiagnosticBadge(label: String, isActive: Boolean, modifier: Modifier = Modifier) {
-    Box(modifier = modifier.clip(RoundedCornerShape(6.dp)).background(if (isActive) SafeGreen.copy(alpha = 0.15f) else DarkSurface), contentAlignment = Alignment.Center) {
-        Text(
-            text = label,
-            fontSize = 10.sp,
-            fontWeight = FontWeight.SemiBold,
-            color = if (isActive) SafeGreen else TextSecondary,
-            textAlign = TextAlign.Center,
-            modifier = Modifier.padding(vertical = 4.dp, horizontal = 6.dp)
+private fun MicrophoneTelemetryCard(
+    audioModule: AudioModuleStub?,
+    isMonitoringRunning: Boolean,
+    hasAudioPermission: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val audioMetrics by audioModule?.liveMetrics?.collectAsState() ?: remember { mutableStateOf(LiveAudioMetrics()) }
+    val isRecording = audioMetrics.status == AudioCaptureStatus.RECORDING && isMonitoringRunning && hasAudioPermission
+    val hasError = audioMetrics.status == AudioCaptureStatus.CAPTURE_ERROR || audioMetrics.status == AudioCaptureStatus.PERMISSION_DENIED
+
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        shape = RoundedCornerShape(12.dp),
+        border = CardDefaults.outlinedCardBorder().copy(
+            brush = androidx.compose.ui.graphics.SolidColor(
+                if (isRecording) SafeGreen.copy(alpha = 0.3f) else if (hasError) EmergencyRed.copy(alpha = 0.3f) else DarkBorder
+            )
         )
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Mic,
+                    contentDescription = null,
+                    tint = if (isRecording) SafeGreen else if (hasError) EmergencyRed else TextDisabled,
+                    modifier = Modifier.size(18.dp)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(if (isRecording) SafeGreen else if (hasError) EmergencyRed else TextDisabled)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Microphone",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = TextSecondary
+            )
+            Text(
+                text = if (isRecording) "Listening" else if (hasError) "Error" else "Idle",
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = if (isRecording) TextPrimary else if (hasError) EmergencyLightRed else TextDisabled
+            )
+
+            if (isRecording) {
+                val dbfsDisplay = if (audioMetrics.dbfs > -95f) "${audioMetrics.dbfs.toInt()} dBFS" else "-∞ dBFS"
+                Text(
+                    text = "${audioMetrics.activeSource} • $dbfsDisplay",
+                    fontSize = 10.sp,
+                    color = SafeGreen,
+                    maxLines = 1
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                val normalizedLevel = ((audioMetrics.dbfs + 60f) / 60f).coerceIn(0f, 1f)
+                LinearProgressIndicator(
+                    progress = { normalizedLevel },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = BrandMagenta,
+                    trackColor = DarkSurfaceHighlight
+                )
+            } else {
+                Text(
+                    text = if (hasError) (audioMetrics.errorMessage ?: "Capture failed") else "Standby",
+                    fontSize = 10.sp,
+                    color = if (hasError) EmergencyRed else TextTertiary,
+                    maxLines = 1
+                )
+            }
+        }
     }
 }

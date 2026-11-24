@@ -34,7 +34,8 @@ data class EmergencyContact(
     val name: String,
     val phoneNumber: String,
     val telegramChatId: String? = null,
-    val isPrimary: Boolean = false
+    val isPrimary: Boolean = false,
+    val relationship: String = "Emergency Contact"
 )
 
 /**

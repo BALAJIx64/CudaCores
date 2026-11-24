@@ -17,11 +17,25 @@ enum class ProtectionMode {
 }
 
 /**
+ * Android foreground service and hardware monitoring lifecycle state.
+ */
+enum class MonitoringServiceState {
+    STOPPED,
+    STARTING,
+    ACTIVE,
+    STOPPING,
+    ERROR,
+    PERMISSION_REQUIRED
+}
+
+/**
  * Reactive global application state for GuardianGrid.
  */
 data class EmergencyState(
     val mode: ProtectionMode = ProtectionMode.STANDBY,
     val isProtectionActive: Boolean = false,
+    val monitoringServiceState: MonitoringServiceState = MonitoringServiceState.STOPPED,
+    val monitoringServiceError: String? = null,
     val emergencyLevel: EmergencyLevel = EmergencyLevel.IDLE,
     val activeIncident: EmergencyIncident? = null,
     val recentDistressSignals: List<DistressSignal> = emptyList(),

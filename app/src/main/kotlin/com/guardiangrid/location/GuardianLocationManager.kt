@@ -24,10 +24,10 @@ import kotlin.coroutines.resume
  * Provides resilient location acquisition using GPS and Network providers with automatic fallback.
  * Gracefully handles denied permissions, disabled providers, and timeouts.
  */
-class GuardianLocationManager(private val context: Context) {
+class GuardianLocationManager(private val context: Context? = null) {
 
     private val locationManager: LocationManager? =
-        context.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
+        context?.getSystemService(Context.LOCATION_SERVICE) as? LocationManager
 
     private val _lastLocation = MutableStateFlow<LocationData?>(null)
     val lastLocation: StateFlow<LocationData?> = _lastLocation.asStateFlow()
@@ -58,13 +58,14 @@ class GuardianLocationManager(private val context: Context) {
      * Check whether fine or coarse location permissions are granted.
      */
     fun hasLocationPermission(): Boolean {
+        val ctx = context ?: return false
         val finePermission = ContextCompat.checkSelfPermission(
-            context,
+            ctx,
             Manifest.permission.ACCESS_FINE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
 
         val coarsePermission = ContextCompat.checkSelfPermission(
-            context,
+            ctx,
             Manifest.permission.ACCESS_COARSE_LOCATION
         ) == PackageManager.PERMISSION_GRANTED
 

@@ -6,19 +6,16 @@ import com.guardiangrid.core.models.AudioSegment
 import com.guardiangrid.core.models.DistressSignal
 import com.guardiangrid.core.models.DistressType
 import kotlinx.coroutines.flow.Flow
-import kotlinx.coroutines.flow.merge
-import kotlinx.coroutines.flow.onEach
+import kotlinx.coroutines.flow.StateFlow
 import java.io.File
 
 /**
  * Unified production facade for GuardianGrid's Audio Intelligence subsystem.
  *
  * Implements:
- * - [AudioDistressDetector]: Pretrained-compatible AI & acoustic sound-event scream classifier.
+ * - [AudioDistressDetector]: Pretrained-compatible AI & acoustic sound-event vocal distress classifier.
  * - [AudioEvidenceRecorder]: Two-stage privacy-preserving audio evidence capture protocol.
- *
- * Maintains 100% backward compatibility with [MainActivity], Compose UI simulation controls,
- * and architectural unit tests in [tests/CoreArchitectureTest.kt].
+ * - Exposes real-time [LiveAudioMetrics] StateFlow from [AudioCaptureManager].
  *
  * Owned by Member 1 (modules/audio).
  */
@@ -33,30 +30,26 @@ class AudioModuleStub(
     val screamClassifier: ScreamDistressClassifier = ScreamDistressClassifier(modelDirectory, circularBuffer)
     val evidenceRecorder: TwoStageAudioEvidenceRecorder = TwoStageAudioEvidenceRecorder(circularBuffer, captureManager, cacheDirectory)
 
+    val liveMetrics: StateFlow<LiveAudioMetrics>
+        get() = captureManager.liveMetrics
+
     // --- AudioDistressDetector Implementation ---
 
     /**
-     * Start continuous audio classification and distress keyword spotting concurrently.
-     * Merges both scream and keyword detection streams into a single Flow<DistressSignal>.
+     * Start continuous audio classification for vocal distress (screams, shouts, and crying).
+     * Emits structured [DistressSignal] instances when distress exceeds calibrated threshold.
      */
     override fun startMonitoring(): Flow<DistressSignal> {
         captureManager.startCapture()
-        val screamFlow = screamClassifier.startMonitoring().onEach { signal ->
-            if (signal.type == DistressType.SCREAM) {
-                keywordSpotter.notifyScreamDetected(1800L)
-            }
-        }
-        val keywordFlow = keywordSpotter.startListening(DistressKeywordSpotter.DEFAULT_KEYWORDS)
-        return merge(screamFlow, keywordFlow)
+        return screamClassifier.startMonitoring()
     }
 
     override fun stopMonitoring() {
         screamClassifier.stopMonitoring()
-        keywordSpotter.stopListening()
         captureManager.stopCapture()
     }
 
-    override fun isMonitoring(): Boolean = screamClassifier.isMonitoring() || keywordSpotter.isListening()
+    override fun isMonitoring(): Boolean = screamClassifier.isMonitoring()
 
     override fun setSensitivity(sensitivity: Float) {
         screamClassifier.setSensitivity(sensitivity)
@@ -79,9 +72,9 @@ class AudioModuleStub(
     // --- Simulation & Testing Bridge ---
 
     /**
-     * Testing and simulation bridge used by Compose Dashboard buttons to simulate distress detection.
+     * Testing / simulation utility to inject a distress signal directly into the flow.
      */
-    suspend fun emitSimulatedDistress(type: DistressType = DistressType.SCREAM, confidence: Float = 0.92f, source: String = "AudioIntelligenceFacade") {
-        screamClassifier.emitSimulatedDistress(confidence, source)
+    suspend fun emitSimulatedDistress(type: DistressType = DistressType.SCREAM, confidence: Float = 0.94f) {
+        screamClassifier.emitSimulatedDistress(confidence, "SimulatedAudioDetector")
     }
 }

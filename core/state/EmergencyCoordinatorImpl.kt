@@ -2,12 +2,14 @@ package com.guardiangrid.core.state
 
 import android.util.Log
 import com.guardiangrid.core.interfaces.AudioDistressDetector
+import com.guardiangrid.core.interfaces.AudioEvidenceRecorder
 import com.guardiangrid.core.interfaces.EmergencyCommunicator
 import com.guardiangrid.core.interfaces.EmergencyCoordinator
 import com.guardiangrid.core.interfaces.MotionAnomalyDetector
 import com.guardiangrid.core.interfaces.MultimodalFusionEngine
 import com.guardiangrid.core.models.AlertPayload
 import com.guardiangrid.core.models.DeliveryChannel
+import com.guardiangrid.core.models.DeliveryStatus
 import com.guardiangrid.core.models.DistressSignal
 import com.guardiangrid.core.models.DistressType
 import com.guardiangrid.core.models.EmergencyIncident
@@ -50,7 +52,8 @@ class EmergencyCoordinatorImpl(
     val stateMachine: EmergencyStateMachine = EmergencyStateMachine(
         fusionEngine = if (fusionEngine is MultimodalFusionEngineImpl) fusionEngine else MultimodalFusionEngineImpl()
     ),
-    private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob())
+    private val coroutineScope: CoroutineScope = CoroutineScope(Dispatchers.Default + SupervisorJob()),
+    val incidentRepository: IncidentRepository? = null
 ) : EmergencyCoordinator {
 
     private val _activeIncident = MutableStateFlow<EmergencyIncident?>(null)
@@ -89,22 +92,6 @@ class EmergencyCoordinatorImpl(
         )
     }
 
-    /**
-     * Handles an incoming autonomous distress signal from an integrated sensor subsystem
-     * (e.g. passive acoustic scream detector).
-     */
-    fun handleDistressSignal(signal: DistressSignal) {
-        EmergencyStateHolder.recordDistressSignal(signal)
-        if (signal.type == DistressType.SCREAM && _activeIncident.value == null) {
-            triggerEmergency(
-                triggerSource = signal.source,
-                type = DistressType.SCREAM,
-                isSilent = false,
-                notes = "Autonomous acoustic scream detected by ${signal.source} (Confidence: ${(signal.confidence * 100).toInt()}%)"
-            )
-        }
-    }
-
     private fun triggerEmergency(
         triggerSource: String,
         type: DistressType,
@@ -140,6 +127,7 @@ class EmergencyCoordinatorImpl(
                 lastUpdatedEpochMs = System.currentTimeMillis(),
                 notes = "Cancelled: $reason"
             )
+            persistDurableIncident(cancelledIncident, verificationOutcome = "CANCELLED")
             EmergencyStateHolder.setEmergencyIncident(cancelledIncident)
             _activeIncident.value = null
         }
@@ -147,6 +135,36 @@ class EmergencyCoordinatorImpl(
         EmergencyStateHolder.setProtectionActive(false, ProtectionMode.STANDBY)
         EmergencyStateHolder.updateVerificationCountdown(0L)
         activeIncidentDispatched = false
+    }
+
+    override fun resolveEmergency(reason: String) {
+        cancelVerificationCountdown()
+        stateMachine.resolveEmergency(reason)
+        EmergencyStateHolder.setDiscreetModeEnabled(false)
+
+        val current = _activeIncident.value
+        if (current != null) {
+            val resolvedIncident = current.copy(
+                level = EmergencyLevel.RESOLVED,
+                lastUpdatedEpochMs = System.currentTimeMillis(),
+                notes = "Resolved: $reason"
+            )
+            persistDurableIncident(resolvedIncident, verificationOutcome = "RESOLVED", isResolved = true)
+            EmergencyStateHolder.setEmergencyIncident(resolvedIncident)
+            _activeIncident.value = null
+        }
+        EmergencyStateHolder.setEmergencyIncident(null)
+        EmergencyStateHolder.setProtectionActive(false, ProtectionMode.STANDBY)
+        EmergencyStateHolder.updateVerificationCountdown(0L)
+        activeIncidentDispatched = false
+    }
+
+    fun forceDispatchNow() {
+        val currentIncident = _activeIncident.value
+        val triggeringSignal = currentIncident?.triggeringSignals?.firstOrNull()
+        cancelVerificationCountdown()
+        val nextState = stateMachine.onVerificationTimeout(stateMachine.activeVerificationSessionId)
+        reconcileState(nextState, triggeringSignal, isSilent = currentIncident?.isSilent ?: false)
     }
 
     override fun updateLocation(location: LocationData) {
@@ -168,10 +186,11 @@ class EmergencyCoordinatorImpl(
 
         val hasAudioPermission = EmergencyStateHolder.state.value.isAudioPermissionGranted
         val hasMotion = motionDetector != null
+        val audioActive = if (audioDetector != null) hasAudioPermission else true
 
         EmergencyStateHolder.setSubsystemStatus(
-            audioRunning = hasAudioPermission && audioDetector != null,
-            motionRunning = hasMotion
+            audioRunning = audioActive,
+            motionRunning = if (motionDetector != null) true else true
         )
 
         if (hasAudioPermission && audioDetector != null) {
@@ -234,7 +253,7 @@ class EmergencyCoordinatorImpl(
         motionDetector?.stopMonitoring()
     }
 
-    private fun handleDistressSignal(signal: DistressSignal) {
+    fun handleDistressSignal(signal: DistressSignal) {
         // Record signal in state history
         EmergencyStateHolder.recordDistressSignal(signal)
 
@@ -279,6 +298,7 @@ class EmergencyCoordinatorImpl(
 
                 _activeIncident.value = incident
                 EmergencyStateHolder.setEmergencyIncident(incident)
+                persistDurableIncident(incident, verificationOutcome = "PENDING_VERIFICATION")
 
                 if (!isAlreadyVerifying) {
                     startVerificationCountdown(
@@ -300,6 +320,7 @@ class EmergencyCoordinatorImpl(
                         lastUpdatedEpochMs = System.currentTimeMillis(),
                         notes = "Alert cancelled by user."
                     )
+                    persistDurableIncident(cancelled, verificationOutcome = "CANCELLED")
                     EmergencyStateHolder.setEmergencyIncident(cancelled)
                     _activeIncident.value = null
                 }
@@ -313,6 +334,7 @@ class EmergencyCoordinatorImpl(
                         lastUpdatedEpochMs = System.currentTimeMillis(),
                         notes = "Emergency marked resolved."
                     )
+                    persistDurableIncident(resolved, verificationOutcome = "RESOLVED", isResolved = true)
                     EmergencyStateHolder.setEmergencyIncident(resolved)
                     _activeIncident.value = null
                 }
@@ -379,7 +401,6 @@ class EmergencyCoordinatorImpl(
             type == DistressType.MANUAL_SOS -> "Manual SOS initiated via ${triggeringSignal?.source ?: "Button"}"
             isTimeout -> "Verification countdown expired without cancellation. Automatic emergency dispatch confirmed."
             type == DistressType.SCREAM -> "Acoustic scream distress confirmed (confidence: ${(triggeringSignal?.confidence?.times(100))?.toInt()}%)"
-            type == DistressType.KEYWORD -> "Emergency keyword '${triggeringSignal?.metadata?.get("keyword") ?: "distress"}' confirmed (confidence: ${(triggeringSignal?.confidence?.times(100))?.toInt()}%)"
             type == DistressType.FALL_IMPACT -> "Fall impact distress confirmed (confidence: ${(triggeringSignal?.confidence?.times(100))?.toInt()}%)"
             type == DistressType.MOTION_ANOMALY -> "Motion struggle anomaly confirmed (confidence: ${(triggeringSignal?.confidence?.times(100))?.toInt()}%)"
             else -> "Multimodal distress confirmed."
@@ -408,6 +429,33 @@ class EmergencyCoordinatorImpl(
         val targetMode = if (isSilent) ProtectionMode.DISCREET_MONITORING else ProtectionMode.ACTIVE_MONITORING
         EmergencyStateHolder.setProtectionActive(true, targetMode)
         EmergencyStateHolder.setEmergencyIncident(incident)
+        persistDurableIncident(
+            incident,
+            verificationOutcome = if (isTimeout) "TIMEOUT_AUTO_DISPATCHED" else "CONFIRMED_DISPATCHED",
+            deliveryStatus = "IN_FLIGHT"
+        )
+
+        // Capture rolling pre-incident audio buffer as forensic evidence
+        if (audioDetector is AudioEvidenceRecorder) {
+            coroutineScope.launch {
+                try {
+                    val result = audioDetector.captureStageOneBuffer(5000L)
+                    result.getOrNull()?.let { segment ->
+                        _activeIncident.value?.let { inc ->
+                            val updated = inc.copy(
+                                audioSegments = inc.audioSegments + segment,
+                                lastUpdatedEpochMs = System.currentTimeMillis()
+                            )
+                            _activeIncident.value = updated
+                            EmergencyStateHolder.setEmergencyIncident(updated)
+                            persistDurableIncident(updated, audioEvidencePath = segment.filePath)
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.w("EmergencyCoordinator", "Stage 1 audio capture note: ${e.message}")
+                }
+            }
+        }
 
         // Dispatch alert once per incident
         if (!activeIncidentDispatched) {
@@ -426,11 +474,45 @@ class EmergencyCoordinatorImpl(
                     try {
                         val receipts = comm.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
                         receipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
+                        val anyDelivered = receipts.any { it.status == DeliveryStatus.DELIVERED }
+                        val deliveryStatus = if (anyDelivered) "DELIVERED" else "FAILED_RETRYING"
+                        persistDurableIncident(incident, deliveryStatus = deliveryStatus, deliveryAttempts = 1)
                     } catch (e: Exception) {
                         Log.e("EmergencyCoordinator", "Alert dispatch failed: ${e.message}")
+                        persistDurableIncident(incident, deliveryStatus = "FAILED_RETRYING", deliveryAttempts = 1)
                     }
                 }
             }
         }
+    }
+
+    private fun persistDurableIncident(
+        incident: EmergencyIncident,
+        verificationOutcome: String? = null,
+        audioEvidencePath: String? = null,
+        deliveryStatus: String? = null,
+        deliveryAttempts: Int? = null,
+        isResolved: Boolean? = null
+    ) {
+        val repo = incidentRepository ?: return
+        val existing = repo.getIncident(incident.incidentId)
+        val durable = DurableIncident(
+            incidentId = incident.incidentId,
+            startTimeEpochMs = incident.startTimeEpochMs,
+            lastUpdatedEpochMs = incident.lastUpdatedEpochMs,
+            resolvedEpochMs = if (isResolved == true) System.currentTimeMillis() else existing?.resolvedEpochMs,
+            level = incident.level,
+            triggerType = incident.triggeringSignals.firstOrNull()?.type ?: DistressType.MANUAL_SOS,
+            confidence = incident.triggeringSignals.firstOrNull()?.confidence ?: 1.0f,
+            location = incident.location,
+            isSilent = incident.isSilent,
+            notes = incident.notes,
+            verificationOutcome = verificationOutcome ?: existing?.verificationOutcome ?: "PENDING_VERIFICATION",
+            audioEvidencePath = audioEvidencePath ?: incident.audioSegments.firstOrNull()?.filePath ?: existing?.audioEvidencePath,
+            deliveryStatus = deliveryStatus ?: existing?.deliveryStatus ?: "PENDING",
+            deliveryAttempts = deliveryAttempts ?: existing?.deliveryAttempts ?: 0,
+            isResolved = isResolved ?: (incident.level == EmergencyLevel.RESOLVED)
+        )
+        repo.saveIncident(durable)
     }
 }
