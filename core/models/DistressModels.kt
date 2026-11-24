@@ -5,7 +5,6 @@ package com.guardiangrid.core.models
  */
 enum class DistressType {
     SCREAM,
-    KEYWORD,
     MOTION_ANOMALY,
     FALL_IMPACT,
     MANUAL_SOS,

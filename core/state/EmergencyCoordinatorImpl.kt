@@ -219,21 +219,32 @@ class EmergencyCoordinatorImpl(
     }
 
     fun handleDistressSignal(signal: DistressSignal) {
+        Log.i("GuardianAudio", "Coordinator handleDistressSignal: type=${signal.type}, confidence=${signal.confidence}, source=${signal.source}")
         // Record signal in state history
         EmergencyStateHolder.recordDistressSignal(signal)
 
-        if (signal.type == DistressType.SCREAM && _activeIncident.value == null) {
-            triggerEmergency(
-                triggerSource = signal.source,
-                type = DistressType.SCREAM,
-                isSilent = false,
-                notes = "Autonomous acoustic scream detected by ${signal.source} (Confidence: ${(signal.confidence * 100).toInt()}%)"
-            )
-        }
-
         // Evaluate signal through unified state machine & multimodal fusion engine
         val nextState = stateMachine.onSignal(signal)
-        reconcileState(nextState, signal)
+
+        if (signal.type == DistressType.SCREAM && signal.confidence >= 0.85f && _activeIncident.value == null) {
+            val loc = locationProvider?.invoke() ?: EmergencyStateHolder.state.value.currentLocation
+            val incident = EmergencyIncident(
+                incidentId = "INC-${System.currentTimeMillis()}",
+                startTimeEpochMs = System.currentTimeMillis(),
+                lastUpdatedEpochMs = System.currentTimeMillis(),
+                level = EmergencyLevel.CONFIRMED_EMERGENCY,
+                triggeringSignals = listOf(signal),
+                location = loc,
+                isSilent = false,
+                notes = "Autonomous acoustic vocal distress detected by ${signal.source} (Confidence: ${(signal.confidence * 100).toInt()}%)"
+            )
+            _activeIncident.value = incident
+            EmergencyStateHolder.setEmergencyIncident(incident)
+            cancelVerificationCountdown()
+            escalateToConfirmedEmergency(signal, isSilent = false)
+        } else {
+            reconcileState(nextState, signal)
+        }
     }
 
     private fun reconcileState(
@@ -372,7 +383,6 @@ class EmergencyCoordinatorImpl(
             type == DistressType.MANUAL_SOS -> "Manual SOS initiated via ${triggeringSignal?.source ?: "Button"}"
             isTimeout -> "Verification countdown expired without cancellation. Automatic emergency dispatch confirmed."
             type == DistressType.SCREAM -> "Acoustic scream distress confirmed (confidence: ${(triggeringSignal?.confidence?.times(100))?.toInt()}%)"
-            type == DistressType.KEYWORD -> "Emergency keyword '${triggeringSignal?.metadata?.get("keyword") ?: "distress"}' confirmed (confidence: ${(triggeringSignal?.confidence?.times(100))?.toInt()}%)"
             type == DistressType.FALL_IMPACT -> "Fall impact distress confirmed (confidence: ${(triggeringSignal?.confidence?.times(100))?.toInt()}%)"
             type == DistressType.MOTION_ANOMALY -> "Motion struggle anomaly confirmed (confidence: ${(triggeringSignal?.confidence?.times(100))?.toInt()}%)"
             else -> "Multimodal distress confirmed."

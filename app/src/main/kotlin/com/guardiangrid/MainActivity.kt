@@ -52,8 +52,34 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private fun ensureModelAssetsExtracted() {
+        try {
+            val modelFile = File(filesDir, "yamnet.tflite")
+            val assetList = assets.list("models")
+            if (assetList != null && assetList.contains("yamnet.tflite")) {
+                if (!modelFile.exists() || modelFile.length() == 0L) {
+                    assets.open("models/yamnet.tflite").use { input ->
+                        java.io.FileOutputStream(modelFile).use { output ->
+                            input.copyTo(output)
+                        }
+                    }
+                    android.util.Log.i("GuardianAudio", "Extracted yamnet.tflite to ${modelFile.absolutePath} (${modelFile.length()} bytes)")
+                } else {
+                    android.util.Log.i("GuardianAudio", "YAMNet model already present at ${modelFile.absolutePath} (${modelFile.length()} bytes)")
+                }
+            } else {
+                android.util.Log.w("GuardianAudio", "models/yamnet.tflite not found in APK assets")
+            }
+        } catch (e: Exception) {
+            android.util.Log.e("GuardianAudio", "Failed to extract model assets: ${e.message}", e)
+        }
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+
+        // Ensure neural model assets (YAMNet) are extracted from APK to app filesDir
+        ensureModelAssetsExtracted()
 
         // Initialize location subsystem
         locationManager = GuardianLocationManager(this)
@@ -67,6 +93,7 @@ class MainActivity : ComponentActivity() {
         )
 
         // Initialize audio subsystem facade (concurrent scream + KWS)
+        android.util.Log.i("GuardianAudio", "Initializing AudioModuleStub with modelDirectory=$filesDir")
         audioModule = AudioModuleStub(
             cacheDirectory = cacheDir,
             modelDirectory = filesDir

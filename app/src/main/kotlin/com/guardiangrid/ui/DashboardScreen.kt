@@ -1,6 +1,7 @@
 package com.guardiangrid.ui
 
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -38,6 +39,7 @@ import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
@@ -71,7 +73,9 @@ import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.core.state.EmergencyStateHolder
 import com.guardiangrid.core.state.ProtectionMode
 import com.guardiangrid.location.GuardianLocationManager
+import com.guardiangrid.modules.audio.AudioCaptureStatus
 import com.guardiangrid.modules.audio.AudioModuleStub
+import com.guardiangrid.modules.audio.LiveAudioMetrics
 import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
 import com.guardiangrid.ui.permissions.PermissionOnboardingDialog
 import com.guardiangrid.ui.theme.DarkSurface
@@ -99,6 +103,7 @@ fun DashboardScreen(
     onRequestPermissions: () -> Unit
 ) {
     val state by EmergencyStateHolder.state.collectAsState()
+    val audioMetrics by audioModule.liveMetrics.collectAsState()
     val scope = rememberCoroutineScope()
     var showPermissionDialog by remember { mutableStateOf(false) }
 
@@ -106,9 +111,11 @@ fun DashboardScreen(
     // Ingests real-time microphone stream when Protection Mode is active.
     // Automatically routes detected screams to the Emergency Coordinator.
     LaunchedEffect(state.isProtectionActive) {
+        android.util.Log.i("GuardianAudio", "DashboardScreen: Protection toggled -> active=${state.isProtectionActive}")
         if (state.isProtectionActive) {
             audioModule.startMonitoring().collect { signal ->
                 if (signal.type == DistressType.SCREAM) {
+                    android.util.Log.i("GuardianAudio", "DashboardScreen: SCREAM distress signal intercepted -> forwarding to coordinator")
                     coordinator.handleDistressSignal(signal)
                 }
             }
@@ -224,6 +231,18 @@ fun DashboardScreen(
         // Live Protection Status Banner
         item {
             StatusBanner(state.emergencyLevel, state.statusMessage)
+        }
+
+        // Live Audio Volume Meter & Telemetry Card (Hardware Microphone Inspection)
+        item {
+            val engineName = if (audioModule.screamClassifier.isTfliteModelLoaded) "TFLite YAMNet" else "Edge DSP"
+            LiveAudioMeterCard(
+                metrics = audioMetrics,
+                isProtectionActive = state.isProtectionActive,
+                isAudioPermissionGranted = state.isAudioPermissionGranted,
+                activeEngine = engineName,
+                onRequestPermissions = { onRequestPermissions() }
+            )
         }
 
         // Active Incident Information Card (if emergency in progress)
@@ -486,10 +505,10 @@ fun DashboardScreen(
                                 val freshLoc = locationManager.getLastKnownLocation()
                                 val payload = AlertPayload(
                                     incidentId = "SIM-${System.currentTimeMillis()}",
-                                    distressType = DistressType.KEYWORD,
+                                    distressType = DistressType.SCREAM,
                                     confidence = 0.95f,
                                     location = freshLoc,
-                                    emergencyMessage = "SIMULATION: Hotword 'Bachao' triggered emergency alert"
+                                    emergencyMessage = "SIMULATION: Acoustic distress triggered emergency alert"
                                 )
                                 val receipts = communicator.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
                                 receipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
@@ -926,7 +945,6 @@ fun LiveDiagnosticsCard(state: com.guardiangrid.core.state.EmergencyState) {
             if (lastSignal != null) {
                 val timeFormat = remember { SimpleDateFormat("HH:mm:ss", Locale.getDefault()) }
                 val timeStr = timeFormat.format(Date(lastSignal.timestampEpochMs))
-                val keyword = lastSignal.metadata["keyword"]
 
                 Row(
                     modifier = Modifier.fillMaxWidth(),
@@ -950,9 +968,9 @@ fun LiveDiagnosticsCard(state: com.guardiangrid.core.state.EmergencyState) {
                                 )
                             }
                         }
-                        if (keyword != null) {
+                        lastSignal.metadata["engine"]?.let { engine ->
                             Text(
-                                text = "Keyword: '$keyword'",
+                                text = "Engine: $engine",
                                 fontSize = 10.sp,
                                 color = InfoBlue
                             )
@@ -994,5 +1012,149 @@ private fun DiagnosticBadge(label: String, isActive: Boolean, modifier: Modifier
             textAlign = TextAlign.Center,
             modifier = Modifier.padding(vertical = 4.dp, horizontal = 6.dp)
         )
+    }
+}
+
+/**
+ * Lightweight real-time audio volume VU meter and status badge.
+ * Visualizes live microphone PCM metrics (dBFS, RMS, Peak) without altering the audio pipeline.
+ */
+@Composable
+fun LiveAudioMeterCard(
+    metrics: LiveAudioMetrics,
+    isProtectionActive: Boolean,
+    isAudioPermissionGranted: Boolean,
+    activeEngine: String,
+    onRequestPermissions: () -> Unit
+) {
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated),
+        shape = RoundedCornerShape(12.dp)
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(14.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Mic,
+                        contentDescription = "Microphone",
+                        tint = when {
+                            !isAudioPermissionGranted -> WarningAmber
+                            !isProtectionActive -> TextSecondary
+                            metrics.status == AudioCaptureStatus.RECORDING -> SafeGreen
+                            else -> EmergencyRed
+                        },
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "LIVE AUDIO TELEMETRY",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = TextPrimary
+                    )
+                }
+
+                val statusText = when {
+                    !isAudioPermissionGranted -> "PERMISSION DENIED"
+                    !isProtectionActive -> "STANDBY"
+                    metrics.status == AudioCaptureStatus.RECORDING -> if (metrics.isPhysicalRecord) "MIC ACTIVE (${metrics.activeSource})" else "MOCK SILENCE"
+                    metrics.status == AudioCaptureStatus.CAPTURE_ERROR -> "CAPTURE ERROR"
+                    else -> "INACTIVE"
+                }
+                val chipColor = when {
+                    !isAudioPermissionGranted -> WarningAmber
+                    !isProtectionActive -> TextSecondary
+                    metrics.status == AudioCaptureStatus.RECORDING -> SafeGreen
+                    else -> EmergencyRed
+                }
+
+                Text(
+                    text = statusText,
+                    fontSize = 10.sp,
+                    fontWeight = FontWeight.Bold,
+                    color = chipColor,
+                    modifier = Modifier
+                        .background(chipColor.copy(alpha = 0.15f), RoundedCornerShape(4.dp))
+                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            if (!isAudioPermissionGranted) {
+                Text(
+                    text = "Microphone permission required for scream detection. Tap to grant.",
+                    fontSize = 11.sp,
+                    color = WarningAmber,
+                    modifier = Modifier.clickable { onRequestPermissions() }
+                )
+            } else if (!isProtectionActive) {
+                Text(
+                    text = "Protection is off. Turn on Protection Mode to activate live acoustic monitoring.",
+                    fontSize = 11.sp,
+                    color = TextSecondary
+                )
+            } else if (metrics.status == AudioCaptureStatus.CAPTURE_ERROR) {
+                Text(
+                    text = "Microphone hardware error: ${metrics.errorMessage ?: "Unknown"}",
+                    fontSize = 11.sp,
+                    color = EmergencyRed
+                )
+            } else {
+                // Active recording: Level meter bar (-60 dBFS to 0 dBFS mapped to 0f..1f)
+                val normalizedLevel = ((metrics.dbfs + 60f) / 60f).coerceIn(0f, 1f)
+                val animatedProgress by animateFloatAsState(targetValue = normalizedLevel, label = "audioLevel")
+
+                val meterColor = when {
+                    metrics.dbfs > -15f -> EmergencyRed
+                    metrics.dbfs > -30f -> WarningAmber
+                    else -> SafeGreen
+                }
+
+                LinearProgressIndicator(
+                    progress = { animatedProgress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(8.dp)
+                        .clip(RoundedCornerShape(4.dp)),
+                    color = meterColor,
+                    trackColor = DarkSurface
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Text(
+                        text = "dBFS: ${"%.1f".format(metrics.dbfs)} dBFS",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = "Peak: ${"%.2f".format(metrics.peak)}",
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        color = TextPrimary
+                    )
+                    Text(
+                        text = activeEngine,
+                        fontSize = 10.sp,
+                        color = InfoBlue
+                    )
+                }
+            }
+        }
     }
 }

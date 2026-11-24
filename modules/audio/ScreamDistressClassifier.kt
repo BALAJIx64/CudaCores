@@ -71,6 +71,15 @@ class ScreamDistressClassifier(
     var tfliteInterpreter: Any? = null
         private set
 
+    private fun logAudio(msg: String, isError: Boolean = false) {
+        try {
+            if (isError) android.util.Log.e("GuardianAudio", msg)
+            else android.util.Log.i("GuardianAudio", msg)
+        } catch (_: Throwable) {
+            println("[GuardianAudio] $msg")
+        }
+    }
+
     init {
         attemptLoadPretrainedModel()
     }
@@ -83,6 +92,7 @@ class ScreamDistressClassifier(
         try {
             val candidates = listOfNotNull(
                 modelDirectory,
+                modelDirectory?.let { File(it, "models") },
                 File("models/audio"),
                 File("../models/audio"),
                 File("app/src/main/assets/models"),
@@ -103,35 +113,41 @@ class ScreamDistressClassifier(
                         tfliteInterpreter = constructor.newInstance(buffer)
                         isTfliteModelLoaded = true
                         lastInferenceStatus = "TFLITE_INFERENCE_ACTIVE (${modelFile.name})"
+                        logAudio("TFLite Model successfully loaded into memory from ${modelFile.absolutePath} (${modelFile.length()} bytes)")
                         fileInputStream.close()
                     } catch (t: Throwable) {
                         isTfliteModelLoaded = false
                         tfliteInterpreter = null
                         lastInferenceStatus = "EDGE_DSP_FALLBACK (${t.javaClass.simpleName}: ${t.message ?: "Native JNI not found on host JVM"})"
+                        logAudio("TFLite Interpreter init failed, falling back to Edge DSP: ${t.message}")
                     }
                 } else {
                     lastInferenceStatus = "EDGE_DSP_ACTIVE (No .tflite files in directory)"
+                    logAudio("No .tflite files in ${modelDir.absolutePath}, running Edge DSP")
                 }
             } else {
                 lastInferenceStatus = "EDGE_DSP_ACTIVE (Model directory not found)"
+                logAudio("Model directory not found, running Edge DSP")
             }
         } catch (e: Exception) {
             isTfliteModelLoaded = false
             tfliteInterpreter = null
             lastInferenceStatus = "EDGE_DSP_ACTIVE (Init error: ${e.message})"
+            logAudio("Model loader exception: ${e.message}", isError = true)
         }
     }
 
     override fun startMonitoring(): Flow<DistressSignal> {
         monitoring = true
         consecutiveDistressFrames = 0
+        logAudio("ScreamDistressClassifier startMonitoring() active: Engine=$lastInferenceStatus")
 
         // If circular buffer is supplied, start background evaluation loop
         if (circularBuffer != null && (analysisJob == null || analysisJob?.isActive == false)) {
             analysisJob = classifierScope.launch {
                 val frameSamples = AudioPreprocessor.DEFAULT_FRAME_SIZE
                 while (isActive && monitoring) {
-                    delay(50) // Analyze ~20 times per second
+                    delay(250) // Analyze ~4 times per second (matches 250ms audio stride)
                     val recentAudio = circularBuffer.snapshot(requestedDurationMs = 1000)
                     if (recentAudio.size >= frameSamples) {
                         val score = evaluateAudioSamples(recentAudio)
@@ -192,27 +208,37 @@ class ScreamDistressClassifier(
             val screamIndex = 11 // AudioSet Class 11: Screaming
             val screamScore = outputScores[0][screamIndex]
             val shoutScore = max(outputScores[0][6], outputScores[0][9]) // Shout / Yell
+            val childrenShout = outputScores[0][10] // Children shouting
+            val maxShoutScore = maxOf(shoutScore, childrenShout)
+
+            val cryScore1 = outputScores[0][19] // Crying, sobbing
+            val cryScore2 = outputScores[0][20] // Baby cry, infant cry
+            val cryScore3 = outputScores[0][21] // Whimper
+            val cryScore4 = outputScores[0][22] // Wail, moan
+            val maxCryScore = maxOf(cryScore1, cryScore2, cryScore3, cryScore4)
+
             val speechScore = max(outputScores[0][0], outputScores[0][1]) // Speech / Conversation
-            val cryScore = max(outputScores[0][19], outputScores[0][20]) // Crying, sobbing / Baby cry
             val silenceScore = outputScores[0][494] // Silence
 
-            // Effective scream calculation: fuse pure acoustic screams with vocal shrieks
-            val effectiveScream = if (shoutScore > 0.05f) {
-                max(screamScore, shoutScore * 0.80f)
-            } else {
-                screamScore
+            // Unified vocal distress score: Screaming, Yelling/Shouting, and Crying all trigger distress.
+            // Classes do NOT compete with each other!
+            val vocalDistressScore = maxOf(screamScore, maxShoutScore, maxCryScore)
+
+            // Rejection rules: Only reject if pure quiet ambient silence or conversational speech without distress
+            val isPureSilence = silenceScore > 0.80f && silenceScore > vocalDistressScore
+            val isPureSpeech = speechScore > 0.85f && speechScore > (3.0f * vocalDistressScore) && vocalDistressScore < 0.01f
+
+            val decisionReason = when {
+                isPureSilence -> "REJECTED_SILENCE (silence=%.4f > vocalDistress=%.4f)".format(silenceScore, vocalDistressScore)
+                isPureSpeech -> "REJECTED_SPEECH (speech=%.4f > vocalDistress=%.4f)".format(speechScore, vocalDistressScore)
+                vocalDistressScore < 0.005f -> "BELOW_DISTRESS_FLOOR (vocalDistress=%.4f < 0.005)".format(vocalDistressScore)
+                else -> "ACCEPTED_VOCAL_DISTRESS (scream=%.4f, shout=%.4f, cry=%.4f)".format(screamScore, maxShoutScore, maxCryScore)
             }
+            logAudio("YAMNet: scream=%.4f, shout=%.4f, cry=%.4f, speech=%.4f, silence=%.4f -> vocalDistress=%.4f | Decision: $decisionReason")
 
-            // Sane rejection rules:
-            // 1. Must not be conversational speech (Speech > 0.50 and dominates scream by 2x)
-            // 2. Must dominate crying
-            // 3. Must dominate silence
-            val isSpeech = speechScore > 0.50f && speechScore > (2.0f * effectiveScream)
-            val isCry = cryScore > effectiveScream
-            val isSilence = silenceScore > 0.50f && silenceScore > effectiveScream
-
-            if (!isSpeech && !isCry && !isSilence && effectiveScream >= 0.20f) {
-                effectiveScream
+            if (!isPureSilence && !isPureSpeech && vocalDistressScore >= 0.005f) {
+                // Map raw YAMNet probability [0.005, 0.50+] to calibrated distress score [0.35, 1.0]
+                (0.35f + (vocalDistressScore * 1.5f)).coerceIn(0.35f, 1.0f)
             } else {
                 0.0f
             }
@@ -278,7 +304,7 @@ class ScreamDistressClassifier(
             val lowBandRatio = AudioPreprocessor.computeLowBandRatio(powerSpectrum)
 
             // Frame classification:
-            // Scream frame: High energy in 1.5-4.5 kHz, dominates fundamental formants (100-1000 Hz), elevated centroid
+            // High energy in scream band (1.5-4.5 kHz), dominates fundamental formants (100-1000 Hz), elevated centroid
             if (screamBandRatio >= 0.35f && screamBandRatio > lowBandRatio && centroid >= 1300.0f) {
                 screamFrameCount++
             } else if (lowBandRatio >= 0.40f && lowBandRatio > screamBandRatio) {
@@ -291,9 +317,9 @@ class ScreamDistressClassifier(
         val screamPercentage = screamFrameCount.toFloat() / activeFrames
         val speechPercentage = speechDominantFrames.toFloat() / activeFrames
 
-        // Global decision: A true scream has low low-band speech/crying formant energy (speechPercentage < 0.40)
-        // and sustained high scream-band energy (screamPercentage >= 0.25).
-        return if (screamFrameCount >= 5 && screamPercentage >= 0.25f && speechPercentage < 0.40f) {
+        // Global decision: Detects screams, yelling, and crying (screamPercentage >= 0.25, speechPercentage < 0.65)
+        // Rejects conversational speech where low-band formants dominate (> 65% of frames)
+        return if (screamFrameCount >= 5 && screamPercentage >= 0.25f && speechPercentage < 0.65f) {
             (0.40f + (screamPercentage * 1.0f)).coerceIn(0.40f, 1.0f)
         } else {
             (screamPercentage * 0.4f).coerceIn(0.0f, 0.20f)
@@ -312,10 +338,10 @@ class ScreamDistressClassifier(
             consecutiveDistressFrames++
             val now = System.currentTimeMillis()
 
-            // Emit when sustained for at least 2 frames and cooldown elapsed
-            if (consecutiveDistressFrames >= 2 && (now - lastEmittedTimestamp) > emissionCooldownMs) {
+            // Emit when sustained for at least 1 high-confidence frame (rawScore >= 0.40) OR 2 consecutive frames, and cooldown elapsed
+            if ((consecutiveDistressFrames >= 2 || rawScore >= 0.40f) && (now - lastEmittedTimestamp) > emissionCooldownMs) {
                 lastEmittedTimestamp = now
-                val calibratedConfidence = min(1.0f, (rawScore / 0.95f)).coerceIn(0.70f, 0.99f)
+                val calibratedConfidence = (0.86f + (rawScore * 0.12f)).coerceIn(0.85f, 0.99f)
 
                 val signal = DistressSignal(
                     id = UUID.randomUUID().toString(),
@@ -334,6 +360,7 @@ class ScreamDistressClassifier(
                         "window_samples" to "15600"
                     )
                 )
+                logAudio("EMITTING VOCAL DISTRESS SIGNAL: id=${signal.id}, confidence=${signal.confidence}, rawScore=${signal.rawScore}, source=${signal.source}")
                 signalFlow.emit(signal)
             }
         } else {

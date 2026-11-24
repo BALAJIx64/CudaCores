@@ -48,6 +48,10 @@ android {
         compose = true
     }
 
+    testOptions {
+        unitTests.isReturnDefaultValues = true
+    }
+
     sourceSets {
         getByName("main") {
             java.srcDirs(

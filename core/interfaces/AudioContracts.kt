@@ -52,24 +52,3 @@ interface AudioEvidenceRecorder {
      */
     fun stopRecording()
 }
-
-/**
- * Interface for dedicated emergency keyword spotting.
- * Owned by Member 1 (modules/audio).
- */
-interface KeywordSpotter {
-    /**
-     * Start listening for configured distress keywords.
-     */
-    fun startListening(targetKeywords: List<String>): Flow<DistressSignal>
-
-    /**
-     * Terminate keyword spotting loop and release resources.
-     */
-    fun stopListening()
-
-    /**
-     * Query active listening status.
-     */
-    fun isListening(): Boolean
-}

@@ -31,33 +31,28 @@ class AudioModuleStub(
     val circularBuffer: CircularAudioBuffer = CircularAudioBuffer(durationMs = 5000L, sampleRate = 16000)
     val captureManager: AudioCaptureManager = AudioCaptureManager(sampleRate = 16000, circularBuffer = circularBuffer)
     val screamClassifier: ScreamDistressClassifier = ScreamDistressClassifier(modelDirectory, circularBuffer)
-    val keywordSpotter: DistressKeywordSpotter = DistressKeywordSpotter(circularBuffer)
     val evidenceRecorder: TwoStageAudioEvidenceRecorder = TwoStageAudioEvidenceRecorder(circularBuffer, captureManager, cacheDirectory)
 
-    // --- AudioDistressDetector Implementation ---
+    // Telemetry flow for UI live volume meter
+    val liveMetrics: kotlinx.coroutines.flow.StateFlow<LiveAudioMetrics> get() = captureManager.liveMetrics
+
+    // --- AudioDistressDetector Implementation (Vocal Distress: Screaming, Yelling, Crying) ---
 
     /**
-     * Start continuous audio classification and distress keyword spotting concurrently.
-     * Merges both scream and keyword detection streams into a single Flow<DistressSignal>.
+     * Start continuous audio classification for vocal distress (screaming, yelling, crying).
+     * Emits distress signals directly from the acoustic classifier.
      */
     override fun startMonitoring(): Flow<DistressSignal> {
         captureManager.startCapture()
-        val screamFlow = screamClassifier.startMonitoring().onEach { signal ->
-            if (signal.type == DistressType.SCREAM) {
-                keywordSpotter.notifyScreamDetected(1800L)
-            }
-        }
-        val keywordFlow = keywordSpotter.startListening(DistressKeywordSpotter.DEFAULT_KEYWORDS)
-        return merge(screamFlow, keywordFlow)
+        return screamClassifier.startMonitoring()
     }
 
     override fun stopMonitoring() {
         screamClassifier.stopMonitoring()
-        keywordSpotter.stopListening()
         captureManager.stopCapture()
     }
 
-    override fun isMonitoring(): Boolean = screamClassifier.isMonitoring() || keywordSpotter.isListening()
+    override fun isMonitoring(): Boolean = screamClassifier.isMonitoring()
 
     override fun setSensitivity(sensitivity: Float) {
         screamClassifier.setSensitivity(sensitivity)
