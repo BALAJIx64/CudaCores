@@ -207,6 +207,41 @@ object AudioPreprocessor {
     }
 
     /**
+     * Computes the Low-Band Energy Ratio (100 Hz - 1000 Hz):
+     * Ratio of power in the human speech/vocal formant band to total spectral power.
+     * Conversational speech and crying have high low-band ratio (> 0.45), while screams concentrate in 1.5-4.5 kHz.
+     */
+    fun computeLowBandRatio(
+        powerSpectrum: FloatArray,
+        sampleRate: Int = DEFAULT_SAMPLE_RATE,
+        lowHz: Double = 100.0,
+        highHz: Double = 1000.0
+    ): Float {
+        val numBins = powerSpectrum.size
+        val binWidth = (sampleRate / 2.0) / (numBins - 1)
+
+        val lowBin = (lowHz / binWidth).toInt().coerceIn(0, numBins - 1)
+        val highBin = (highHz / binWidth).toInt().coerceIn(lowBin, numBins - 1)
+
+        var lowBandPower = 0.0
+        var totalPower = 0.0
+
+        for (i in 0 until numBins) {
+            val p = powerSpectrum[i].toDouble()
+            totalPower += p
+            if (i in lowBin..highBin) {
+                lowBandPower += p
+            }
+        }
+
+        return if (totalPower > 1e-9) {
+            (lowBandPower / totalPower).toFloat().coerceIn(0.0f, 1.0f)
+        } else {
+            0.0f
+        }
+    }
+
+    /**
      * Computes 16-band Mel-scale Filterbank energies across a power spectrum.
      * Provides a compact perceptual acoustic fingerprint used for speech keyword template matching.
      */
@@ -253,6 +288,94 @@ object AudioPreprocessor {
         }
 
         return filterbankEnergies
+    }
+
+    /**
+     * Computes gain-invariant normalized 16-band Mel filterbank energies.
+     * The peak filterbank is set to 0.0 dB and all other filters are represented
+     * as relative negative dB (typically 0.0 dB to -6.0 dB), ensuring speech formant
+     * matching is robust to microphone gain variations and loudness levels.
+     */
+    fun computeNormalizedMelFilterbank(
+        powerSpectrum: FloatArray,
+        sampleRate: Int = DEFAULT_SAMPLE_RATE,
+        numFilters: Int = 16
+    ): FloatArray {
+        val rawMel = computeMelFilterbank(powerSpectrum, sampleRate, numFilters)
+        var maxM = -100.0f
+        for (v in rawMel) {
+            if (v > maxM) maxM = v
+        }
+        val normalized = FloatArray(numFilters)
+        for (i in 0 until numFilters) {
+            normalized[i] = (rawMel[i] - maxM).coerceIn(-6.0f, 0.0f)
+        }
+        return normalized
+    }
+
+    /**
+     * Estimates dynamic background noise floor (dBFS) from a sequence of frame dBFS values
+     * using the 25th percentile of quiet frames. Clamped between -65.0 dBFS and -32.0 dBFS.
+     */
+    fun estimateNoiseFloorDbfs(frameDbfs: FloatArray): Float {
+        if (frameDbfs.isEmpty()) return -50.0f
+        val sorted = frameDbfs.clone().apply { sort() }
+        val p25Index = (sorted.size * 0.25f).toInt().coerceIn(0, sorted.size - 1)
+        return sorted[p25Index].coerceIn(-65.0f, -32.0f)
+    }
+
+    /**
+     * Counts syllable energy peaks in a smoothed dBFS envelope using a peak-valley hysteresis
+     * state machine. Enforces a minimum prominence dip (minValleyDipDb) between successive peaks,
+     * ensuring falling utterance tails and intra-phone fluctuations are not miscounted.
+     */
+    fun countSyllablePeaks(frameDbfs: FloatArray, thresholdDbfs: Float, minValleyDipDb: Float = 3.0f): Int {
+        if (frameDbfs.isEmpty()) return 0
+        val smoothed = FloatArray(frameDbfs.size)
+        for (i in frameDbfs.indices) {
+            var sum = frameDbfs[i]
+            var count = 1
+            if (i > 0) { sum += frameDbfs[i - 1]; count++ }
+            if (i < frameDbfs.size - 1) { sum += frameDbfs[i + 1]; count++ }
+            smoothed[i] = sum / count
+        }
+
+        var peaks = 0
+        var state = "IDLE" // IDLE, RISING, FALLING
+        var peakMax = -100.0f
+        var valleyMin = 100.0f
+
+        for (v in smoothed) {
+            when (state) {
+                "IDLE" -> {
+                    if (v >= thresholdDbfs) {
+                        state = "RISING"
+                        peakMax = v
+                    }
+                }
+                "RISING" -> {
+                    if (v > peakMax) {
+                        peakMax = v
+                    } else if (v < peakMax - minValleyDipDb) {
+                        peaks++
+                        state = "FALLING"
+                        valleyMin = v
+                    }
+                }
+                "FALLING" -> {
+                    if (v < valleyMin) {
+                        valleyMin = v
+                    } else if (v > valleyMin + minValleyDipDb && v >= thresholdDbfs) {
+                        state = "RISING"
+                        peakMax = v
+                    }
+                }
+            }
+        }
+        if (state == "RISING" && peakMax >= thresholdDbfs) {
+            peaks++
+        }
+        return max(1, peaks)
     }
 
     // --- Helper Conversions & In-Place Cooley-Tukey Radix-2 FFT ---

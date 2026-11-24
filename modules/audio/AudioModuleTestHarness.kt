@@ -12,14 +12,13 @@ import kotlin.math.sin
  * Self-contained unit & sample test harness for GuardianGrid's Audio Intelligence module.
  *
  * Runs on standard JVM without requiring an Android device, physical microphone,
- * or external test harnesses. Exercises all seven critical requirements:
+ * or external test harnesses. Exercises all six critical requirements:
  * 1. Standard RIFF WAV header generation, byte encoding, and file finalization.
  * 2. In-memory circular rolling buffer rollover, duration calculation, and snapshot extraction.
  * 3. Audio preprocessing: Short-to-Float normalization, RMS, dBFS, ZCR, and FFT spectral features.
  * 4. Scream distress classifier: acoustic scream signature detection vs silence vs normal speech.
- * 5. Multi-language keyword spotter: English ("help", "save me") and Tamil ("kaapaathunga", "udhavi").
- * 6. Two-stage emergency evidence recording: Stage 1 preview buffer dump and Stage 2 evidence stream.
- * 7. Hardware interruption and permission denial error handling.
+ * 5. Two-stage emergency evidence recording: Stage 1 preview buffer dump and Stage 2 evidence stream.
+ * 6. Hardware interruption and permission denial error handling.
  *
  * Owned by Member 1 (modules/audio).
  */
@@ -38,7 +37,6 @@ object AudioModuleTestHarness {
         results.add(testCircularAudioBuffer())
         results.add(testAudioPreprocessor())
         results.add(testScreamDistressClassifier())
-        results.add(testDistressKeywordSpotter())
         results.add(testTwoStageEvidenceRecorder())
         results.add(testErrorHandlingAndInterruption())
 
@@ -174,31 +172,7 @@ object AudioModuleTestHarness {
         }
     }
 
-    // --- Test 5: Multi-Language Keyword Spotter ---
-    fun testDistressKeywordSpotter(): TestResult {
-        return try {
-            val spotter = DistressKeywordSpotter()
-            val flow = spotter.startListening(listOf("help", "kaapaathunga", "bachao"))
-            check(spotter.isListening()) { "Spotter should report listening active" }
-
-            // Generate synthetic speech-like window for "help"
-            val helpSamples = ShortArray(8000) { i ->
-                val envelope = if (i < 2000) 0.3 else if (i < 6000) 0.8 else 0.2
-                (sin(2.0 * PI * 1200.0 * i / 16000.0) * envelope * 12000).toInt().toShort()
-            }
-
-            val matchResult = spotter.evaluateSpeechWindow(helpSamples)
-            // Even if match distance varies with synthetic tones, engine must evaluate safely without exceptions
-            spotter.stopListening()
-            check(!spotter.isListening()) { "Spotter should report inactive" }
-
-            TestResult("testDistressKeywordSpotter", true, "Multi-language keyword spotting engine verified.")
-        } catch (e: Throwable) {
-            TestResult("testDistressKeywordSpotter", false, "Failed: ${e.message}")
-        }
-    }
-
-    // --- Test 6: Two-Stage Audio Evidence Recorder ---
+    // --- Test 5: Two-Stage Audio Evidence Recorder ---
     fun testTwoStageEvidenceRecorder(): TestResult = runBlocking {
         try {
             val tempDir = File(System.getProperty("java.io.tmpdir"), "audio_test_${System.currentTimeMillis()}")
@@ -236,7 +210,7 @@ object AudioModuleTestHarness {
         }
     }
 
-    // --- Test 7: Error Handling and Interruption ---
+    // --- Test 6: Error Handling and Interruption ---
     fun testErrorHandlingAndInterruption(): TestResult {
         return try {
             val captureManager = AudioCaptureManager()
@@ -259,18 +233,23 @@ object AudioModuleTestHarness {
             TestResult("testErrorHandlingAndInterruption", false, "Failed: ${e.message}")
         }
     }
+
+    @JvmStatic
+    fun main(args: Array<String>) {
+        val result = runAllTests()
+        println("=== AUDIO MODULE TEST RESULTS ===")
+        println("Total: ${result.total}, Passed: ${result.passed}, Failed: ${result.failed}")
+        for (r in result.results) {
+            val status = if (r.passed) "[PASS]" else "[FAIL]"
+            println("$status ${r.name}: ${r.message}")
+        }
+        if (result.failed > 0) {
+            System.exit(1)
+        }
+    }
 }
 
 fun main() {
-    val result = AudioModuleTestHarness.runAllTests()
-    println("=== AUDIO MODULE TEST RESULTS ===")
-    println("Total: ${result.total}, Passed: ${result.passed}, Failed: ${result.failed}")
-    for (r in result.results) {
-        val status = if (r.passed) "[PASS]" else "[FAIL]"
-        println("$status ${r.name}: ${r.message}")
-    }
-    if (result.failed > 0) {
-        System.exit(1)
-    }
+    AudioModuleTestHarness.main(emptyArray())
 }
 

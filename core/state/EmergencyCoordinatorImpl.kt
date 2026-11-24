@@ -80,16 +80,52 @@ class EmergencyCoordinatorImpl(
      * Trigger a standard manual SOS alert (audible / visible).
      */
     fun triggerManualSos(triggerSource: String = "Manual_SOS_Button", locationOverride: LocationData? = null) {
+        triggerEmergency(
+            triggerSource = triggerSource,
+            type = DistressType.MANUAL_SOS,
+            isSilent = false,
+            notes = "Manual SOS initiated via $triggerSource",
+            locationOverride = locationOverride
+        )
+    }
+
+    /**
+     * Handles an incoming autonomous distress signal from an integrated sensor subsystem
+     * (e.g. passive acoustic scream detector).
+     */
+    fun handleDistressSignal(signal: DistressSignal) {
+        EmergencyStateHolder.recordDistressSignal(signal)
+        if (signal.type == DistressType.SCREAM && _activeIncident.value == null) {
+            triggerEmergency(
+                triggerSource = signal.source,
+                type = DistressType.SCREAM,
+                isSilent = false,
+                notes = "Autonomous acoustic scream detected by ${signal.source} (Confidence: ${(signal.confidence * 100).toInt()}%)"
+            )
+        }
+    }
+
+    private fun triggerEmergency(
+        triggerSource: String,
+        type: DistressType,
+        isSilent: Boolean,
+        notes: String,
+        locationOverride: LocationData? = null
+    ) {
         val signal = DistressSignal(
             id = UUID.randomUUID().toString(),
-            type = DistressType.MANUAL_SOS,
+            type = type,
             confidence = 1.0f,
             source = triggerSource,
-            metadata = mapOf("trigger" to triggerSource, "silent" to "false")
+            metadata = mapOf("trigger" to triggerSource, "silent" to isSilent.toString())
         )
         EmergencyStateHolder.recordDistressSignal(signal)
-        val nextState = stateMachine.triggerManualSos(triggerSource)
-        reconcileState(nextState, signal, isSilent = false, locationOverride = locationOverride)
+        val nextState = if (type == DistressType.MANUAL_SOS) {
+            stateMachine.triggerManualSos(triggerSource)
+        } else {
+            stateMachine.onSignal(signal)
+        }
+        reconcileState(nextState, signal, isSilent = isSilent, locationOverride = locationOverride)
     }
 
     override fun cancelEmergency(reason: String) {

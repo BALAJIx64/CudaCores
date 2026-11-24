@@ -29,6 +29,8 @@ __pycache__/
 *.pt
 *.onnx
 *.tflite
+!models/audio/*.tflite
+!app/src/main/assets/models/*.tflite
 venv/
 .venv/
 env/

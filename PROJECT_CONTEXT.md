@@ -71,7 +71,7 @@ CudaCores/
 │   │   ├── EmergencyModels.kt                # EmergencyLevel, LocationData, EmergencyContact, EmergencyIncident
 │   │   └── CommunicationModels.kt            # DeliveryChannel, DeliveryStatus, AlertPayload, DeliveryReceipt, QueuedEmergencyEvent
 │   ├── interfaces/
-│   │   ├── AudioContracts.kt                 # Contracts: AudioDistressDetector, KeywordSpotter, AudioEvidenceRecorder
+│   │   ├── AudioContracts.kt                 # Contracts: AudioDistressDetector, AudioEvidenceRecorder (KWS removed for rebuild)
 │   │   ├── MotionContracts.kt                # Contracts: MotionAnomalyDetector, MultimodalFusionEngine, FusionResult
 │   │   ├── CommunicationContracts.kt         # Contracts: EmergencyCommunicator, DeliveryQueueManager, BluetoothRelayService
 │   │   └── CoreContracts.kt                  # Contract: EmergencyCoordinator
@@ -82,16 +82,15 @@ CudaCores/
 │
 ├── modules/                                  # Independent Feature Implementation Subsystems
 │   ├── audio/                                # [Member 1 - feature/audio] Acoustic Intelligence & Recording
-│   │   ├── AudioModuleStub.kt                # Production facade implementing AudioDistressDetector, KeywordSpotter, AudioEvidenceRecorder
+│   │   ├── AudioModuleStub.kt                # Production facade implementing AudioDistressDetector, AudioEvidenceRecorder
 │   │   ├── AudioCaptureManager.kt            # Android AudioRecord manager with permission handling and fallback mock loop
 │   │   ├── CircularAudioBuffer.kt            # Thread-safe in-memory rolling ring buffer (3-5s, 16kHz 16-bit PCM mono)
 │   │   ├── AudioPreprocessor.kt              # FFT, Spectral Centroid, Scream-Band ratio, ZCR, RMS/dBFS, 16-band Mel filterbank
 │   │   ├── ScreamDistressClassifier.kt       # Dual-engine sound classifier (YAMNet compatible + built-in Edge DSP screamer engine)
-│   │   ├── DistressKeywordSpotter.kt         # Dedicated keyword spotter for English ("help"), Tamil ("kaapaathunga"), Hindi ("bachao")
 │   │   ├── TwoStageAudioEvidenceRecorder.kt  # Two-stage recording: Stage 1 RAM dump to WAV, Stage 2 continuous/segmented recording
 │   │   ├── WavAudioEncoder.kt                # Pure Kotlin standard 44-byte RIFF WAVE header and PCM audio encoder
-│   │   ├── AudioModuleTestHarness.kt         # Self-contained 7-part automated unit and sample test suite
-│   │   └── README.md                         # Subsystem guide for scream detection, hotwords, and 2-stage audio buffer
+│   │   ├── AudioModuleTestHarness.kt         # Self-contained 6-part automated unit and sample test suite
+│   │   └── README.md                         # Subsystem guide for scream detection and 2-stage audio buffer
 │   ├── motion/                               # [Member 2 - feature/motion] Motion Anomaly & Multimodal Fusion
 │   │   ├── MotionModuleStub.kt               # Baseline stub implementing MotionAnomalyDetector and MultimodalFusionEngine
 │   │   └── README.md                         # Subsystem guide for accelerometer/gyroscope filters and temporal correlation
@@ -224,7 +223,6 @@ When `EmergencyCommunicator.dispatchAlert(payload, channels)` is called:
 | Interface / Type | Methods & Signatures | File Path | Owner |
 | :--- | :--- | :--- | :--- |
 | `AudioDistressDetector` | `startMonitoring(): Flow<DistressSignal>`, `stopMonitoring()`, `isMonitoring(): Boolean`, `setSensitivity(Float)` | `core/interfaces/AudioContracts.kt` | Member 1 |
-| `KeywordSpotter` | `startListening(List<String>): Flow<DistressSignal>`, `stopListening()`, `isListening(): Boolean` | `core/interfaces/AudioContracts.kt` | Member 1 |
 | `AudioEvidenceRecorder` | `suspend captureStageOneBuffer(Long): Result<AudioSegment>`, `suspend startStageTwoRecording(File): Flow<AudioSegment>`, `stopRecording()` | `core/interfaces/AudioContracts.kt` | Member 1 |
 | `MotionAnomalyDetector` | `startMonitoring(): Flow<DistressSignal>`, `stopMonitoring()`, `isMonitoring(): Boolean`, `calibrateBaseline()`, `observeMotionSamples(): Flow<MotionSample>` | `core/interfaces/MotionContracts.kt` | Member 2 |
 | `MultimodalFusionEngine`| `evaluateSignals(List<DistressSignal>, Long): FusionResult` | `core/interfaces/MotionContracts.kt` | Member 2 |
@@ -249,15 +247,14 @@ When `EmergencyCommunicator.dispatchAlert(payload, channels)` is called:
 ### 4.4 Subsystem Implementations & Stubs
 | Symbol | Implemented Interfaces | File Path | Owner |
 | :--- | :--- | :--- | :--- |
-| `AudioModuleStub` | `AudioDistressDetector`, `KeywordSpotter`, `AudioEvidenceRecorder` | `modules/audio/AudioModuleStub.kt` | Member 1 |
+| `AudioModuleStub` | `AudioDistressDetector`, `AudioEvidenceRecorder` | `modules/audio/AudioModuleStub.kt` | Member 1 |
 | `AudioCaptureManager` | Hardware AudioRecord & simulation loop | `modules/audio/AudioCaptureManager.kt` | Member 1 |
 | `CircularAudioBuffer` | 3–5s in-memory ring buffer (RAM only) | `modules/audio/CircularAudioBuffer.kt` | Member 1 |
 | `AudioPreprocessor` | DSP & Mel feature extraction | `modules/audio/AudioPreprocessor.kt` | Member 1 |
 | `ScreamDistressClassifier` | `AudioDistressDetector` | `modules/audio/ScreamDistressClassifier.kt` | Member 1 |
-| `DistressKeywordSpotter` | `KeywordSpotter` | `modules/audio/DistressKeywordSpotter.kt` | Member 1 |
 | `TwoStageAudioEvidenceRecorder` | `AudioEvidenceRecorder` | `modules/audio/TwoStageAudioEvidenceRecorder.kt` | Member 1 |
 | `WavAudioEncoder` | Canonical 44-byte RIFF WAV encoder | `modules/audio/WavAudioEncoder.kt` | Member 1 |
-| `AudioModuleTestHarness` | Complete automated 7-part test suite | `modules/audio/AudioModuleTestHarness.kt` | Member 1 |
+| `AudioModuleTestHarness` | Complete automated 6-part test suite | `modules/audio/AudioModuleTestHarness.kt` | Member 1 |
 | `MotionModuleStub` | `MotionAnomalyDetector`, `MultimodalFusionEngine` | `modules/motion/MotionModuleStub.kt` | Member 2 |
 | `EmergencyCommunicatorStub` | `EmergencyCommunicator`, `DeliveryQueueManager`, `BluetoothRelayService` | `modules/communication/EmergencyCommunicatorStub.kt` | Member 3 |
 
@@ -267,7 +264,7 @@ When `EmergencyCommunicator.dispatchAlert(payload, channels)` is called:
 
 | Member | Subsystem | Target Branch | Directory Scope | Owned Contracts |
 | :--- | :--- | :--- | :--- | :--- |
-| **Member 1** | Audio Intelligence | `feature/audio` | `modules/audio/`<br>`models/audio/` | `AudioDistressDetector`, `KeywordSpotter`, `AudioEvidenceRecorder` |
+| **Member 1** | Audio Intelligence | `feature/audio` | `modules/audio/`<br>`models/audio/` | `AudioDistressDetector`, `AudioEvidenceRecorder` |
 | **Member 2** | Motion Anomaly & Fusion | `feature/motion` | `modules/motion/` | `MotionAnomalyDetector`, `MultimodalFusionEngine` |
 | **Member 3** | Resilient Communication | `feature/communication` | `modules/communication/` | `EmergencyCommunicator`, `DeliveryQueueManager`, `BluetoothRelayService` |
 | **Member 4** | Core Engine, UI & Integration | `feature/core-ui` | `app/`<br>`core/models/`<br>`core/interfaces/`<br>`core/state/` | `EmergencyCoordinator`, `EmergencyStateHolder`, `DashboardScreen` |
