@@ -52,10 +52,7 @@ class AudioModuleStub(
 
     override fun stopMonitoring() {
         screamClassifier.stopMonitoring()
-<<<<<<< HEAD
-=======
         keywordSpotter.stopListening()
->>>>>>> origin/main
         captureManager.stopCapture()
     }
 

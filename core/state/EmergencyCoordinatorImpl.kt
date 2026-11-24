@@ -80,7 +80,6 @@ class EmergencyCoordinatorImpl(
      * Trigger a standard manual SOS alert (audible / visible).
      */
     fun triggerManualSos(triggerSource: String = "Manual_SOS_Button", locationOverride: LocationData? = null) {
-<<<<<<< HEAD
         triggerEmergency(
             triggerSource = triggerSource,
             type = DistressType.MANUAL_SOS,
@@ -113,18 +112,20 @@ class EmergencyCoordinatorImpl(
         notes: String,
         locationOverride: LocationData? = null
     ) {
-=======
->>>>>>> origin/main
         val signal = DistressSignal(
             id = UUID.randomUUID().toString(),
-            type = DistressType.MANUAL_SOS,
+            type = type,
             confidence = 1.0f,
             source = triggerSource,
-            metadata = mapOf("trigger" to triggerSource, "silent" to "false")
+            metadata = mapOf("trigger" to triggerSource, "silent" to isSilent.toString())
         )
         EmergencyStateHolder.recordDistressSignal(signal)
-        val nextState = stateMachine.triggerManualSos(triggerSource)
-        reconcileState(nextState, signal, isSilent = false, locationOverride = locationOverride)
+        val nextState = if (type == DistressType.MANUAL_SOS) {
+            stateMachine.triggerManualSos(triggerSource)
+        } else {
+            stateMachine.onSignal(signal)
+        }
+        reconcileState(nextState, signal, isSilent = isSilent, locationOverride = locationOverride)
     }
 
     override fun cancelEmergency(reason: String) {

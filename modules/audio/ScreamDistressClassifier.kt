@@ -267,13 +267,8 @@ class ScreamDistressClassifier(
             val rms = AudioPreprocessor.computeRms(frame)
             val dbfs = AudioPreprocessor.rmsToDbfs(rms)
 
-<<<<<<< HEAD
             // Silence / ambient threshold: Screams must have sufficient amplitude (> -65 dBFS)
             if (dbfs < -65.0f) continue
-=======
-            // Silence / ambient threshold: Screams must have substantial sound pressure level (> -26 dBFS)
-            if (dbfs < -26.0f) continue
->>>>>>> origin/main
 
             activeFrames++
             AudioPreprocessor.applyHannWindow(frame)
@@ -282,32 +277,15 @@ class ScreamDistressClassifier(
             val screamBandRatio = AudioPreprocessor.computeScreamBandRatio(powerSpectrum)
             val lowBandRatio = AudioPreprocessor.computeLowBandRatio(powerSpectrum)
 
-<<<<<<< HEAD
             // Frame classification:
             // Scream frame: High energy in 1.5-4.5 kHz, dominates fundamental formants (100-1000 Hz), elevated centroid
             if (screamBandRatio >= 0.35f && screamBandRatio > lowBandRatio && centroid >= 1300.0f) {
-=======
-            // Acoustic distress heuristic scoring:
-            // 1. Scream-band energy ratio (weight 0.40): Screams concentrate 35-70% energy in 1.5-4.5 kHz
-            val bandScore = ((screamBandRatio - 0.28f) / 0.42f).coerceIn(0.0f, 1.0f)
-
-            // 2. Spectral Centroid (weight 0.35): Elevated center of mass (target > 2000 Hz)
-            val centroidScore = ((centroid - 1500.0f) / 1500.0f).coerceIn(0.0f, 1.0f)
-
-            // 3. Amplitude / Energy (weight 0.25): High loudness relative to ambient
-            val energyScore = ((dbfs + 26.0f) / 18.0f).coerceIn(0.0f, 1.0f)
-
-            val frameScore = (bandScore * 0.40f) + (centroidScore * 0.35f) + (energyScore * 0.25f)
-
-            if (frameScore > 0.60f) {
->>>>>>> origin/main
                 screamFrameCount++
             } else if (lowBandRatio >= 0.40f && lowBandRatio > screamBandRatio) {
                 speechDominantFrames++
             }
         }
 
-<<<<<<< HEAD
         if (activeFrames == 0) return 0.0f
 
         val screamPercentage = screamFrameCount.toFloat() / activeFrames
@@ -320,16 +298,6 @@ class ScreamDistressClassifier(
         } else {
             (screamPercentage * 0.4f).coerceIn(0.0f, 0.20f)
         }
-=======
-        // Temporal persistence factor: True screams sustain over multiple frames (>= 3 frames / >= 100ms)
-        // Transient impulse clicks and claps are rejected
-        if (screamFrameCount < 3) {
-            return (maxFrameConfidence * 0.25f)
-        }
-
-        val persistenceFactor = min(1.0f, screamFrameCount.toFloat() / max(1, frames.size / 3))
-        return (maxFrameConfidence * 0.75f) + (persistenceFactor * 0.25f)
->>>>>>> origin/main
     }
 
     /**
