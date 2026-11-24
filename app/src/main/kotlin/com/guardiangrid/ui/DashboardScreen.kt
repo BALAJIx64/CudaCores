@@ -42,6 +42,8 @@ import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -99,6 +101,27 @@ fun DashboardScreen(
     val state by EmergencyStateHolder.state.collectAsState()
     val scope = rememberCoroutineScope()
     var showPermissionDialog by remember { mutableStateOf(false) }
+
+    // --- Autonomous Passive Audio Scream Monitoring Lifecycle ---
+    // Ingests real-time microphone stream when Protection Mode is active.
+    // Automatically routes detected screams to the Emergency Coordinator.
+    LaunchedEffect(state.isProtectionActive) {
+        if (state.isProtectionActive) {
+            audioStub.startMonitoring().collect { signal ->
+                if (signal.type == DistressType.SCREAM) {
+                    coordinator.handleDistressSignal(signal)
+                }
+            }
+        } else {
+            audioStub.stopMonitoring()
+        }
+    }
+
+    DisposableEffect(Unit) {
+        onDispose {
+            audioStub.stopMonitoring()
+        }
+    }
 
     if (showPermissionDialog) {
         PermissionOnboardingDialog(

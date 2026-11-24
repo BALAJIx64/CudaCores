@@ -207,6 +207,41 @@ object AudioPreprocessor {
     }
 
     /**
+     * Computes the Low-Band Energy Ratio (100 Hz - 1000 Hz):
+     * Ratio of power in the human speech/vocal formant band to total spectral power.
+     * Conversational speech and crying have high low-band ratio (> 0.45), while screams concentrate in 1.5-4.5 kHz.
+     */
+    fun computeLowBandRatio(
+        powerSpectrum: FloatArray,
+        sampleRate: Int = DEFAULT_SAMPLE_RATE,
+        lowHz: Double = 100.0,
+        highHz: Double = 1000.0
+    ): Float {
+        val numBins = powerSpectrum.size
+        val binWidth = (sampleRate / 2.0) / (numBins - 1)
+
+        val lowBin = (lowHz / binWidth).toInt().coerceIn(0, numBins - 1)
+        val highBin = (highHz / binWidth).toInt().coerceIn(lowBin, numBins - 1)
+
+        var lowBandPower = 0.0
+        var totalPower = 0.0
+
+        for (i in 0 until numBins) {
+            val p = powerSpectrum[i].toDouble()
+            totalPower += p
+            if (i in lowBin..highBin) {
+                lowBandPower += p
+            }
+        }
+
+        return if (totalPower > 1e-9) {
+            (lowBandPower / totalPower).toFloat().coerceIn(0.0f, 1.0f)
+        } else {
+            0.0f
+        }
+    }
+
+    /**
      * Computes 16-band Mel-scale Filterbank energies across a power spectrum.
      * Provides a compact perceptual acoustic fingerprint used for speech keyword template matching.
      */

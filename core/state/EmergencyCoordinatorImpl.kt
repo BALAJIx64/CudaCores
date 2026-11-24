@@ -45,6 +45,22 @@ class EmergencyCoordinatorImpl(
         )
     }
 
+    /**
+     * Handles an incoming autonomous distress signal from an integrated sensor subsystem
+     * (e.g. passive acoustic scream detector).
+     */
+    fun handleDistressSignal(signal: DistressSignal) {
+        EmergencyStateHolder.recordDistressSignal(signal)
+        if (signal.type == DistressType.SCREAM && _activeIncident.value == null) {
+            triggerEmergency(
+                triggerSource = signal.source,
+                type = DistressType.SCREAM,
+                isSilent = false,
+                notes = "Autonomous acoustic scream detected by ${signal.source} (Confidence: ${(signal.confidence * 100).toInt()}%)"
+            )
+        }
+    }
+
     private fun triggerEmergency(
         triggerSource: String,
         type: DistressType,

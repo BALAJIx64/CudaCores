@@ -13,6 +13,9 @@ import kotlinx.coroutines.flow.asSharedFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
+import java.io.FileInputStream
+import java.nio.ByteBuffer
+import java.nio.channels.FileChannel
 import java.util.UUID
 import kotlin.math.max
 import kotlin.math.min
@@ -48,7 +51,7 @@ class ScreamDistressClassifier(
 
     private var monitoring = false
     private var sensitivity: Float = 0.90f // Default high sensitivity to detect slight screams
-    private val signalFlow = MutableSharedFlow<DistressSignal>(extraBufferCapacity = 64)
+    private val signalFlow = MutableSharedFlow<DistressSignal>(replay = 1, extraBufferCapacity = 64)
 
     private var analysisJob: Job? = null
     private val classifierScope = CoroutineScope(Dispatchers.Default)
@@ -63,28 +66,59 @@ class ScreamDistressClassifier(
         private set
     var isTfliteModelLoaded: Boolean = false
         private set
+    var lastInferenceStatus: String = "INITIALIZING"
+        private set
+    var tfliteInterpreter: Any? = null
+        private set
 
     init {
         attemptLoadPretrainedModel()
     }
 
     /**
-     * Checks for pretrained .tflite models in models/audio/
+     * Checks for pretrained .tflite models and initializes TensorFlow Lite interpreter.
+     * Makes runtime and inference status transparently observable.
      */
     private fun attemptLoadPretrainedModel() {
         try {
-            val dir = modelDirectory ?: File("models/audio")
-            if (dir.exists() && dir.isDirectory) {
-                val tfliteFiles = dir.listFiles { _, name -> name.endsWith(".tflite") }
+            val candidates = listOfNotNull(
+                modelDirectory,
+                File("models/audio"),
+                File("../models/audio"),
+                File("app/src/main/assets/models"),
+                File("src/main/assets/models")
+            )
+            val modelDir = candidates.firstOrNull { it.exists() && it.isDirectory }
+            if (modelDir != null) {
+                val tfliteFiles = modelDir.listFiles { _, name -> name.endsWith(".tflite") }
                 if (!tfliteFiles.isNullOrEmpty()) {
                     val modelFile = tfliteFiles.first()
                     activeModelName = "TFLite_${modelFile.nameWithoutExtension}"
-                    isTfliteModelLoaded = true
+                    try {
+                        val fileInputStream = FileInputStream(modelFile)
+                        val fileChannel = fileInputStream.channel
+                        val buffer = fileChannel.map(FileChannel.MapMode.READ_ONLY, 0, fileChannel.size())
+                        val interpreterClass = Class.forName("org.tensorflow.lite.Interpreter")
+                        val constructor = interpreterClass.getConstructor(ByteBuffer::class.java)
+                        tfliteInterpreter = constructor.newInstance(buffer)
+                        isTfliteModelLoaded = true
+                        lastInferenceStatus = "TFLITE_INFERENCE_ACTIVE (${modelFile.name})"
+                        fileInputStream.close()
+                    } catch (t: Throwable) {
+                        isTfliteModelLoaded = false
+                        tfliteInterpreter = null
+                        lastInferenceStatus = "EDGE_DSP_FALLBACK (${t.javaClass.simpleName}: ${t.message ?: "Native JNI not found on host JVM"})"
+                    }
+                } else {
+                    lastInferenceStatus = "EDGE_DSP_ACTIVE (No .tflite files in directory)"
                 }
+            } else {
+                lastInferenceStatus = "EDGE_DSP_ACTIVE (Model directory not found)"
             }
-        } catch (_: Exception) {
-            // Gracefully fall back to Edge DSP engine
+        } catch (e: Exception) {
             isTfliteModelLoaded = false
+            tfliteInterpreter = null
+            lastInferenceStatus = "EDGE_DSP_ACTIVE (Init error: ${e.message})"
         }
     }
 
@@ -98,7 +132,7 @@ class ScreamDistressClassifier(
                 val frameSamples = AudioPreprocessor.DEFAULT_FRAME_SIZE
                 while (isActive && monitoring) {
                     delay(50) // Analyze ~20 times per second
-                    val recentAudio = circularBuffer.snapshot(requestedDurationMs = 500)
+                    val recentAudio = circularBuffer.snapshot(requestedDurationMs = 1000)
                     if (recentAudio.size >= frameSamples) {
                         val score = evaluateAudioSamples(recentAudio)
                         checkAndEmitDistress(score)
@@ -124,67 +158,155 @@ class ScreamDistressClassifier(
     }
 
     /**
+     * Executes real model inference on 16 kHz audio window via TensorFlow Lite interpreter.
+     */
+    fun runTfliteInference(floatSamples: FloatArray): Float? {
+        val interpreter = tfliteInterpreter ?: return null
+        return try {
+            val targetSamples = 15600 // YAMNet 0.975s window at 16 kHz
+            val inputWindow = if (floatSamples.size >= targetSamples) {
+                floatSamples.copyOfRange(floatSamples.size - targetSamples, floatSamples.size)
+            } else {
+                val padded = FloatArray(targetSamples)
+                System.arraycopy(floatSamples, 0, padded, targetSamples - floatSamples.size, floatSamples.size)
+                padded
+            }
+
+            // Automatic Gain Control (AGC) normalization to match YAMNet operating dynamic range
+            var peak = 0.0f
+            for (s in inputWindow) {
+                val a = kotlin.math.abs(s)
+                if (a > peak) peak = a
+            }
+            if (peak > 0.002f) {
+                val scale = 0.85f / peak
+                for (i in inputWindow.indices) {
+                    inputWindow[i] = inputWindow[i] * scale
+                }
+            }
+
+            val outputScores = Array(1) { FloatArray(521) }
+            val runMethod = interpreter.javaClass.getMethod("run", Any::class.java, Any::class.java)
+            runMethod.invoke(interpreter, inputWindow, outputScores)
+
+            val screamIndex = 11 // AudioSet Class 11: Screaming
+            val screamScore = outputScores[0][screamIndex]
+            val shoutScore = max(outputScores[0][6], outputScores[0][9]) // Shout / Yell
+            val speechScore = max(outputScores[0][0], outputScores[0][1]) // Speech / Conversation
+            val cryScore = max(outputScores[0][19], outputScores[0][20]) // Crying, sobbing / Baby cry
+            val silenceScore = outputScores[0][494] // Silence
+
+            // Effective scream calculation: fuse pure acoustic screams with vocal shrieks
+            val effectiveScream = if (shoutScore > 0.05f) {
+                max(screamScore, shoutScore * 0.80f)
+            } else {
+                screamScore
+            }
+
+            // Sane rejection rules:
+            // 1. Must not be conversational speech (Speech > 0.50 and dominates scream by 2x)
+            // 2. Must dominate crying
+            // 3. Must dominate silence
+            val isSpeech = speechScore > 0.50f && speechScore > (2.0f * effectiveScream)
+            val isCry = cryScore > effectiveScream
+            val isSilence = silenceScore > 0.50f && silenceScore > effectiveScream
+
+            if (!isSpeech && !isCry && !isSilence && effectiveScream >= 0.20f) {
+                effectiveScream
+            } else {
+                0.0f
+            }
+        } catch (_: Throwable) {
+            null
+        }
+    }
+
+    /**
      * Analyzes a buffer of 16-bit PCM samples and outputs an acoustic scream/distress score (0.0 to 1.0).
      */
     fun evaluateAudioSamples(samples: ShortArray): Float {
         if (samples.isEmpty()) return 0.0f
 
         val floatSamples = AudioPreprocessor.toNormalizedFloat(samples)
+
+        // 1. If TFLite model is loaded and native runtime is available, run real model inference
+        val tfliteScore = runTfliteInference(floatSamples)
+        if (tfliteScore != null) {
+            return tfliteScore
+        }
+
+        // 2. High-Accuracy Edge DSP acoustic engine (resilient on-device fallback)
+        // Automatic Gain Control (AGC) for faint/distant audio before DSP analysis
+        var peak = 0.0f
+        for (s in floatSamples) {
+            val a = kotlin.math.abs(s)
+            if (a > peak) peak = a
+        }
+        val normalizedSamples = if (peak in 0.002f..0.75f) {
+            val scaled = FloatArray(floatSamples.size)
+            val factor = 0.85f / peak
+            for (i in floatSamples.indices) scaled[i] = floatSamples[i] * factor
+            scaled
+        } else {
+            floatSamples
+        }
+
         val frames = AudioPreprocessor.frameSignal(
-            floatSamples,
+            normalizedSamples,
             AudioPreprocessor.DEFAULT_FRAME_SIZE,
             AudioPreprocessor.DEFAULT_HOP_SIZE
         )
 
         if (frames.isEmpty()) return 0.0f
 
-        var maxFrameConfidence = 0.0f
+        var activeFrames = 0
         var screamFrameCount = 0
+        var speechDominantFrames = 0
 
         for (frame in frames) {
             val rms = AudioPreprocessor.computeRms(frame)
             val dbfs = AudioPreprocessor.rmsToDbfs(rms)
 
-            // Silence / ambient threshold: Screams must have sufficient amplitude (> -45 dBFS)
-            if (dbfs < -45.0f) continue
+            // Silence / ambient threshold: Screams must have sufficient amplitude (> -65 dBFS)
+            if (dbfs < -65.0f) continue
 
+            activeFrames++
             AudioPreprocessor.applyHannWindow(frame)
             val powerSpectrum = AudioPreprocessor.computePowerSpectrum(frame)
             val centroid = AudioPreprocessor.computeSpectralCentroid(powerSpectrum)
             val screamBandRatio = AudioPreprocessor.computeScreamBandRatio(powerSpectrum)
-            val zcr = AudioPreprocessor.computeZeroCrossingRate(frame)
+            val lowBandRatio = AudioPreprocessor.computeLowBandRatio(powerSpectrum)
 
-            // Acoustic distress heuristic scoring:
-            // 1. Scream-band energy ratio (weight 0.40): Screams concentrate 35-70% energy in 1.5-4.5 kHz
-            val bandScore = ((screamBandRatio - 0.25f) / 0.45f).coerceIn(0.0f, 1.0f)
-
-            // 2. Spectral Centroid (weight 0.35): Elevated center of mass (target > 2200 Hz)
-            val centroidScore = ((centroid - 1400.0f) / 1600.0f).coerceIn(0.0f, 1.0f)
-
-            // 3. Amplitude / Energy (weight 0.25): High loudness relative to ambient
-            val energyScore = ((dbfs + 45.0f) / 35.0f).coerceIn(0.0f, 1.0f)
-
-            val frameScore = (bandScore * 0.40f) + (centroidScore * 0.35f) + (energyScore * 0.25f)
-
-            if (frameScore > 0.40f) {
+            // Frame classification:
+            // Scream frame: High energy in 1.5-4.5 kHz, dominates fundamental formants (100-1000 Hz), elevated centroid
+            if (screamBandRatio >= 0.35f && screamBandRatio > lowBandRatio && centroid >= 1300.0f) {
                 screamFrameCount++
-            }
-            if (frameScore > maxFrameConfidence) {
-                maxFrameConfidence = frameScore
+            } else if (lowBandRatio >= 0.40f && lowBandRatio > screamBandRatio) {
+                speechDominantFrames++
             }
         }
 
-        // Temporal persistence factor: True screams sustain over multiple frames
-        val persistenceFactor = min(1.0f, screamFrameCount.toFloat() / max(1, frames.size / 3))
-        return (maxFrameConfidence * 0.75f) + (persistenceFactor * 0.25f)
+        if (activeFrames == 0) return 0.0f
+
+        val screamPercentage = screamFrameCount.toFloat() / activeFrames
+        val speechPercentage = speechDominantFrames.toFloat() / activeFrames
+
+        // Global decision: A true scream has low low-band speech/crying formant energy (speechPercentage < 0.40)
+        // and sustained high scream-band energy (screamPercentage >= 0.25).
+        return if (screamFrameCount >= 5 && screamPercentage >= 0.25f && speechPercentage < 0.40f) {
+            (0.40f + (screamPercentage * 1.0f)).coerceIn(0.40f, 1.0f)
+        } else {
+            (screamPercentage * 0.4f).coerceIn(0.0f, 0.20f)
+        }
     }
 
     /**
      * Checks if a score exceeds the sensitivity threshold and emits a structured DistressSignal.
      */
     suspend fun checkAndEmitDistress(rawScore: Float, customSource: String? = null) {
-        // Sensitivity maps: sensitivity 1.0 -> threshold 0.35, sensitivity 0.0 -> threshold 0.80
-        val effectiveThreshold = 0.80f - (sensitivity * 0.45f)
+        // Sensitivity maps: sensitivity 1.0 -> threshold 0.25, sensitivity 0.0 -> threshold 0.70
+        // At default sensitivity = 0.90f: effectiveThreshold = 0.70f - (0.90f * 0.45f) = 0.295f
+        val effectiveThreshold = 0.70f - (sensitivity * 0.45f)
 
         if (rawScore >= effectiveThreshold) {
             consecutiveDistressFrames++
@@ -203,10 +325,13 @@ class ScreamDistressClassifier(
                     source = customSource ?: activeModelName,
                     rawScore = rawScore,
                     metadata = mapOf(
-                        "engine" to if (isTfliteModelLoaded) "tflite_sound_event" else "edge_dsp_classifier",
+                        "engine" to if (tfliteInterpreter != null && isTfliteModelLoaded) "tflite_model_inference" else "edge_dsp_classifier",
                         "model" to activeModelName,
-                        "raw_score" to "%.3f".format(rawScore),
-                        "sensitivity" to "%.2f".format(sensitivity)
+                        "inference_status" to lastInferenceStatus,
+                        "raw_score" to "%.4f".format(rawScore),
+                        "sensitivity" to "%.2f".format(sensitivity),
+                        "sample_rate" to "16000",
+                        "window_samples" to "15600"
                     )
                 )
                 signalFlow.emit(signal)

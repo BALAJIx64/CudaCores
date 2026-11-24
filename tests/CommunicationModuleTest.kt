@@ -10,6 +10,7 @@ import com.guardiangrid.modules.communication.EmergencyCommunicatorImpl
 import com.guardiangrid.modules.communication.models.EmergencyDeliveryState
 import com.guardiangrid.modules.communication.network.HttpResponse
 import com.guardiangrid.modules.communication.network.MockHttpTransport
+import com.guardiangrid.modules.communication.queue.DeliveryQueueManagerImpl
 import com.guardiangrid.modules.communication.queue.FileEmergencyQueueRepository
 import com.guardiangrid.modules.communication.queue.IdempotencyManager
 import com.guardiangrid.modules.communication.queue.InMemoryQueueRepository

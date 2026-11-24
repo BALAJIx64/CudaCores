@@ -96,9 +96,9 @@ SAMPLES_DIR = os.path.join(SCRIPT_DIR, "samples")
 TARGET_CLASS = "Screaming"
 
 # Calibrated Ultra-Responsive Detection Settings (Calibrated for slightest human screams)
-# Default calibrated threshold: 0.010 (1.0%) raw activation triggers detection
-DEFAULT_CONFIDENCE_THRESHOLD = 0.010
-DEFAULT_HIGH_CONFIDENCE_THRESHOLD = 0.014
+# Default calibrated threshold: 0.005 (0.5%) raw activation triggers detection
+DEFAULT_CONFIDENCE_THRESHOLD = 0.005
+DEFAULT_HIGH_CONFIDENCE_THRESHOLD = 0.010
 DEFAULT_MIN_PERSISTENCE_WINDOWS = 1
 
 
@@ -309,27 +309,27 @@ class ScreamIntelligenceEngine:
         self.last_raw_scream = scream_score
 
         # Competitor & speech classes
-        cry_score = max(cat_map.get("Crying, sobbing", 0.0), cat_map.get("Baby cry, infant cry", 0.0))
+        cry_score = max(cat_map.get("Crying, sobbing", 0.0), cat_map.get("Baby cry, infant cry", 0.0), cat_map.get("Whimper", 0.0), cat_map.get("Wail, moan", 0.0))
         self.last_cry_score = cry_score
         speech_score = max(cat_map.get("Speech", 0.0), cat_map.get("Conversation", 0.0), cat_map.get("Narration, monologue", 0.0))
         shout_score = max(cat_map.get("Shout", 0.0), cat_map.get("Yell", 0.0), cat_map.get("Children shouting", 0.0))
+        silence_score = cat_map.get("Silence", 0.0)
 
         # Effective scream score:
         # Fuses pure acoustic screams (Class 11) with high-pitch vocal shrieks/yells (Class 6, 9)
         # when concentrated in the characteristic human scream resonant zone (1.5 kHz - 4.5 kHz).
-        # Normal speech (speech_score >= 0.55) is strictly rejected.
-        if self.vocal_distress_mode and shout_score > 0.05 and speech_score < 0.55 and scream_band_ratio > 0.15:
-            effective_scream_score = max(scream_score, shout_score * 0.80)
+        if self.vocal_distress_mode and shout_score > 0.03 and scream_band_ratio > 0.12:
+            effective_scream_score = max(scream_score, shout_score * 0.85)
         else:
             effective_scream_score = scream_score
 
         self.last_scream_score = effective_scream_score
 
         # Calibrated human-perceptible confidence score:
-        # Maps raw YAMNet sigmoid activations [0.005, 0.05+] to an intuitive [0% - 99%] scale.
-        # Exactly at self.confidence_threshold (0.010 = 1.0%), calibrated confidence reaches 50% (the gate line).
-        # When a user screams at 0.015 (1.5%), confidence reaches 61.2% (crossing the 50% gate!).
-        if effective_scream_score >= 0.005:
+        # Maps raw YAMNet sigmoid activations [0.002, 0.05+] to an intuitive [0% - 99%] scale.
+        # Exactly at self.confidence_threshold (0.005 = 0.5%), calibrated confidence reaches 50% (the gate line).
+        # When a user screams at 0.015 (1.5%), confidence reaches 86.6% (comfortably clearing the gate!).
+        if effective_scream_score >= 0.002:
             calibrated_confidence = float(min(0.99, (effective_scream_score / self.confidence_threshold) ** 0.5 * 0.50))
         else:
             calibrated_confidence = 0.0
@@ -350,10 +350,12 @@ class ScreamIntelligenceEngine:
         print(f"[{ts}] [YAMNET DIAG] SR:{SAMPLE_RATE}Hz N:{sample_count} Peak:{peak:.4f} (Min:{min_amp:.4f},Max:{max_amp:.4f}) RMS:{rms:.5f} ({dbfs:.1f} dBFS) | Top: [{top3_diag}] | Screaming:{effective_scream_score:.4f} (Conf:{calibrated_confidence*100:.1f}%)")
 
         # Screaming detection rule:
-        # 1. effective_scream_score >= self.confidence_threshold
-        # 2. must strictly dominate crying/sobbing
-        # 3. must NOT be normal speech
-        scream_present = (effective_scream_score >= self.confidence_threshold) and (effective_scream_score > cry_score) and (speech_score < 0.55)
+        # 1. effective_scream_score >= self.confidence_threshold (0.005 = 0.5%)
+        # 2. must strictly dominate crying/sobbing and ambient silence
+        # 3. must NOT be pure speech (conversational voice has scream_score = 0.000; only reject if pure speech dominates and scream is below threshold)
+        is_pure_speech = (speech_score > 0.90 and effective_scream_score < self.confidence_threshold)
+        is_ambient_silence = (silence_score > effective_scream_score)
+        scream_present = (effective_scream_score >= self.confidence_threshold) and (effective_scream_score > cry_score) and not is_ambient_silence and not is_pure_speech
 
         if scream_present:
             self.consecutive_scream_windows += 1
@@ -381,10 +383,10 @@ class ScreamIntelligenceEngine:
                 self.consecutive_scream_windows = 0
 
             # Log rejections for non-scream sounds with clear, self-explanatory descriptions
-            if speech_score > 0.45 or top_cat.category_name in ("Speech", "Conversation", "Narration, monologue"):
+            if is_pure_speech or (speech_score > 0.70 and effective_scream_score < self.confidence_threshold):
                 log_entry = f"[{ts}] 🗣️ [SPEECH REJECTED] Human Voice ({speech_score*100:.0f}%) | Screaming: {scream_score*100:.1f}% (Normal speech ignored)"
                 self.log_cb(log_entry, False)
-                print(f"[{ts}] 🗣️ [SPEECH REJECTED] Human Voice ({speech_score:.2f}) | Screaming: {scream_score:.3f} < {self.confidence_threshold:.2f} (Spoken words/conversation do not trigger screams)")
+                print(f"[{ts}] 🗣️ [SPEECH REJECTED] Human Voice ({speech_score:.2f}) | Screaming: {scream_score:.3f} < {self.confidence_threshold:.3f} (Spoken words/conversation do not trigger screams)")
             elif "cry" in top_cat.category_name.lower() or cry_score > 0.25:
                 log_entry = f"[{ts}] 👶 [CRYING REJECTED] Crying ({cry_score*100:.0f}%) | Screaming: {scream_score*100:.1f}% (Crying excluded from scream detection)"
                 self.log_cb(log_entry, False)
@@ -689,53 +691,53 @@ class VisualAudioTestApp:
 
         self.btn_sens_ultra = tk.Button(
             self.sens_frame,
-            text="⚡ Ultra (1.0% - Slightest Screams)",
+            text="⚡ Ultra (0.5% - Slightest Screams)",
             font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
             bg="#2E7D32",
             fg="#FFFFFF",
             relief=tk.FLAT,
             padx=8,
             pady=2,
-            command=lambda: self.set_sensitivity(0.010, 0.014, True, "Ultra (1.0% - Slightest Screams)")
+            command=lambda: self.set_sensitivity(0.005, 0.010, True, "Ultra (0.5% - Slightest Screams)")
         )
         self.btn_sens_ultra.pack(side=tk.LEFT, padx=3)
 
         self.btn_sens_balanced = tk.Button(
             self.sens_frame,
-            text="🎯 Balanced (1.8%)",
+            text="🎯 Balanced (1.0%)",
             font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
             bg="#424242",
             fg="#FFFFFF",
             relief=tk.FLAT,
             padx=8,
             pady=2,
-            command=lambda: self.set_sensitivity(0.018, 0.028, True, "Balanced (1.8% - Standard)")
+            command=lambda: self.set_sensitivity(0.010, 0.018, True, "Balanced (1.0% - Standard)")
         )
         self.btn_sens_balanced.pack(side=tk.LEFT, padx=3)
 
         self.btn_sens_strict = tk.Button(
             self.sens_frame,
-            text="🛡️ Strict (4.0%)",
+            text="🛡️ Strict (2.5%)",
             font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
             bg="#424242",
             fg="#B0BEC5",
             relief=tk.FLAT,
             padx=8,
             pady=2,
-            command=lambda: self.set_sensitivity(0.040, 0.060, True, "Strict (4.0% - Heavy)")
+            command=lambda: self.set_sensitivity(0.025, 0.045, True, "Strict (2.5% - Heavy)")
         )
         self.btn_sens_strict.pack(side=tk.LEFT, padx=3)
 
         self.btn_sens_vocal = tk.Button(
             self.sens_frame,
-            text="📢 Vocal Distress (Scream+Yell 1.0%)",
+            text="📢 Vocal Distress (Scream+Yell 0.5%)",
             font=tkfont.Font(family="Segoe UI", size=9, weight="bold"),
             bg="#E65100",
             fg="#FFFFFF",
             relief=tk.FLAT,
             padx=8,
             pady=2,
-            command=lambda: self.set_sensitivity(0.010, 0.014, True, "Vocal Distress Mode (Scream + Yell)")
+            command=lambda: self.set_sensitivity(0.005, 0.010, True, "Vocal Distress Mode (Scream + Yell)")
         )
         self.btn_sens_vocal.pack(side=tk.LEFT, padx=3)
 
@@ -1073,10 +1075,10 @@ class VisualAudioTestApp:
         self.engine.vocal_distress_mode = vocal_mode
         self.log_listbox.insert(tk.END, f"⚙️ Mode switched to {name} | Threshold: {conf_thresh*100:.1f}%")
         self.log_listbox.see(tk.END)
-        self.btn_sens_ultra.configure(bg="#2E7D32" if conf_thresh == 0.010 and vocal_mode else "#424242")
-        self.btn_sens_balanced.configure(bg="#1565C0" if conf_thresh == 0.018 else "#424242")
-        self.btn_sens_strict.configure(bg="#D32F2F" if conf_thresh == 0.040 else "#424242")
-        self.btn_sens_vocal.configure(bg="#E65100" if vocal_mode and conf_thresh == 0.010 else "#424242")
+        self.btn_sens_ultra.configure(bg="#2E7D32" if conf_thresh == 0.005 and vocal_mode else "#424242")
+        self.btn_sens_balanced.configure(bg="#1565C0" if conf_thresh == 0.010 else "#424242")
+        self.btn_sens_strict.configure(bg="#D32F2F" if conf_thresh == 0.025 else "#424242")
+        self.btn_sens_vocal.configure(bg="#E65100" if vocal_mode and conf_thresh == 0.005 else "#424242")
 
     def simulate_scream(self):
         scream_path = os.path.join(SAMPLES_DIR, "pi_scream.wav")

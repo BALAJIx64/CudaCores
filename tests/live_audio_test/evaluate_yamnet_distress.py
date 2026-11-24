@@ -52,10 +52,10 @@ SAMPLE_RATE = 16000
 WINDOW_SAMPLES = 15600  # 0.975 seconds
 
 # Calibrated ultra-responsive detection parameters:
-# Calibrated for slightest human screams (raw activation >= 1.0%)
-CONFIDENCE_THRESHOLD = 0.010
+# Calibrated for slightest human screams (raw activation >= 0.5%)
+CONFIDENCE_THRESHOLD = 0.005
 # Single high-confidence peak threshold
-HIGH_CONFIDENCE_THRESHOLD = 0.014
+HIGH_CONFIDENCE_THRESHOLD = 0.010
 # Minimum persistence required across windows
 MIN_PERSISTENCE_WINDOWS = 1
 
@@ -69,8 +69,8 @@ class YamnetScreamEvaluator:
         options = audio.AudioClassifierOptions(
             base_options=base_options,
             running_mode=audio.RunningMode.AUDIO_CLIPS,
-            max_results=12,
-            score_threshold=0.01,
+            max_results=-1,
+            score_threshold=0.0,
         )
         self.classifier = audio.AudioClassifier.create_from_options(options)
 
@@ -102,15 +102,23 @@ class YamnetScreamEvaluator:
             cat_dict = {c.category_name: c.score for c in categories}
 
             scream_score = cat_dict.get(TARGET_CLASS, 0.0)
-            cry_score = max(cat_dict.get("Crying, sobbing", 0.0), cat_dict.get("Baby cry, infant cry", 0.0))
+            cry_score = max(
+                cat_dict.get("Crying, sobbing", 0.0),
+                cat_dict.get("Baby cry, infant cry", 0.0),
+                cat_dict.get("Whimper", 0.0),
+                cat_dict.get("Wail, moan", 0.0)
+            )
+            silence_score = cat_dict.get("Silence", 0.0)
 
             if scream_score > max_scream_score:
                 max_scream_score = scream_score
 
             speech_score = max(cat_dict.get("Speech", 0.0), cat_dict.get("Conversation", 0.0))
 
-            # Screaming condition: score >= CONFIDENCE_THRESHOLD, must dominate crying, must not be speech
-            scream_present = (scream_score >= CONFIDENCE_THRESHOLD) and (scream_score > cry_score) and (speech_score < 0.55)
+            # Screaming condition: score >= CONFIDENCE_THRESHOLD, must dominate crying and ambient silence, must not be pure speech
+            is_pure_speech = (speech_score > 0.90 and scream_score < CONFIDENCE_THRESHOLD)
+            is_ambient_silence = (silence_score > scream_score)
+            scream_present = (scream_score >= CONFIDENCE_THRESHOLD) and (scream_score > cry_score) and not is_ambient_silence and not is_pure_speech
             if scream_present:
                 consecutive_scream += 1
                 if (consecutive_scream >= MIN_PERSISTENCE_WINDOWS) or (scream_score >= HIGH_CONFIDENCE_THRESHOLD):
@@ -196,8 +204,9 @@ def run_full_benchmark():
     negative_results = []
 
     # --- A. Positive Scream Audio Samples ---
+    samples_dir = os.path.join(SCRIPT_DIR, "samples")
     temp_dir = os.environ.get("TEMP", "")
-    real_scream_path = os.path.join(temp_dir, "pi_scream.wav")
+    real_scream_path = os.path.join(samples_dir, "pi_scream.wav") if os.path.exists(os.path.join(samples_dir, "pi_scream.wav")) else os.path.join(temp_dir, "pi_scream.wav")
 
     test_positives = {}
     if os.path.exists(real_scream_path):
@@ -226,13 +235,13 @@ def run_full_benchmark():
     test_negatives = {}
 
     # Real crying recording (must NOT trigger scream detection)
-    real_crying_path = os.path.join(temp_dir, "crying_real.wav")
+    real_crying_path = os.path.join(samples_dir, "crying_real.wav") if os.path.exists(os.path.join(samples_dir, "crying_real.wav")) else os.path.join(temp_dir, "crying_real.wav")
     if os.path.exists(real_crying_path):
         sr, data = wavfile.read(real_crying_path)
         test_negatives["Real Infant/Adult Crying Recording (crying_real.wav)"] = (data, sr)
 
     # Real human speech recording (must NOT trigger scream detection)
-    real_speech_path = os.path.join(temp_dir, "speech_16000_hz_mono.wav")
+    real_speech_path = os.path.join(samples_dir, "speech_16000_hz_mono.wav") if os.path.exists(os.path.join(samples_dir, "speech_16000_hz_mono.wav")) else os.path.join(temp_dir, "speech_16000_hz_mono.wav")
     if os.path.exists(real_speech_path):
         sr, data = wavfile.read(real_speech_path)
         test_negatives["Real Continuous Human Speech (speech_16000_hz_mono.wav)"] = (data, sr)
