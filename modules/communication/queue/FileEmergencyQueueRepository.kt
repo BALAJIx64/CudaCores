@@ -131,7 +131,10 @@ class FileEmergencyQueueRepository(
 
             val incidentId = fields[6]
             val timestamp = fields[7].toLong()
-            val distressType = DistressType.valueOf(fields[8])
+            val rawType = fields[8]
+            val distressType = try {
+                if (rawType == "KEYWORD") DistressType.SCREAM else DistressType.valueOf(rawType)
+            } catch (_: Exception) { DistressType.SCREAM }
             val confidence = fields[9].toFloat()
             val emergencyMessage = unescapeDelimiter(fields[10])
             val audioPath = if (fields[11] == "NONE") null else fields[11]

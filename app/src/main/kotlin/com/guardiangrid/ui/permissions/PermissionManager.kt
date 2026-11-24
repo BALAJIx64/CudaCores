@@ -28,7 +28,7 @@ object PermissionManager {
             SafetyPermission(
                 permission = Manifest.permission.RECORD_AUDIO,
                 title = "Microphone Access",
-                description = "Required to identify screams, crying, and vocal emergency keywords on-device. Audio is processed locally and discarded immediately unless distress is confirmed.",
+                description = "Required to identify screams, crying, and vocal distress sounds on-device. Audio is processed locally and discarded immediately unless distress is confirmed.",
                 isCritical = true,
                 iconName = "mic"
             )

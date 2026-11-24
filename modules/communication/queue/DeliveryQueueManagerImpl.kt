@@ -110,6 +110,16 @@ class DeliveryQueueManagerImpl(
         return receipts
     }
 
+    override suspend fun clearQueue() = mutex.withLock {
+        repository.clear()
+        _queueFlow.value = emptyList()
+    }
+
+    override suspend fun deleteQueuedItem(queueId: String) = mutex.withLock {
+        repository.delete(queueId)
+        _queueFlow.value = repository.getAll()
+    }
+
     /**
      * Calculates exponential backoff delay with exponential factor 2^retryCount.
      */

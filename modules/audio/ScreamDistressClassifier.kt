@@ -59,7 +59,7 @@ class ScreamDistressClassifier(
     // State tracking for temporal persistence filtering
     private var consecutiveDistressFrames = 0
     private var lastEmittedTimestamp = 0L
-    private val emissionCooldownMs = 1500L // Prevent alert flooding
+    private val emissionCooldownMs = 3000L // Prevent alert flooding with 3-second debounce cooldown
 
     // Model metadata
     var activeModelName: String = "GuardianGrid_AcousticDistressDSP_v1.0"
@@ -191,28 +191,26 @@ class ScreamDistressClassifier(
 
             val screamIndex = 11 // AudioSet Class 11: Screaming
             val screamScore = outputScores[0][screamIndex]
-            val shoutScore = max(outputScores[0][6], outputScores[0][9]) // Shout / Yell
+            val maxShoutScore = max(outputScores[0][6], outputScores[0][9]) // Shout / Yell
             val speechScore = max(outputScores[0][0], outputScores[0][1]) // Speech / Conversation
-            val cryScore = max(outputScores[0][19], outputScores[0][20]) // Crying, sobbing / Baby cry
+            val maxCryScore = max(outputScores[0][19], outputScores[0][20]) // Crying, sobbing / Baby cry
             val silenceScore = outputScores[0][494] // Silence
 
-            // Effective scream calculation: fuse pure acoustic screams with vocal shrieks
-            val effectiveScream = if (shoutScore > 0.05f) {
-                max(screamScore, shoutScore * 0.80f)
-            } else {
-                screamScore
-            }
+            // Combine vocal distress categories (screaming, shouting, crying)
+            val vocalDistressScore = maxOf(screamScore, maxShoutScore, maxCryScore)
 
-            // Sane rejection rules:
-            // 1. Must not be conversational speech (Speech > 0.50 and dominates scream by 2x)
-            // 2. Must dominate crying
-            // 3. Must dominate silence
-            val isSpeech = speechScore > 0.50f && speechScore > (2.0f * effectiveScream)
-            val isCry = cryScore > effectiveScream
-            val isSilence = silenceScore > 0.50f && silenceScore > effectiveScream
+            // Rejection rules:
+            // 1. Must not be pure silence
+            val isPureSilence = silenceScore > 0.70f && silenceScore > vocalDistressScore
+            // 2. Must not be conversational speech dominating without distress
+            val isPureSpeech = speechScore > 0.60f && speechScore > (2.5f * vocalDistressScore) && vocalDistressScore < 0.12f
 
-            if (!isSpeech && !isCry && !isSilence && effectiveScream >= 0.20f) {
-                effectiveScream
+            // Configurable sensitivity threshold floor (at default sensitivity 0.90, floor is ~0.10f)
+            val distressFloor = (0.22f - (sensitivity * 0.14f)).coerceIn(0.08f, 0.22f)
+
+            if (!isPureSilence && !isPureSpeech && vocalDistressScore >= distressFloor) {
+                // Calibrated score mapping [distressFloor, 0.60+] -> [0.35, 1.0]
+                (0.35f + (vocalDistressScore * 1.4f)).coerceIn(0.35f, 1.0f)
             } else {
                 0.0f
             }
@@ -291,9 +289,9 @@ class ScreamDistressClassifier(
         val screamPercentage = screamFrameCount.toFloat() / activeFrames
         val speechPercentage = speechDominantFrames.toFloat() / activeFrames
 
-        // Global decision: A true scream has low low-band speech/crying formant energy (speechPercentage < 0.40)
-        // and sustained high scream-band energy (screamPercentage >= 0.25).
-        return if (screamFrameCount >= 5 && screamPercentage >= 0.25f && speechPercentage < 0.40f) {
+        // Global decision: Detects screams, yelling, and crying (screamPercentage >= 0.25, speechPercentage < 0.65)
+        // Rejects conversational speech where low-band formants dominate (> 65% of frames)
+        return if (screamFrameCount >= 5 && screamPercentage >= 0.25f && speechPercentage < 0.65f) {
             (0.40f + (screamPercentage * 1.0f)).coerceIn(0.40f, 1.0f)
         } else {
             (screamPercentage * 0.4f).coerceIn(0.0f, 0.20f)
@@ -304,18 +302,16 @@ class ScreamDistressClassifier(
      * Checks if a score exceeds the sensitivity threshold and emits a structured DistressSignal.
      */
     suspend fun checkAndEmitDistress(rawScore: Float, customSource: String? = null) {
-        // Sensitivity maps: sensitivity 1.0 -> threshold 0.25, sensitivity 0.0 -> threshold 0.70
-        // At default sensitivity = 0.90f: effectiveThreshold = 0.70f - (0.90f * 0.45f) = 0.295f
-        val effectiveThreshold = 0.70f - (sensitivity * 0.45f)
+        val effectiveThreshold = 0.65f - (sensitivity * 0.35f)
 
         if (rawScore >= effectiveThreshold) {
             consecutiveDistressFrames++
             val now = System.currentTimeMillis()
 
-            // Emit when sustained for at least 2 frames and cooldown elapsed
-            if (consecutiveDistressFrames >= 2 && (now - lastEmittedTimestamp) > emissionCooldownMs) {
+            // Emit when sustained for at least 2 frames OR strong distress (rawScore >= 0.50f), and cooldown elapsed
+            if ((consecutiveDistressFrames >= 2 || rawScore >= 0.50f) && (now - lastEmittedTimestamp) > emissionCooldownMs) {
                 lastEmittedTimestamp = now
-                val calibratedConfidence = min(1.0f, (rawScore / 0.95f)).coerceIn(0.70f, 0.99f)
+                val calibratedConfidence = (0.75f + (rawScore * 0.22f)).coerceIn(0.70f, 0.98f)
 
                 val signal = DistressSignal(
                     id = UUID.randomUUID().toString(),

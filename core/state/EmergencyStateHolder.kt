@@ -46,6 +46,7 @@ object EmergencyStateHolder {
         _state.update { current ->
             current.copy(
                 isProtectionActive = active,
+                monitoringServiceState = if (active) MonitoringServiceState.ACTIVE else MonitoringServiceState.STOPPED,
                 mode = if (active) mode else ProtectionMode.STANDBY,
                 emergencyLevel = if (active) EmergencyLevel.MONITORING else EmergencyLevel.IDLE,
                 statusMessage = if (active) "Active Protection Running" else "Protection Standby"
@@ -53,8 +54,57 @@ object EmergencyStateHolder {
         }
     }
 
+    fun setMonitoringServiceState(serviceState: MonitoringServiceState, errorMessage: String? = null) {
+        _state.update { current ->
+            val active = (serviceState == MonitoringServiceState.ACTIVE)
+            current.copy(
+                monitoringServiceState = serviceState,
+                monitoringServiceError = errorMessage,
+                isProtectionActive = active,
+                mode = if (active) {
+                    if (current.isDiscreetModeEnabled) ProtectionMode.DISCREET_MONITORING else ProtectionMode.ACTIVE_MONITORING
+                } else if (serviceState == MonitoringServiceState.STARTING) {
+                    current.mode
+                } else {
+                    ProtectionMode.STANDBY
+                },
+                emergencyLevel = if (active && current.emergencyLevel == EmergencyLevel.IDLE) {
+                    EmergencyLevel.MONITORING
+                } else if (serviceState == MonitoringServiceState.STOPPED && current.emergencyLevel == EmergencyLevel.MONITORING) {
+                    EmergencyLevel.IDLE
+                } else {
+                    current.emergencyLevel
+                },
+                statusMessage = when (serviceState) {
+                    MonitoringServiceState.ACTIVE -> "Active Protection Running"
+                    MonitoringServiceState.STARTING -> "Starting Protection Service..."
+                    MonitoringServiceState.STOPPING -> "Stopping Protection Service..."
+                    MonitoringServiceState.PERMISSION_REQUIRED -> errorMessage ?: "Microphone Permission Required"
+                    MonitoringServiceState.ERROR -> errorMessage ?: "Monitoring Error"
+                    MonitoringServiceState.STOPPED -> "Protection Standby"
+                }
+            )
+        }
+    }
+
     fun setDiscreetModeEnabled(enabled: Boolean) {
         _state.update { it.copy(isDiscreetModeEnabled = enabled) }
+    }
+
+    fun updateTrustedContacts(contacts: List<EmergencyContact>) {
+        _state.update { it.copy(trustedContacts = contacts) }
+    }
+
+    fun addTrustedContact(contact: EmergencyContact) {
+        _state.update { current ->
+            current.copy(trustedContacts = current.trustedContacts + contact)
+        }
+    }
+
+    fun removeTrustedContact(contactId: String) {
+        _state.update { current ->
+            current.copy(trustedContacts = current.trustedContacts.filter { it.id != contactId })
+        }
     }
 
     fun recordDistressSignal(signal: DistressSignal) {
@@ -110,8 +160,8 @@ object EmergencyStateHolder {
     fun updatePermissions(
         audio: Boolean,
         location: Boolean,
-        notification: Boolean,
-        sms: Boolean
+        notification: Boolean = true,
+        sms: Boolean = false
     ) {
         _state.update {
             it.copy(

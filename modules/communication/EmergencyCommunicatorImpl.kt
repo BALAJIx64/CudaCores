@@ -46,7 +46,8 @@ class EmergencyCommunicatorImpl(
     val queueRepository: EmergencyQueueRepository = InMemoryQueueRepository(),
     private val credentialsProvider: () -> TelegramCredentials? = { TelegramConfigManager.getCredentials() },
     val idempotencyManager: IdempotencyManager = IdempotencyManager(),
-    val bluetoothRelay: BluetoothRelayServiceImpl = BluetoothRelayServiceImpl()
+    val bluetoothRelay: BluetoothRelayServiceImpl = BluetoothRelayServiceImpl(),
+    var onOfflineRetryScheduled: (() -> Unit)? = null
 ) : EmergencyCommunicator {
 
     val telegramDispatcher = TelegramEmergencyDispatcher(transport, credentialsProvider)
@@ -120,6 +121,7 @@ class EmergencyCommunicatorImpl(
                     _lastDeliveryState.value = EmergencyDeliveryState.FAILED
                     // Enqueue for offline retry upon failure
                     queueManager.enqueue(payload, DeliveryChannel.TELEGRAM)
+                    onOfflineRetryScheduled?.invoke()
                     result.auditRecord.toDeliveryReceipt()
                 }
             }

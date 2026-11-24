@@ -5,8 +5,12 @@ import com.guardiangrid.core.models.DeliveryChannel
 import com.guardiangrid.modules.communication.models.CommunicationAuditRecord
 import com.guardiangrid.modules.communication.models.EmergencyDeliveryState
 import com.guardiangrid.modules.communication.security.RecipientAuthorizer
+import java.text.SimpleDateFormat
+import java.util.Date
 import java.util.Locale
+import java.util.TimeZone
 import java.util.UUID
+import java.util.concurrent.ConcurrentHashMap
 
 /**
  * Result of SMS alert dispatch across one or more contacts.
@@ -23,32 +27,28 @@ data class SmsDispatchResult(
 /**
  * Emergency SMS fallback dispatcher.
  *
- * ## Android SMS Feasibility & Architectural Assessment:
- * 1. **Underlying Android APIs:**
- *    - Android 12+ (API 31+): `context.getSystemService(android.telephony.SmsManager::class.java)`
- *    - Android 8.0 - 11 (API 26-30): `android.telephony.SmsManager.getDefault()`
- *    - Multi-part message support: `SmsManager.divideMessage(text)` and `SmsManager.sendMultipartTextMessage(...)`
- * 2. **Required Android Permissions:**
- *    - `android.permission.SEND_SMS` (Declared in AndroidManifest.xml and requested at runtime).
- *    - `android.permission.READ_PHONE_STATE` (Optional, required if querying multiple SIM slots on dual-SIM devices).
- * 3. **Google Play Store Policy Compliance:**
- *    - `SEND_SMS` is restricted under Google Play's "Permissions and APIs that Access Sensitive Information" policy.
- *    - GuardianGrid qualifies under the **Personal Safety Application** declared exemption category.
- * 4. **Character Budget Optimization:**
- *    - Standard 7-bit GSM SMS allows up to 160 characters per single message segment.
- *    - Our compact format is strictly engineered to stay within 160 characters to avoid multipart splitting delays
- *      and ensure instantaneous single-packet carrier delivery.
+ * Implements:
+ * - Prioritized dispatch (Primary emergency contact first, then secondary).
+ * - Compact GSM-7 compliant 160-character budget with incident ID, timestamp, distress type, and Google Maps URL.
+ * - In-memory duplicate suppression cache within 60s cooldown window per contact.
+ * - Detailed communication audit records with masked phone numbers.
  */
 class SmsEmergencyDispatcher(
     private val smsSender: SmsSender = MockSmsSender()
 ) {
+
+    // Tracks recently dispatched alert hashes to prevent duplicate transmissions
+    private val recentDispatches = ConcurrentHashMap<String, Long>()
+    private val duplicateCooldownMs = 60_000L
 
     /**
      * Dispatches SMS emergency notifications to all emergency contacts with phone numbers.
      */
     fun dispatch(payload: AlertPayload): SmsDispatchResult {
         val startTime = System.currentTimeMillis()
-        val contactsWithPhones = payload.recipientContacts.filter { it.phoneNumber.isNotBlank() }
+        val contactsWithPhones = payload.recipientContacts
+            .filter { it.phoneNumber.isNotBlank() }
+            .sortedByDescending { it.isPrimary }
 
         if (contactsWithPhones.isEmpty()) {
             val latency = System.currentTimeMillis() - startTime
@@ -80,11 +80,36 @@ class SmsEmergencyDispatcher(
         for (contact in contactsWithPhones) {
             val eventId = "sms-${UUID.randomUUID()}"
             val maskedPhone = RecipientAuthorizer.maskPhoneNumber(contact.phoneNumber)
+            val dedupeKey = "${payload.incidentId}:${contact.phoneNumber}"
+
+            val lastSent = recentDispatches[dedupeKey]
+            val now = System.currentTimeMillis()
+
+            if (lastSent != null && (now - lastSent) < duplicateCooldownMs) {
+                // Duplicate suppressed
+                val duplicateAudit = CommunicationAuditRecord(
+                    recordId = UUID.randomUUID().toString(),
+                    incidentId = payload.incidentId,
+                    eventId = eventId,
+                    channel = DeliveryChannel.SMS,
+                    state = EmergencyDeliveryState.DELIVERED,
+                    attemptCount = 0,
+                    recipient = maskedPhone,
+                    errorMessage = "Duplicate SMS suppressed within cooldown period",
+                    isDuplicateSuppressed = true,
+                    deliveredEpochMs = lastSent,
+                    latencyMs = 0L
+                )
+                audits.add(duplicateAudit)
+                sent.add(contact.phoneNumber)
+                continue
+            }
 
             val sendResult = smsSender.sendSms(contact.phoneNumber, messageText)
             val latency = System.currentTimeMillis() - startTime
 
             if (sendResult.isSuccess) {
+                recentDispatches[dedupeKey] = now
                 sent.add(contact.phoneNumber)
                 audits.add(
                     CommunicationAuditRecord(
@@ -96,7 +121,7 @@ class SmsEmergencyDispatcher(
                         attemptCount = 1,
                         recipient = maskedPhone,
                         messageId = eventId,
-                        deliveredEpochMs = System.currentTimeMillis(),
+                        deliveredEpochMs = now,
                         latencyMs = latency
                     )
                 )
@@ -136,11 +161,14 @@ class SmsEmergencyDispatcher(
 
     /**
      * Formats a high-density, compact SMS text designed to fit within the 160-character GSM limit.
-     *
-     * Example:
-     * `EMERGENCY: GuardianGrid SOS! Loc: https://maps.google.com/?q=12.9716,77.5946 Type: SCREAM ID: INC-101`
+     * Includes incident ID, timestamp, distress type, and location.
      */
     fun formatCompactSms(payload: AlertPayload): String {
+        val timeFormat = SimpleDateFormat("HH:mm:ss'Z'", Locale.US).apply {
+            timeZone = TimeZone.getTimeZone("UTC")
+        }
+        val timeStr = timeFormat.format(Date(payload.timestampEpochMs))
+
         val locStr = if (payload.location != null && (payload.location.latitude != 0.0 || payload.location.longitude != 0.0)) {
             val lat = String.format(Locale.US, "%.5f", payload.location.latitude)
             val lon = String.format(Locale.US, "%.5f", payload.location.longitude)
@@ -149,7 +177,7 @@ class SmsEmergencyDispatcher(
             "UNAVAILABLE"
         }
 
-        val baseText = "EMERGENCY: GuardianGrid SOS! Type: ${payload.distressType.name}. Loc: $locStr. ID: ${payload.incidentId}"
+        val baseText = "EMERGENCY: GuardianGrid SOS! Type: ${payload.distressType.name}. Time: $timeStr. Loc: $locStr. ID: ${payload.incidentId}"
         return if (baseText.length > 160) {
             baseText.take(157) + "..."
         } else {

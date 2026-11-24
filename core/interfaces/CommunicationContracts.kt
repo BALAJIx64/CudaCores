@@ -45,6 +45,16 @@ interface DeliveryQueueManager {
      * Trigger immediate retry for all pending or failed events.
      */
     suspend fun retryPendingEvents(): List<DeliveryReceipt>
+
+    /**
+     * Clears all items in the persistent queue.
+     */
+    suspend fun clearQueue() {}
+
+    /**
+     * Deletes a specific item by queue ID.
+     */
+    suspend fun deleteQueuedItem(queueId: String) {}
 }
 
 /**

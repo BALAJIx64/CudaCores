@@ -200,9 +200,50 @@ class TwoStageAudioEvidenceRecorder(
         }
     }
 
-    private fun createStageOneFile(): File {
-        val baseDir = cacheDirectory ?: File(System.getProperty("java.io.tmpdir"), "guardiangrid_cache")
-        baseDir.mkdirs()
-        return File(baseDir, "stage1_preview_${System.currentTimeMillis()}.wav")
+    private fun createStageOneFile(incidentId: String? = null): File {
+        val baseDir = cacheDirectory?.let { File(it, "evidence") }
+            ?: File(System.getProperty("java.io.tmpdir"), "guardiangrid_evidence")
+        if (!baseDir.exists()) {
+            baseDir.mkdirs()
+        }
+        val prefix = if (!incidentId.isNullOrBlank()) "evidence_${incidentId}" else "stage1_preview"
+        return File(baseDir, "${prefix}_${System.currentTimeMillis()}.wav")
+    }
+
+    /**
+     * User-controlled forensic evidence deletion.
+     * Guarantees files are deleted permanently and never retained silently.
+     */
+    fun deleteEvidence(filePath: String): Boolean {
+        return try {
+            val file = File(filePath)
+            if (file.exists()) {
+                file.delete()
+            } else {
+                false
+            }
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    /**
+     * Cleans up orphaned or temporary preview recordings to prevent unneeded storage usage.
+     */
+    fun cleanupTemporaryPreviews(maxAgeMs: Long = 3600_000L): Int {
+        val baseDir = cacheDirectory?.let { File(it, "evidence") }
+            ?: File(System.getProperty("java.io.tmpdir"), "guardiangrid_evidence")
+        if (!baseDir.exists()) return 0
+
+        val cutoff = System.currentTimeMillis() - maxAgeMs
+        var deletedCount = 0
+        baseDir.listFiles()?.forEach { file ->
+            if (file.isFile && file.name.startsWith("stage1_preview") && file.lastModified() < cutoff) {
+                if (file.delete()) {
+                    deletedCount++
+                }
+            }
+        }
+        return deletedCount
     }
 }

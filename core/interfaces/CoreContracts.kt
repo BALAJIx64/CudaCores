@@ -25,6 +25,11 @@ interface EmergencyCoordinator {
     fun cancelEmergency(reason: String)
 
     /**
+     * Manually resolve an ongoing emergency incident.
+     */
+    fun resolveEmergency(reason: String)
+
+    /**
      * Update location tracking state.
      */
     fun updateLocation(location: LocationData)

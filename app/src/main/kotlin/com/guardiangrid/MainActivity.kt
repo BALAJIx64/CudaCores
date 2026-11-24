@@ -11,6 +11,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.ui.Modifier
 import com.guardiangrid.core.interfaces.EmergencyCommunicator
 import com.guardiangrid.core.state.EmergencyCoordinatorImpl
+import com.guardiangrid.core.state.EmergencyStateHolder
 import com.guardiangrid.location.GuardianLocationManager
 import com.guardiangrid.modules.audio.AudioModuleStub
 import com.guardiangrid.modules.communication.EmergencyCommunicatorImpl
@@ -20,6 +21,7 @@ import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
 import com.guardiangrid.modules.motion.fusion.MultimodalFusionEngineImpl
 import com.guardiangrid.modules.motion.sensors.AndroidMotionSensorSource
 import com.guardiangrid.ui.DashboardScreen
+import com.guardiangrid.ui.GuardianGridMainScreen
 import com.guardiangrid.ui.permissions.PermissionManager
 import com.guardiangrid.ui.theme.GuardianGridTheme
 import java.io.File
@@ -55,38 +57,15 @@ class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // Initialize location subsystem
-        locationManager = GuardianLocationManager(this)
+        // Retrieve application-scoped dependencies from GuardianGridContainer
+        val app = application as GuardianGridApp
+        val container = app.container
 
-        // Initialize persistent offline queue repository in internal app storage
-        val queueDir = File(filesDir, "emergency_queue")
-        val queueRepo = FileEmergencyQueueRepository(queueDir)
-        communicator = EmergencyCommunicatorImpl(
-            queueRepository = queueRepo,
-            smsSender = MockSmsSender()
-        )
-
-        // Initialize audio subsystem facade (concurrent scream + KWS)
-        audioModule = AudioModuleStub(
-            cacheDirectory = cacheDir,
-            modelDirectory = filesDir
-        )
-
-        // Initialize real Android motion hardware sensor source & anomaly detector
-        val motionSensorSource = AndroidMotionSensorSource(this)
-        motionDetector = MotionAnomalyDetectorImpl(sensorSource = motionSensorSource)
-        fusionEngine = MultimodalFusionEngineImpl()
-
-        // Initialize EmergencyCoordinator with dynamic location provider, communicator, audio detector, motion detector, and fusion engine
-        coordinator = EmergencyCoordinatorImpl(
-            locationProvider = {
-                locationManager.lastLocation.value ?: locationManager.getLastKnownLocation()
-            },
-            communicator = communicator,
-            audioDetector = audioModule,
-            motionDetector = motionDetector,
-            fusionEngine = fusionEngine
-        )
+        locationManager = container.locationManager
+        communicator = container.communicator
+        audioModule = container.audioModule
+        motionDetector = container.motionDetector
+        coordinator = container.coordinator
 
         // Sync initial permission states
         PermissionManager.syncPermissionsWithState(this)
@@ -100,7 +79,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    DashboardScreen(
+                    GuardianGridMainScreen(
                         coordinator = coordinator,
                         locationManager = locationManager,
                         audioModule = audioModule,
@@ -123,11 +102,11 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        if (::locationManager.isInitialized) {
+        // Protection is maintained by GuardianForegroundService across Activity destruction / recreation.
+        // Only stop location updates if protection is NOT active.
+        val state = EmergencyStateHolder.state.value
+        if (!state.isProtectionActive && ::locationManager.isInitialized) {
             locationManager.stopLocationUpdates()
-        }
-        if (::coordinator.isInitialized) {
-            coordinator.stopProtection()
         }
     }
 

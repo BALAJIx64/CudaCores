@@ -6,15 +6,23 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.runtime.Composable
 
 private val GuardianGridColorScheme = darkColorScheme(
-    primary = EmergencyRed,
+    primary = BrandMagenta,
     onPrimary = TextPrimary,
-    primaryContainer = EmergencyDarkRed,
+    primaryContainer = BrandMagentaDark,
     onPrimaryContainer = TextPrimary,
     secondary = InfoBlue,
+    onSecondary = TextPrimary,
     background = DarkBackground,
-    surface = DarkSurface,
     onBackground = TextPrimary,
-    onSurface = TextPrimary
+    surface = DarkSurface,
+    onSurface = TextPrimary,
+    surfaceVariant = DarkSurfaceElevated,
+    onSurfaceVariant = TextSecondary,
+    outline = DarkBorder,
+    error = EmergencyRed,
+    onError = TextPrimary,
+    errorContainer = EmergencyDarkRed,
+    onErrorContainer = TextPrimary
 )
 
 @Composable

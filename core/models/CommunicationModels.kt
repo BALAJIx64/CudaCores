@@ -29,8 +29,8 @@ data class AlertPayload(
     val timestampEpochMs: Long = System.currentTimeMillis(),
     val distressType: DistressType,
     val confidence: Float,
-    val location: LocationData?,
-    val emergencyMessage: String,
+    val location: LocationData? = null,
+    val emergencyMessage: String = "GuardianGrid Emergency Alert",
     val audioSegmentPath: String? = null,
     val recipientContacts: List<EmergencyContact> = emptyList()
 )
