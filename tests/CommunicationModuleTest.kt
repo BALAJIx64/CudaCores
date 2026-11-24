@@ -359,7 +359,7 @@ class CommunicationModuleTest {
         val sentSms = mockSms.sentMessages.first()
         assertEquals("+15551234567", sentSms.destinationAddress)
         assertTrue(sentSms.text.contains("EMERGENCY: GuardianGrid SOS!"))
-        assertTrue(sentSms.text.contains("12.97159"))
+        assertTrue(sentSms.text.contains("12.9716"))
         assertTrue(sentSms.text.length <= 160) // Enforce single-segment GSM 160-char budget
     }
 

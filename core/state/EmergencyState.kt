@@ -37,5 +37,7 @@ data class EmergencyState(
     val isNotificationPermissionGranted: Boolean = false,
     val isSmsPermissionGranted: Boolean = false,
     val isGpsEnabled: Boolean = false,
-    val statusMessage: String = "GuardianGrid Standby"
+    val statusMessage: String = "GuardianGrid Standby",
+    val verificationCountdownRemainingMs: Long = 0L,
+    val lastDetectedSignal: DistressSignal? = null
 )

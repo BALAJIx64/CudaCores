@@ -6,6 +6,8 @@ import com.guardiangrid.core.models.AudioSegment
 import com.guardiangrid.core.models.DistressSignal
 import com.guardiangrid.core.models.DistressType
 import kotlinx.coroutines.flow.Flow
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.onEach
 import java.io.File
 
 /**
@@ -33,17 +35,31 @@ class AudioModuleStub(
 
     // --- AudioDistressDetector Implementation ---
 
+    /**
+     * Start continuous audio classification and distress keyword spotting concurrently.
+     * Merges both scream and keyword detection streams into a single Flow<DistressSignal>.
+     */
     override fun startMonitoring(): Flow<DistressSignal> {
         captureManager.startCapture()
-        return screamClassifier.startMonitoring()
+        val screamFlow = screamClassifier.startMonitoring().onEach { signal ->
+            if (signal.type == DistressType.SCREAM) {
+                keywordSpotter.notifyScreamDetected(1800L)
+            }
+        }
+        val keywordFlow = keywordSpotter.startListening(DistressKeywordSpotter.DEFAULT_KEYWORDS)
+        return merge(screamFlow, keywordFlow)
     }
 
     override fun stopMonitoring() {
         screamClassifier.stopMonitoring()
+<<<<<<< HEAD
+=======
+        keywordSpotter.stopListening()
+>>>>>>> origin/main
         captureManager.stopCapture()
     }
 
-    override fun isMonitoring(): Boolean = screamClassifier.isMonitoring()
+    override fun isMonitoring(): Boolean = screamClassifier.isMonitoring() || keywordSpotter.isListening()
 
     override fun setSensitivity(sensitivity: Float) {
         screamClassifier.setSensitivity(sensitivity)
