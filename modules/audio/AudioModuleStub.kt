@@ -31,6 +31,7 @@ class AudioModuleStub(
     val circularBuffer: CircularAudioBuffer = CircularAudioBuffer(durationMs = 5000L, sampleRate = 16000)
     val captureManager: AudioCaptureManager = AudioCaptureManager(sampleRate = 16000, circularBuffer = circularBuffer)
     val screamClassifier: ScreamDistressClassifier = ScreamDistressClassifier(modelDirectory, circularBuffer)
+    val keywordSpotter: DistressKeywordSpotter = DistressKeywordSpotter(circularBuffer)
     val evidenceRecorder: TwoStageAudioEvidenceRecorder = TwoStageAudioEvidenceRecorder(circularBuffer, captureManager, cacheDirectory)
 
     // --- AudioDistressDetector Implementation ---

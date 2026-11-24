@@ -107,19 +107,19 @@ fun DashboardScreen(
     // Automatically routes detected screams to the Emergency Coordinator.
     LaunchedEffect(state.isProtectionActive) {
         if (state.isProtectionActive) {
-            audioStub.startMonitoring().collect { signal ->
+            audioModule.startMonitoring().collect { signal ->
                 if (signal.type == DistressType.SCREAM) {
                     coordinator.handleDistressSignal(signal)
                 }
             }
         } else {
-            audioStub.stopMonitoring()
+            audioModule.stopMonitoring()
         }
     }
 
     DisposableEffect(Unit) {
         onDispose {
-            audioStub.stopMonitoring()
+            audioModule.stopMonitoring()
         }
     }
 
