@@ -98,6 +98,7 @@ dependencies {
     implementation("androidx.work:work-runtime-ktx:2.9.1")
 
     implementation("org.tensorflow:tensorflow-lite:2.16.1")
+    implementation("com.google.zxing:core:3.5.3")
 
     testImplementation(libs.junit)
     androidTestImplementation(libs.androidx.junit)

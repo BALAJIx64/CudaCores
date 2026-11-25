@@ -21,6 +21,7 @@ import com.guardiangrid.modules.motion.features.MotionFeatureExtractor
 import com.guardiangrid.modules.motion.sensors.SyntheticMotionSensorSource
 import com.guardiangrid.modules.motion.state.MotionEmergencyState
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import org.junit.After
 import org.junit.Assert.assertEquals
@@ -206,5 +207,62 @@ class MotionHardeningAndIntegrationTest {
         val loaded = reloaded.getSettings()
         assertEquals(1.35f, loaded.motionSensitivity, 0.001f)
         assertEquals(15, loaded.countdownDurationSeconds)
+    }
+
+    @Test
+    fun testConservativeMotionRejectsHandlingWalkingAndIsolatedSpikesWhileDetectingFallsAndStruggles() = runBlocking {
+        val syntheticSource = SyntheticMotionSensorSource()
+        val detector = MotionAnomalyDetectorImpl(sensorSource = syntheticSource)
+        val emitted = mutableListOf<DistressSignal>()
+        val job = launch {
+            detector.startMonitoring().collect { emitted.add(it) }
+        }
+        delay(50)
+
+        var t = 100_000L
+
+        // 1. Ordinary handling + desk placement + brisk walking
+        for (i in 0 until 25) {
+            t += 40L
+            val ax = (sin(i * 0.5) * 2.8).toFloat()
+            val ay = 9.81f + (cos(i * 0.5) * 2.5).toFloat()
+            syntheticSource.emitSample(MotionSample(t, ax, ay, 0.8f, gx = 1.2f, gy = 0.8f, gz = 0.4f))
+        }
+        // Placing firmly on desk (~20 m/s^2)
+        t += 40L
+        syntheticSource.emitSample(MotionSample(t, 2.0f, 19.5f, 1.5f, gx = 0.9f, gy = 0.4f, gz = 0.2f))
+        // Isolated single-sample acceleration spike (no freefall, isolated glitch)
+        t += 40L
+        syntheticSource.emitSample(MotionSample(t, 0f, 34.0f, 0f, gx = 1.5f, gy = 1.0f, gz = 0.5f))
+        t += 40L
+        syntheticSource.emitSample(MotionSample(t, 0f, 9.81f, 0f, gx = 0.1f, gy = 0.1f, gz = 0.1f))
+        delay(100)
+        assertEquals("Handling, walking, table placement & isolated spikes must produce 0 alerts", 0, emitted.size)
+
+        // 2. Genuine sustained violent struggle -> detected
+        for (i in 0 until 14) {
+            t += 40L
+            val sign = if (i % 2 == 0) 1f else -1f
+            syntheticSource.emitSample(
+                MotionSample(t, sign * 18f, 9.8f + sign * 15f, sign * 12f, gx = 4.2f, gy = 3.5f, gz = 2.8f)
+            )
+        }
+        delay(120)
+        assertTrue("Sustained violent struggle must be detected", emitted.any { it.type == DistressType.MOTION_ANOMALY })
+
+        // 3. Genuine fall impact: >= 160ms freefall (<2.8 m/s^2) followed by >= 32 m/s^2 impact
+        emitted.clear()
+        t += 3000L // past cooldown
+        for (i in 0..4) {
+            t += 45L
+            syntheticSource.emitSample(MotionSample(t, 0.3f, 0.8f, 0.4f, gx = 1.8f, gy = 1.2f, gz = 0.9f))
+        }
+        t += 40L
+        syntheticSource.emitSample(MotionSample(t, 6.0f, 35.0f, 5.0f, gx = 3.2f, gy = 2.1f, gz = 1.5f))
+        delay(120)
+        assertTrue("Genuine freefall + impact must emit FALL_IMPACT", emitted.any { it.type == DistressType.FALL_IMPACT })
+
+        job.cancel()
+        detector.stopMonitoring()
     }
 }

@@ -52,11 +52,11 @@ class EmergencyCommunicatorImpl(
     val idempotencyManager: IdempotencyManager = IdempotencyManager(),
     val bluetoothRelay: BluetoothRelayServiceImpl = BluetoothRelayServiceImpl(),
     val guardianConnectivityManager: GuardianConnectivityManager? = null,
-    val guardianRelayClient: GuardianRelayClient? = guardianConnectivityManager?.let {
-        HttpGuardianRelayClient(it, transport)
-    },
     val supabaseBackendClient: SupabaseEmergencyBackendClient? = guardianConnectivityManager?.let {
         SupabaseEmergencyBackendClient(it, transport)
+    },
+    val guardianRelayClient: GuardianRelayClient? = guardianConnectivityManager?.let {
+        HttpGuardianRelayClient(it, transport, supabaseBackendClient)
     },
     var onOfflineRetryScheduled: (() -> Unit)? = null
 ) : EmergencyCommunicator {

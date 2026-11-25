@@ -6,6 +6,8 @@ import com.guardiangrid.modules.communication.models.CommunicationAuditRecord
 import com.guardiangrid.modules.communication.models.EmergencyDeliveryState
 import com.guardiangrid.modules.communication.network.DefaultHttpTransport
 import com.guardiangrid.modules.communication.network.HttpTransport
+import com.guardiangrid.modules.communication.supabase.SupabaseConfigManager
+import com.guardiangrid.modules.communication.supabase.SupabaseEmergencyBackendClient
 import java.io.File
 import java.util.UUID
 
@@ -55,10 +57,12 @@ interface GuardianRelayClient {
  */
 class HttpGuardianRelayClient(
     private val connectivityManager: GuardianConnectivityManager,
-    private val transport: HttpTransport = DefaultHttpTransport()
+    private val transport: HttpTransport = DefaultHttpTransport(),
+    private val supabaseBackendClient: SupabaseEmergencyBackendClient? = null
 ) : GuardianRelayClient {
 
     override fun isRelayEndpointConfigured(): Boolean {
+        if (supabaseBackendClient?.isConfigured() == true || SupabaseConfigManager.isConfigured()) return true
         val defaultUrl = connectivityManager.getRelayServerUrl()
         if (defaultUrl.isNotBlank()) return true
         return connectivityManager.getActiveGuardians().any { !it.relayEndpointUrl.isNullOrBlank() }
@@ -356,6 +360,11 @@ class HttpGuardianRelayClient(
     }
 
     override fun pollIncomingAlerts(): Result<List<ReceivedGuardianAlert>> {
+        val sb = supabaseBackendClient
+        if (sb != null && sb.isConfigured()) {
+            return sb.pollGuardianInbox()
+        }
+
         val defaultUrl = connectivityManager.getRelayServerUrl().trim().trimEnd('/')
         val pairedHosts = connectivityManager.getPairedHosts()
         val effectiveBase = defaultUrl.ifBlank {
@@ -363,7 +372,7 @@ class HttpGuardianRelayClient(
         }
         if (effectiveBase.isBlank()) {
             return Result.failure(
-                IllegalStateException("GuardianGrid Relay Server URL is not configured (enter HTTPS relay endpoint in Settings > Guardian Connectivity).")
+                IllegalStateException("GuardianGrid Relay Server URL is not configured (configure Supabase backend or custom relay endpoint).")
             )
         }
 
@@ -391,11 +400,15 @@ class HttpGuardianRelayClient(
     }
 
     override fun sendAcknowledgment(targetHostDeviceId: String, incidentId: String): Result<Unit> {
-        connectivityManager.markReceivedAlertAcknowledged(incidentId)
+        val sb = supabaseBackendClient
+        if (sb != null && sb.isConfigured()) {
+            return sb.acknowledgeIncident(incidentId)
+        }
+
         val pairedHost = connectivityManager.getPairedHosts().firstOrNull { it.deviceId == targetHostDeviceId }
         val baseUrl = (pairedHost?.relayEndpointUrl ?: connectivityManager.getRelayServerUrl()).trim().trimEnd('/')
         if (baseUrl.isBlank()) {
-            return Result.failure(IllegalStateException("Acknowledged locally; relay URL not configured to notify host."))
+            return Result.failure(IllegalStateException("Relay URL not configured; cannot confirm acknowledgment to host."))
         }
         val identity = connectivityManager.getIdentity()
         val ts = System.currentTimeMillis().toString()
@@ -409,8 +422,12 @@ class HttpGuardianRelayClient(
         val json = """{"incidentId":"${jsonEscape(incidentId)}","guardianDeviceId":"${jsonEscape(identity.deviceId)}","guardianName":"${jsonEscape(identity.deviceName)}","acknowledgedAt":$ts}"""
         return try {
             val resp = transport.postJson("$baseUrl/v1/ack", json, headers)
-            if (resp.isSuccessful) Result.success(Unit)
-            else Result.failure(IllegalStateException("Ack HTTP ${resp.statusCode}"))
+            if (resp.isSuccessful) {
+                connectivityManager.markReceivedAlertAcknowledged(incidentId)
+                Result.success(Unit)
+            } else {
+                Result.failure(IllegalStateException("Ack HTTP ${resp.statusCode}"))
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }

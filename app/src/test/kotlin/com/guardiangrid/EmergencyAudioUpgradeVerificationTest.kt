@@ -343,4 +343,137 @@ class EmergencyAudioUpgradeVerificationTest {
         assertTrue(req.headers.containsKey("X-Guardian-Signature"))
         assertFalse("Request must never carry Telegram Bot Token", req.url.contains("bot") && req.url.contains("telegram"))
     }
+
+    @Test
+    fun `10s pre trigger plus 60s post trigger produces exactly 1 pre and 6 sequential 10s chunks = 70s local wav and 7 telegram uploads`() = runBlocking {
+        val cacheDir = tempFolder.newFolder("audio_70s_full")
+        val queueDir = tempFolder.newFolder("queue_70s_full")
+        val transport = MockHttpTransport()
+        val smsSender = MockSmsSender()
+        val audioModule = AudioModuleStub(cacheDirectory = cacheDir)
+
+        // Pre-fill 10 seconds (160,000 samples @ 16 kHz)
+        audioModule.circularBuffer.write(ShortArray(160_000) { 321 })
+
+        val comm = EmergencyCommunicatorImpl(
+            transport = transport,
+            smsSender = smsSender,
+            queueRepository = FileEmergencyQueueRepository(queueDir),
+            credentialsProvider = { TelegramCredentials(testToken, "987654321") }
+        )
+
+        val coordinator = EmergencyCoordinatorImpl(
+            locationProvider = { LocationData(12.9716, 77.5946, 5.0f) },
+            communicator = comm,
+            audioDetector = audioModule
+        )
+        EmergencyStateHolder.updateTrustedContacts(
+            listOf(EmergencyContact("c1", "Responder", "+919876543210", isPrimary = true))
+        )
+
+        // Start capture so live capture path executes end-to-end without restarting between chunks
+        audioModule.captureManager.startCapture()
+        coordinator.triggerManualSos("Manual_SOS_Demo")
+        delay(60)
+
+        // Feed exact 60 seconds (6 x 10s = 6 x 160,000 samples) continuously
+        repeat(6) { idx ->
+            val chunk = ShortArray(160_000) { ((idx + 1) * 100).toShort() }
+            audioModule.captureManager.injectSyntheticSamples(chunk)
+            delay(60)
+        }
+
+        // Wait for all 7 Telegram document uploads + completion notification
+        repeat(60) {
+            val docs = transport.recordedRequests.count { it.url.contains("/sendDocument") }
+            val done = transport.recordedRequests.any { it.url.endsWith("/sendMessage") && (it.body?.contains("COMPLETED") == true) }
+            if (docs == 7 && done) return@repeat
+            delay(50)
+        }
+
+        val docUploads = transport.recordedRequests.filter { it.url.contains("/sendDocument") }
+        assertEquals("Telegram must receive exactly 1 pre-trigger + 6 post-trigger 10s chunks = 7 WAVs", 7, docUploads.size)
+        assertTrue(docUploads[0].multipartFileName!!.startsWith("stage1_pre10s_"))
+        assertTrue(docUploads[0].body!!.contains("Pre-Trigger (Seq 0)"))
+        assertEquals(320_044, docUploads[0].multipartByteCount)
+
+        for (i in 1..6) {
+            assertTrue(docUploads[i].multipartFileName!!.contains("_chunk_${i}_"))
+            assertTrue(docUploads[i].body!!.contains("Chunk #$i"))
+            assertTrue(docUploads[i].body!!.contains("Duration: 10.0s"))
+            assertEquals("Post-trigger chunk $i must be exact 10s (320,044 bytes)", 320_044, docUploads[i].multipartByteCount)
+        }
+        assertTrue("6th chunk must be marked FINAL", docUploads[6].body!!.contains("Chunk #6 (FINAL)"))
+
+        // Verify local chronological 70-second combined WAV (10s pre + 60s post = 1,120,000 samples * 2 + 44 = 2,240,044 bytes)
+        val combinedFile = File(cacheDir, "evidence").listFiles()?.firstOrNull { it.name.contains("_full_") }
+        assertTrue("Full 70s combined WAV must exist on disk", combinedFile != null && combinedFile.exists())
+        assertEquals(2_240_044L, combinedFile!!.length())
+
+        audioModule.captureManager.stopCapture()
+        coordinator.stopProtection()
+    }
+
+    @Test
+    fun `guardian v2 QR hides permanent secrets enforces expiration single-use and confirms pairing via backend`() {
+        val hostDir = tempFolder.newFolder("v2_host")
+        val rxDir = tempFolder.newFolder("v2_rx")
+        val hostMgr = GuardianConnectivityManager(hostDir, "SenderPhone")
+        val rxMgr = GuardianConnectivityManager(rxDir, "ReceiverPhone")
+
+        val hostSecret = hostMgr.getIdentity().hmacSecretHex
+        val inviteUri = hostMgr.state.value.activeInvitationUri
+        assertTrue(inviteUri.startsWith("guardiangrid://pair?v=2&"))
+        assertFalse("QR invitation must NEVER contain host permanent hmacSecretHex", inviteUri.contains(hostSecret))
+
+        // Expired QR rejection
+        val futureClock = System.currentTimeMillis() + (15 * 60 * 1000L)
+        assertTrue("Expired invite must be rejected", com.guardiangrid.modules.communication.guardian.GuardianCryptoCodec.parseAndVerifyInvitation(inviteUri, futureClock).isFailure)
+
+        // Valid single-use parsing
+        val parsedInvite = rxMgr.validateInvitationForBackend(inviteUri).getOrThrow()
+
+        // Must NOT be marked paired before backend confirms
+        assertTrue(rxMgr.getPairedHosts().isEmpty())
+
+        val cfg = SupabaseBackendConfig(
+            projectUrl = "https://yhzvpuycztuwdqttpoid.supabase.co",
+            anonKey = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9_publicanonkey_123456"
+        )
+        val transport = MockHttpTransport().apply {
+            // 1) Receiver /register-device
+            enqueueResponse(HttpResponse(200, """{"ok":true,"registered":true}"""))
+            // 2) Receiver /pairing/accept
+            enqueueResponse(
+                HttpResponse(
+                    200,
+                    """{"ok":true,"pairingConfirmed":true,"inviteId":"${parsedInvite.inviteId}","hostDeviceId":"${hostMgr.getIdentity().deviceId}","hostDeviceName":"SenderPhone","guardianDeviceId":"${rxMgr.getIdentity().deviceId}"}"""
+                )
+            )
+            // 3) Sender /register-device + /pairings sync
+            enqueueResponse(HttpResponse(200, """{"ok":true,"registered":true}"""))
+            enqueueResponse(
+                HttpResponse(
+                    200,
+                    """{"ok":true,"guardians":[{"deviceId":"${rxMgr.getIdentity().deviceId}","deviceName":"ReceiverPhone"}],"hosts":[]}"""
+                )
+            )
+        }
+
+        val rxSb = SupabaseEmergencyBackendClient(rxMgr, transport) { cfg }
+        val hostSb = SupabaseEmergencyBackendClient(hostMgr, transport) { cfg }
+
+        val confirmed = rxSb.acceptPairingInvitationRemote(parsedInvite).getOrThrow()
+        assertEquals(hostMgr.getIdentity().deviceId, confirmed.hostDeviceId)
+        assertEquals(1, rxMgr.getPairedHosts().size)
+
+        // Reuse of the exact same invitation must be rejected locally (consumed single-use)
+        assertTrue("Reusing consumed invite must fail", rxMgr.validateInvitationForBackend(inviteUri).isFailure)
+
+        // Sender syncs from backend and sees paired guardian
+        val synced = hostSb.fetchConfirmedPairings().getOrThrow()
+        assertEquals(1, synced.guardians.size)
+        assertEquals(1, hostMgr.getActiveGuardians().size)
+        assertEquals("ReceiverPhone", hostMgr.getActiveGuardians().first().displayName)
+    }
 }

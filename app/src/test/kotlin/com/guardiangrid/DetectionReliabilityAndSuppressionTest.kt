@@ -97,4 +97,49 @@ class DetectionReliabilityAndSuppressionTest {
 
         job.cancel()
     }
+
+    @Test
+    fun testConservativeAudioConfigSuppressesSpeechShortNoiseMusicAndSingleFrameSpikes() = runBlocking {
+        // 1. Short sudden noise burst (40 ms high-frequency bang inside 1s window) -> rejected
+        val shortBang = ShortArray(16000) { i ->
+            if (i in 4000..4640) {
+                (sin(2.0 * PI * 3000.0 * i / 16000.0) * 26000).toInt().toShort()
+            } else {
+                0
+            }
+        }
+        val bangScore = classifier.evaluateAudioSamples(shortBang)
+        assertTrue("Short 40ms bang must be suppressed (score=$bangScore)", bangScore < 0.30f)
+
+        // 2. Music / broadband multi-band mix -> rejected
+        val musicMix = ShortArray(16000) { i ->
+            val bass = sin(2.0 * PI * 180.0 * i / 16000.0) * 0.45
+            val chord1 = sin(2.0 * PI * 440.0 * i / 16000.0) * 0.35
+            val chord2 = sin(2.0 * PI * 660.0 * i / 16000.0) * 0.25
+            val hihat = sin(2.0 * PI * 3100.0 * i / 16000.0) * 0.15
+            ((bass + chord1 + chord2 + hihat) * 14000).toInt().toShort()
+        }
+        val musicScore = classifier.evaluateAudioSamples(musicMix)
+        assertTrue("Music/multi-band audio must be rejected (score=$musicScore)", musicScore < 0.30f)
+
+        // 3. Single noisy high frame does NOT trigger without repeated/sustained confirmation
+        val emitted = mutableListOf<DistressSignal>()
+        val job = launch {
+            classifier.startMonitoring().collect { emitted.add(it) }
+        }
+        classifier.checkAndEmitDistress(0.85f)
+        kotlinx.coroutines.yield()
+        assertEquals("Single noisy window must NOT trigger emergency distress", 0, emitted.size)
+
+        // 4. Hysteresis reset prevents accidental single follow-up after drop, while repeated distress confirms
+        classifier.checkAndEmitDistress(0.10f)
+        classifier.checkAndEmitDistress(0.88f)
+        kotlinx.coroutines.yield()
+        assertEquals("Dropped score breaks streak so 1 window does not trigger", 0, emitted.size)
+
+        classifier.checkAndEmitDistress(0.88f)
+        kotlinx.coroutines.yield()
+        assertEquals("Sustained repeated distress must emit signal cleanly", 1, emitted.size)
+        job.cancel()
+    }
 }

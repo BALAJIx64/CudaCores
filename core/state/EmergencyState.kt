@@ -29,6 +29,34 @@ enum class MonitoringServiceState {
 }
 
 /**
+ * Granular lifecycle stage for each captured audio evidence WAV file.
+ */
+enum class EvidenceUploadStage {
+    CAPTURED,
+    QUEUED,
+    UPLOADING,
+    DELIVERED,
+    FAILED
+}
+
+/**
+ * Per-file audio upload & delivery status entry surfaced in Active Emergency UI.
+ */
+data class AudioEvidenceUploadProgress(
+    val incidentId: String,
+    val chunkIndex: Int,
+    val label: String,
+    val fileName: String,
+    val durationMs: Long,
+    val byteSize: Long,
+    val isPreTrigger: Boolean,
+    val isFinal: Boolean,
+    val stage: EvidenceUploadStage,
+    val detail: String? = null,
+    val updatedAtEpochMs: Long = System.currentTimeMillis()
+)
+
+/**
  * Reactive global application state for GuardianGrid.
  */
 data class EmergencyState(
@@ -42,6 +70,7 @@ data class EmergencyState(
     val currentLocation: LocationData? = null,
     val trustedContacts: List<EmergencyContact> = emptyList(),
     val recentDeliveryReceipts: List<DeliveryReceipt> = emptyList(),
+    val audioUploadProgress: List<AudioEvidenceUploadProgress> = emptyList(),
     val incidentHistory: List<EmergencyIncident> = emptyList(),
     val isAudioMonitoringRunning: Boolean = false,
     val isMotionMonitoringRunning: Boolean = false,

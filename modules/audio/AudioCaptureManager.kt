@@ -79,8 +79,26 @@ class AudioCaptureManager(
     val liveMetrics: StateFlow<LiveAudioMetrics> = _liveMetrics.asStateFlow()
 
     private val pcmChunkFlow = MutableSharedFlow<ShortArray>(extraBufferCapacity = 64)
+    private val sampleListeners = java.util.concurrent.ConcurrentHashMap<String, (ShortArray) -> Unit>()
     private var captureJob: Job? = null
     private val captureScope = CoroutineScope(Dispatchers.IO)
+
+    fun addSampleListener(listener: (ShortArray) -> Unit): String {
+        val id = java.util.UUID.randomUUID().toString()
+        sampleListeners[id] = listener
+        return id
+    }
+
+    fun removeSampleListener(listenerId: String) {
+        sampleListeners.remove(listenerId)
+    }
+
+    private fun dispatchCapturedSamples(samples: ShortArray) {
+        circularBuffer?.write(samples)
+        for (listener in sampleListeners.values) {
+            listener.invoke(samples)
+        }
+    }
 
     // Android reflection / dynamic references to avoid compile-time failure on non-Android JVM environments
     private var nativeAudioRecord: Any? = null
@@ -169,7 +187,7 @@ class AudioCaptureManager(
      * Useful for automated unit testing and hardware simulation without an active microphone.
      */
     suspend fun injectSyntheticSamples(samples: ShortArray) {
-        circularBuffer?.write(samples)
+        dispatchCapturedSamples(samples)
         pcmChunkFlow.emit(samples)
 
         // Calculate and reflect metrics even for synthetic samples in tests
@@ -310,7 +328,7 @@ class AudioCaptureManager(
                 if (readCount > 0) {
                     val chunk = ShortArray(readCount)
                     System.arraycopy(tempBuffer, 0, chunk, 0, readCount)
-                    circularBuffer?.write(chunk)
+                    dispatchCapturedSamples(chunk)
                     pcmChunkFlow.emit(chunk)
 
                     // Compute live volume metrics from actual PCM samples consumed by classifier
@@ -352,7 +370,7 @@ class AudioCaptureManager(
         val chunkSize = 1024
         val silence = ShortArray(chunkSize)
         while (isCapturing && captureScope.isActive) {
-            circularBuffer?.write(silence)
+            dispatchCapturedSamples(silence)
             pcmChunkFlow.emit(silence)
             // 1024 samples at 16000 Hz = 64 ms
             delay(64)

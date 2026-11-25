@@ -179,6 +179,22 @@ object EmergencyStateHolder {
         }
     }
 
+    fun upsertAudioUploadProgress(entry: AudioEvidenceUploadProgress) {
+        _state.update { current ->
+            val filtered = current.audioUploadProgress.filterNot {
+                it.incidentId == entry.incidentId && it.chunkIndex == entry.chunkIndex
+            }
+            val updated = (filtered + entry)
+                .sortedWith(compareBy<AudioEvidenceUploadProgress> { it.incidentId }.thenBy { it.chunkIndex })
+                .takeLast(32)
+            current.copy(audioUploadProgress = updated)
+        }
+    }
+
+    fun clearAudioUploadProgress() {
+        _state.update { it.copy(audioUploadProgress = emptyList()) }
+    }
+
     fun setSubsystemStatus(audioRunning: Boolean, motionRunning: Boolean) {
         _state.update {
             it.copy(

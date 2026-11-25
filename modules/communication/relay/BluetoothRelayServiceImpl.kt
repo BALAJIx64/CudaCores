@@ -59,7 +59,6 @@ class BluetoothRelayServiceImpl(
             }
         }
     }
-
     override fun startRelayScanner(): Flow<AlertPayload> {
         active = true
         return scannedBeaconsFlow.asSharedFlow()
@@ -110,4 +109,3 @@ class BluetoothRelayServiceImpl(
         return buffer.array()
     }
 }
-

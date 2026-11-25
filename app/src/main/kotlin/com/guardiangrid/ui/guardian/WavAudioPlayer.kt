@@ -8,7 +8,7 @@ import java.io.File
 
 /**
  * Lightweight Android WAV audio player for Guardian responders listening to
- * received 10s pre-trigger, live 2s chunks, or 20s complete incident recordings.
+ * received 10s pre-trigger WAVs and sequential 10s post-trigger WAV chunks.
  */
 class WavAudioPlayer {
     private val _playingClipId = MutableStateFlow<String?>(null)

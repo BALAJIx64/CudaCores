@@ -108,12 +108,12 @@ class DefaultGuardianGridContainer(
 
     private val httpTransport by lazy { DefaultHttpTransport() }
 
-    override val guardianRelayClient: GuardianRelayClient by lazy {
-        HttpGuardianRelayClient(guardianConnectivityManager, httpTransport)
-    }
-
     override val supabaseBackendClient: SupabaseEmergencyBackendClient by lazy {
         SupabaseEmergencyBackendClient(guardianConnectivityManager, httpTransport)
+    }
+
+    override val guardianRelayClient: GuardianRelayClient by lazy {
+        HttpGuardianRelayClient(guardianConnectivityManager, httpTransport, supabaseBackendClient)
     }
 
     override val locationManager: GuardianLocationManager by lazy {

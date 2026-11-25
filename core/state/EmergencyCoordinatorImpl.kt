@@ -80,11 +80,11 @@ class EmergencyCoordinatorImpl(
     private var audioChunkDurationMs: Long = 10_000L
 
     @Volatile
-    private var maxAudioRecordingDurationMs: Long = 300_000L
+    private var maxAudioRecordingDurationMs: Long = 60_000L
 
     private val captureStartedByEmergencySession = AtomicBoolean(false)
 
-    fun setAudioRecordingConfig(chunkDurationMs: Long = 10_000L, maxRecordingDurationMs: Long = 300_000L) {
+    fun setAudioRecordingConfig(chunkDurationMs: Long = 10_000L, maxRecordingDurationMs: Long = 60_000L) {
         this.audioChunkDurationMs = chunkDurationMs.coerceAtLeast(100L)
         this.maxAudioRecordingDurationMs = maxRecordingDurationMs.coerceAtLeast(this.audioChunkDurationMs)
     }
@@ -641,8 +641,27 @@ class EmergencyCoordinatorImpl(
                             }
                         }
 
+                        EmergencyStateHolder.clearAudioUploadProgress()
+                        val preFile = File(relaySession.preTriggerSegment.filePath)
+                        val preEntry = AudioEvidenceUploadProgress(
+                            incidentId = incidentWithPreAudio.incidentId,
+                            chunkIndex = 0,
+                            label = "Pre-Trigger (10s)",
+                            fileName = preFile.name,
+                            durationMs = relaySession.preTriggerSegment.durationMs,
+                            byteSize = relaySession.preTriggerSegment.fileSizeBytes,
+                            isPreTrigger = true,
+                            isFinal = false,
+                            stage = EvidenceUploadStage.QUEUED,
+                            detail = "Captured & queued first"
+                        )
+                        EmergencyStateHolder.upsertAudioUploadProgress(preEntry)
+
                         // Enqueue pre-trigger 10s unsplit WAV first
                         uploadQueue.send {
+                            EmergencyStateHolder.upsertAudioUploadProgress(
+                                preEntry.copy(stage = EvidenceUploadStage.UPLOADING, detail = "Uploading to responders...")
+                            )
                             val preCaption = TelegramEmergencyDispatcher.formatAudioChunkCaption(
                                 incidentId = incidentWithPreAudio.incidentId,
                                 chunkIndex = 0,
@@ -664,10 +683,34 @@ class EmergencyCoordinatorImpl(
                                 durationMs = relaySession.preTriggerSegment.durationMs
                             )
                             preReceipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
+                            val delivered = preReceipts.any { it.status == DeliveryStatus.DELIVERED }
+                            val errMsg = preReceipts.firstOrNull { !it.errorMessage.isNullOrBlank() }?.errorMessage
+                            EmergencyStateHolder.upsertAudioUploadProgress(
+                                preEntry.copy(
+                                    stage = if (delivered) EvidenceUploadStage.DELIVERED else EvidenceUploadStage.FAILED,
+                                    detail = if (delivered) "Confirmed delivered" else (errMsg ?: "Queued for offline retry")
+                                )
+                            )
                         }
 
                         val collectChunksJob = launch {
                             relaySession.chunkFlow.collect { chunk ->
+                                val chunkFile = File(chunk.segment.filePath)
+                                val chunkLabel = if (chunk.isFinal) "Chunk #${chunk.chunkIndex} (Final)" else "Chunk #${chunk.chunkIndex}"
+                                val chunkEntry = AudioEvidenceUploadProgress(
+                                    incidentId = incidentWithPreAudio.incidentId,
+                                    chunkIndex = chunk.chunkIndex,
+                                    label = chunkLabel,
+                                    fileName = chunkFile.name,
+                                    durationMs = chunk.durationMs,
+                                    byteSize = chunk.segment.fileSizeBytes,
+                                    isPreTrigger = false,
+                                    isFinal = chunk.isFinal,
+                                    stage = EvidenceUploadStage.CAPTURED,
+                                    detail = "Captured WAV on disk"
+                                )
+                                EmergencyStateHolder.upsertAudioUploadProgress(chunkEntry)
+
                                 _activeIncident.value?.let { inc ->
                                     val updated = inc.copy(
                                         audioSegments = inc.audioSegments + chunk.segment,
@@ -676,7 +719,13 @@ class EmergencyCoordinatorImpl(
                                     _activeIncident.value = updated
                                     EmergencyStateHolder.setEmergencyIncident(updated)
                                 }
+                                EmergencyStateHolder.upsertAudioUploadProgress(
+                                    chunkEntry.copy(stage = EvidenceUploadStage.QUEUED, detail = "Queued in sequence")
+                                )
                                 uploadQueue.send {
+                                    EmergencyStateHolder.upsertAudioUploadProgress(
+                                        chunkEntry.copy(stage = EvidenceUploadStage.UPLOADING, detail = "Uploading WAV...")
+                                    )
                                     val chunkCaption = TelegramEmergencyDispatcher.formatAudioChunkCaption(
                                         incidentId = incidentWithPreAudio.incidentId,
                                         chunkIndex = chunk.chunkIndex,
@@ -698,13 +747,22 @@ class EmergencyCoordinatorImpl(
                                         durationMs = chunk.durationMs
                                     )
                                     chunkReceipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
+                                    val delivered = chunkReceipts.any { it.status == DeliveryStatus.DELIVERED }
+                                    val errMsg = chunkReceipts.firstOrNull { !it.errorMessage.isNullOrBlank() }?.errorMessage
+                                    EmergencyStateHolder.upsertAudioUploadProgress(
+                                        chunkEntry.copy(
+                                            stage = if (delivered) EvidenceUploadStage.DELIVERED else EvidenceUploadStage.FAILED,
+                                            detail = if (delivered) "Confirmed delivered" else (errMsg ?: "Queued for offline retry")
+                                        )
+                                    )
                                 }
                             }
                         }
 
                         try {
+                            // Drain ALL emitted chunks (including Chunk #6 / final partial chunk) before completing
+                            collectChunksJob.join()
                             val summary = relaySession.completionDeferred.await()
-                            collectChunksJob.cancel()
 
                             // Stop session-owned capture if max duration reached automatically
                             if (captureStartedByEmergencySession.getAndSet(false) && audioDetector is AudioModuleStub) {

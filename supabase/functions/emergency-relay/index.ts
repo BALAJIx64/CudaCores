@@ -342,6 +342,154 @@ Deno.serve(async (req: Request) => {
     return jsonResp({ ok: true, deviceId, registered: true }, 200);
   }
 
+  // 2. Create single-use expiring QR pairing invitation (keeps permanent secrets off QR codes)
+  if (req.method === "POST" && path.endsWith("/pairing/invite")) {
+    const body = await req.json();
+    const inviteId = String(body.inviteId ?? "").trim();
+    const hostDeviceId = String(body.hostDeviceId ?? "").trim();
+    const hostDeviceName = String(body.hostDeviceName ?? "GuardianGrid Device").trim().slice(0, 64);
+    const inviteToken = String(body.inviteToken ?? "").trim();
+    const expiresAtMs = Number(body.expiresAtEpochMs ?? "0");
+
+    const auth = await verifyRegisteredDeviceRequest(req, supabase, `invite|${inviteId}`);
+    if (!auth.ok || !auth.deviceId) return jsonResp({ ok: false, error: auth.reason }, auth.status);
+    if (auth.deviceId !== hostDeviceId) {
+      return jsonResp({ ok: false, error: "Caller must own the host invitation" }, 403);
+    }
+    if (inviteId.length < 8 || inviteToken.length < 16 || !Number.isFinite(expiresAtMs) || expiresAtMs <= Date.now()) {
+      return jsonResp({ ok: false, error: "Invalid or expired pairing invitation payload" }, 400);
+    }
+
+    const tokenHash = await sha256Hex(inviteToken);
+    const { error } = await supabase.from("guardian_pairing_invitations").upsert({
+      invite_id: inviteId,
+      host_device_id: hostDeviceId,
+      host_device_name: hostDeviceName,
+      token_hash: tokenHash,
+      expires_at: new Date(expiresAtMs).toISOString(),
+      consumed_at: null,
+      consumed_by_device_id: null,
+    }, { onConflict: "invite_id" });
+
+    if (error) return jsonResp({ ok: false, error: error.message }, 500);
+    return jsonResp({ ok: true, inviteId, registered: true, expiresAtEpochMs: expiresAtMs }, 200);
+  }
+
+  // 2b. Validate, atomically consume single-use invitation, and confirm dual-device pairing
+  if (req.method === "POST" && path.endsWith("/pairing/accept")) {
+    const body = await req.json();
+    const inviteId = String(body.inviteId ?? "").trim();
+    const hostDeviceId = String(body.hostDeviceId ?? "").trim();
+    const inviteToken = String(body.inviteToken ?? "").trim();
+
+    const auth = await verifyRegisteredDeviceRequest(req, supabase, `accept|${inviteId}`);
+    if (!auth.ok || !auth.deviceId) return jsonResp({ ok: false, error: auth.reason }, auth.status);
+    if (!inviteId || !hostDeviceId || !inviteToken) {
+      return jsonResp({ ok: false, error: "Missing inviteId, hostDeviceId, or inviteToken" }, 400);
+    }
+    if (auth.deviceId === hostDeviceId) {
+      return jsonResp({ ok: false, error: "Cannot pair a device with itself" }, 400);
+    }
+
+    const { data: inviteRow, error: invErr } = await supabase
+      .from("guardian_pairing_invitations")
+      .select("invite_id, host_device_id, host_device_name, token_hash, expires_at, consumed_at")
+      .eq("invite_id", inviteId)
+      .maybeSingle();
+
+    if (invErr || !inviteRow) {
+      return jsonResp({ ok: false, error: "Pairing invitation not found" }, 404);
+    }
+    if (inviteRow.host_device_id !== hostDeviceId) {
+      return jsonResp({ ok: false, error: "Host device identity mismatch" }, 403);
+    }
+    if (inviteRow.consumed_at) {
+      return jsonResp({ ok: false, error: "Pairing invitation has already been used" }, 409);
+    }
+    if (new Date(inviteRow.expires_at).getTime() <= Date.now()) {
+      return jsonResp({ ok: false, error: "Pairing invitation has expired" }, 410);
+    }
+
+    const suppliedHash = await sha256Hex(inviteToken);
+    if (!timingSafeEqualHex(suppliedHash, inviteRow.token_hash)) {
+      return jsonResp({ ok: false, error: "Invalid pairing invitation token" }, 403);
+    }
+
+    // Atomic single-use consumption check to block parallel replay
+    const { data: consumedRow, error: consumeErr } = await supabase
+      .from("guardian_pairing_invitations")
+      .update({
+        consumed_at: new Date().toISOString(),
+        consumed_by_device_id: auth.deviceId,
+      })
+      .eq("invite_id", inviteId)
+      .is("consumed_at", null)
+      .select("invite_id")
+      .maybeSingle();
+
+    if (consumeErr || !consumedRow) {
+      return jsonResp({ ok: false, error: "Pairing invitation was already consumed" }, 409);
+    }
+
+    const { error: pairErr } = await supabase.from("guardian_pairings").upsert({
+      host_device_id: hostDeviceId,
+      guardian_device_id: auth.deviceId,
+      is_active: true,
+      paired_at: new Date().toISOString(),
+    }, { onConflict: "host_device_id,guardian_device_id" });
+
+    if (pairErr) return jsonResp({ ok: false, error: pairErr.message }, 500);
+    return jsonResp({
+      ok: true,
+      pairingConfirmed: true,
+      inviteId,
+      hostDeviceId,
+      hostDeviceName: inviteRow.host_device_name,
+      guardianDeviceId: auth.deviceId,
+    }, 200);
+  }
+
+  // 2c. List confirmed active pairings for authenticated caller (Sender sees Guardians; Receiver sees Senders)
+  if (req.method === "GET" && path.endsWith("/pairings")) {
+    const auth = await verifyRegisteredDeviceRequest(req, supabase, `pairings|${url.searchParams.get("deviceId") ?? "self"}`);
+    if (!auth.ok || !auth.deviceId) return jsonResp({ ok: false, error: auth.reason }, auth.status);
+
+    const { data: asHost } = await supabase
+      .from("guardian_pairings")
+      .select("guardian_device_id, paired_at, guardian_devices!guardian_pairings_guardian_device_id_fkey(device_name, last_seen_at)")
+      .eq("host_device_id", auth.deviceId)
+      .eq("is_active", true);
+
+    const { data: asGuardian } = await supabase
+      .from("guardian_pairings")
+      .select("host_device_id, paired_at, guardian_devices!guardian_pairings_host_device_id_fkey(device_name, last_seen_at)")
+      .eq("guardian_device_id", auth.deviceId)
+      .eq("is_active", true);
+
+    const guardians = (asHost ?? []).map((r: Record<string, unknown>) => {
+      const dev = r.guardian_devices as { device_name?: string; last_seen_at?: string } | null;
+      return {
+        deviceId: r.guardian_device_id,
+        deviceName: dev?.device_name ?? "Paired Guardian",
+        pairedAt: r.paired_at,
+        lastSeenAt: dev?.last_seen_at ?? r.paired_at,
+      };
+    });
+
+    const hosts = (asGuardian ?? []).map((r: Record<string, unknown>) => {
+      const dev = r.guardian_devices as { device_name?: string; last_seen_at?: string } | null;
+      return {
+        deviceId: r.host_device_id,
+        deviceName: dev?.device_name ?? "Protected Host",
+        pairedAt: r.paired_at,
+        lastSeenAt: dev?.last_seen_at ?? r.paired_at,
+      };
+    });
+
+    return jsonResp({ ok: true, deviceId: auth.deviceId, guardians, hosts }, 200);
+  }
+
+  // 2d. Direct Host <-> Guardian pairing link (legacy / explicit endpoint)
   // -------------------------------------------------------------
   // Route 2: Register active Host <-> Guardian pairing authorization
   // -------------------------------------------------------------
@@ -854,6 +1002,45 @@ Deno.serve(async (req: Request) => {
     return jsonResp({ ok: true, incidentId, status: "COMPLETED", messageId: msgId }, 200);
   }
 
+  // 6. Paired Guardian Acknowledgment of Emergency Alert
+  if (req.method === "POST" && path.endsWith("/ack")) {
+    const body = await req.json();
+    const incidentId = String(body.incidentId ?? "").trim();
+    const guardianName = String(body.guardianName ?? "Paired Guardian").trim().slice(0, 64);
+
+    const auth = await verifyRegisteredDeviceRequest(req, supabase, `ack|${incidentId}`);
+    if (!auth.ok || !auth.deviceId) return jsonResp({ ok: false, error: auth.reason }, auth.status);
+    if (!incidentId) return jsonResp({ ok: false, error: "Missing incidentId" }, 400);
+
+    const { data: inc } = await supabase
+      .from("emergency_incidents")
+      .select("incident_id, host_device_id")
+      .eq("incident_id", incidentId)
+      .maybeSingle();
+
+    if (!inc) return jsonResp({ ok: false, error: "Incident not found" }, 404);
+
+    const authorized = await verifyAuthorizedTargets(supabase, inc.host_device_id, [auth.deviceId]);
+    if (authorized.length === 0) {
+      return jsonResp({ ok: false, error: "Forbidden: caller is not an active paired guardian for this host" }, 403);
+    }
+
+    const ackAt = new Date().toISOString();
+    const { error: ackErr } = await supabase
+      .from("emergency_incidents")
+      .update({
+        status: "ACKNOWLEDGED",
+        acknowledged_at: ackAt,
+        acknowledged_by_device_id: auth.deviceId,
+        acknowledged_by_name: guardianName,
+      })
+      .eq("incident_id", incidentId);
+
+    if (ackErr) return jsonResp({ ok: false, error: ackErr.message }, 500);
+    return jsonResp({ ok: true, incidentId, acknowledged: true, acknowledgedAt: ackAt }, 200);
+  }
+
+  // 7. Paired Guardian Authorized Audio/Alert Retrieval (returns short-lived signed URLs ONLY for paired hosts)
   // -------------------------------------------------------------
   // Route 8: Paired Guardian Authorized Audio/Alert Retrieval
   // -------------------------------------------------------------
@@ -871,6 +1058,14 @@ Deno.serve(async (req: Request) => {
     if (hostIds.length === 0) {
       return jsonResp({ ok: true, alerts: [] }, 200);
     }
+
+    const { data: hostDevices } = await supabase
+      .from("guardian_devices")
+      .select("device_id, device_name")
+      .in("device_id", hostIds);
+    const hostNames = new Map<string, string>(
+      (hostDevices ?? []).map((d: { device_id: string; device_name: string }) => [d.device_id, d.device_name]),
+    );
 
     const { data: incidents } = await supabase
       .from("emergency_incidents")
@@ -891,16 +1086,32 @@ Deno.serve(async (req: Request) => {
       for (const ch of chunks ?? []) {
         const { data: signed } = await supabase.storage
           .from(AUDIO_BUCKET)
-          .createSignedUrl(ch.storage_object_path, 300);
+          .createSignedUrl(ch.storage_object_path, 300); // 5-min ephemeral private URL
+        const objName = String(ch.storage_object_path ?? "").split("/").pop() || `chunk_${ch.chunk_sequence}.wav`;
         signedChunks.push({
           chunkSequence: ch.chunk_sequence,
           isPreTrigger: ch.is_pre_trigger,
           isFinal: ch.is_final,
+          fileName: objName,
           durationMs: ch.duration_ms,
+          capturedAt: ch.captured_at,
           signedAudioUrl: signed?.signedUrl ?? null,
         });
       }
-      alerts.push({ ...inc, chunks: signedChunks });
+      alerts.push({
+        incidentId: inc.incident_id,
+        hostDeviceId: inc.host_device_id,
+        hostDeviceName: hostNames.get(inc.host_device_id) ?? "Protected Device",
+        distressType: inc.distress_type,
+        confidence: inc.confidence,
+        emergencyMessage: inc.emergency_message,
+        latitude: inc.latitude,
+        longitude: inc.longitude,
+        accuracyMeters: inc.accuracy_meters,
+        isAcknowledged: inc.status === "ACKNOWLEDGED" || Boolean(inc.acknowledged_at),
+        createdAt: inc.created_at,
+        chunks: signedChunks,
+      });
     }
     return jsonResp({ ok: true, alerts }, 200);
   }

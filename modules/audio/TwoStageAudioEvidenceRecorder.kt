@@ -12,6 +12,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import java.io.File
@@ -157,7 +158,7 @@ class TwoStageAudioEvidenceRecorder(
         currentFileOutputStream = fos
 
         stageTwoJob = recorderScope.launch {
-            val segmentIntervalMs = 3000L // Emit segment updates every 3 seconds
+            val segmentIntervalMs = 10_000L // Align legacy Stage 2 updates to 10-second intervals
             var totalPcmBytesWritten = 0L
             val startTime = System.currentTimeMillis()
 
@@ -250,7 +251,7 @@ class TwoStageAudioEvidenceRecorder(
         incidentId: String,
         preTriggerDurationMs: Long = 10_000L,
         chunkDurationMs: Long = 10_000L,
-        maxRecordingDurationMs: Long = 300_000L
+        maxRecordingDurationMs: Long = 60_000L
     ): IncidentAudioRelaySession {
         if (isStageTwoRecording) {
             stopRequested.set(true)
@@ -267,8 +268,22 @@ class TwoStageAudioEvidenceRecorder(
 
         val sampleRate = circularBuffer.sampleRate
         val clampedPreMs = preTriggerDurationMs.coerceIn(1000L, circularBuffer.durationMs.coerceAtLeast(10_000L))
+
+        val pcmInbox = Channel<ShortArray>(capacity = Channel.UNLIMITED)
+        val useLiveCaptureFlow = (captureManager != null && captureManager.isCapturing)
+
+        // Register listener synchronously right after snapshot (before disk writes) so zero live samples are lost
         val rawPreSamples = circularBuffer.snapshot(clampedPreMs)
         val baselineCircularTotalAtTrigger = circularBuffer.totalSamplesWritten()
+        val liveListenerId = if (useLiveCaptureFlow) {
+            captureManager!!.addSampleListener { chunk ->
+                if (chunk.isNotEmpty()) {
+                    pcmInbox.trySend(chunk)
+                }
+            }
+        } else {
+            null
+        }
 
         val preTriggerSamples = if (rawPreSamples.isNotEmpty()) {
             rawPreSamples
@@ -303,7 +318,7 @@ class TwoStageAudioEvidenceRecorder(
             currentFileOutputStream = combinedFos
         }
 
-        val chunkFlow = MutableSharedFlow<AudioRelayChunk>(replay = 32, extraBufferCapacity = 64)
+        val chunkChannel = Channel<AudioRelayChunk>(capacity = Channel.UNLIMITED)
         val completionDeferred = CompletableDeferred<IncidentRecordingSummary>()
 
         val safeChunkDurationMs = chunkDurationMs.coerceAtLeast(100L)
@@ -311,22 +326,7 @@ class TwoStageAudioEvidenceRecorder(
         val maxPostSamples = ((maxRecordingDurationMs.coerceAtLeast(safeChunkDurationMs) * sampleRate) / 1000L)
 
         val job = recorderScope.launch {
-            val pcmInbox = Channel<ShortArray>(capacity = Channel.UNLIMITED)
-            var collectorJob: Job? = null
             var circularBaseline = baselineCircularTotalAtTrigger
-
-            // Use continuous shared AudioCaptureManager stream when live capture is running;
-            // never restart captureManager between chunks.
-            val useLiveCaptureFlow = (captureManager != null && captureManager.isCapturing)
-            if (useLiveCaptureFlow) {
-                collectorJob = launch {
-                    captureManager!!.observePcmChunks().collect { chunk ->
-                        if (chunk.isNotEmpty()) {
-                            pcmInbox.trySend(chunk)
-                        }
-                    }
-                }
-            }
 
             val pendingSamples = ArrayList<Short>(chunkSamplesTarget + sampleRate)
             val generatedChunks = mutableListOf<AudioSegment>()
@@ -360,7 +360,7 @@ class TwoStageAudioEvidenceRecorder(
                     fileSizeBytes = chunkFile.length()
                 )
                 generatedChunks.add(chunkSeg)
-                chunkFlow.tryEmit(
+                chunkChannel.trySend(
                     AudioRelayChunk(
                         incidentId = incidentId,
                         chunkIndex = chunkSeq,
@@ -398,7 +398,7 @@ class TwoStageAudioEvidenceRecorder(
 
             try {
                 while (isActive && !stopRequested.get() && !maxDurationReached) {
-                    // Drain from live capture channel or circular buffer cursor (strictly non-overlapping delta)
+                    // Drain from live capture listener or circular buffer cursor (strictly non-overlapping delta)
                     if (useLiveCaptureFlow) {
                         var item = pcmInbox.tryReceive().getOrNull()
                         while (item != null) {
@@ -468,8 +468,11 @@ class TwoStageAudioEvidenceRecorder(
                     writeAndEmitChunk(partialChunk, isFinalChunk = true, captureTs = chunkStartTimestampEpochMs)
                 }
             } finally {
-                collectorJob?.cancel()
+                if (liveListenerId != null) {
+                    captureManager?.removeSampleListener(liveListenerId)
+                }
                 pcmInbox.close()
+                chunkChannel.close()
                 finalizeCombinedRelayFile()
                 activeRelaySessionJob = null
                 val totalDurationMs = ((preTriggerSamples.size + totalPostSamplesCaptured) * 1000L) / sampleRate
@@ -506,7 +509,7 @@ class TwoStageAudioEvidenceRecorder(
             preTriggerSegment = preSegment,
             preTriggerWavBytes = preTriggerBytes,
             combinedRecordingFile = combinedFile,
-            chunkFlow = chunkFlow.asSharedFlow(),
+            chunkFlow = chunkChannel.receiveAsFlow(),
             completionDeferred = completionDeferred
         )
     }

@@ -11,7 +11,7 @@ import java.util.UUID
 data class UserSettings(
     val contacts: List<EmergencyContact> = emptyList(),
     val isDiscreetModeEnabled: Boolean = false,
-    val screamSensitivity: Float = 0.80f,
+    val screamSensitivity: Float = 0.55f,
     val motionSensitivity: Float = 1.0f,
     val countdownDurationSeconds: Int = 10,
     val autoStartProtectionOnBoot: Boolean = false,
@@ -255,7 +255,7 @@ class FileSettingsRepository(
     private fun deserializeSettings(text: String): UserSettings {
         var version = 1
         var discreet = false
-        var sensitivity = 0.80f
+        var sensitivity = 0.55f
         var motionSens = 1.0f
         var countdown = 10
         var autoStart = false
