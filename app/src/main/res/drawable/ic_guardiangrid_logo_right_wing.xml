@@ -1,0 +1,18 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+
+    <!-- Right Wing: 3 Symmetrical Geometric Blades (Exact geometry from ic_guardiangrid_emblem) -->
+    <path
+        android:fillColor="#AD1457"
+        android:pathData="M 86,19 L 60,36 L 62,38.5 L 80,27 Z" />
+    <path
+        android:fillColor="#9C1042"
+        android:pathData="M 56,42.5 L 90,28 L 84,37 L 65,44.5 L 62,54 Z" />
+    <path
+        android:fillColor="#AD1457"
+        android:pathData="M 88,40.5 L 66.5,48.5 L 65,54 L 82,47 Z" />
+
+</vector>

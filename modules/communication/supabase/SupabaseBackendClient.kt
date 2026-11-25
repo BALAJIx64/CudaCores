@@ -93,6 +93,13 @@ object SupabaseConfigManager {
     fun isConfigured(): Boolean = configRef.get()?.isValid() == true
 }
 
+data class LiveLocationSessionResponse(
+    val sessionId: String,
+    val shareUrl: String,
+    val expiresAtEpochMs: Long,
+    val durationMinutes: Int
+)
+
 data class SupabaseRelayResult(
     val state: EmergencyDeliveryState,
     val storagePath: String? = null,
@@ -603,6 +610,88 @@ class SupabaseEmergencyBackendClient(
                 errorMessage = "Supabase complete notification error: ${e.message}"
             )
             SupabaseRelayResult(state = EmergencyDeliveryState.FAILED, errorMessage = audit.errorMessage, auditRecord = audit)
+        }
+    }
+
+    /**
+     * Starts a standalone live location sharing session on Supabase backend and returns a private,
+     * unguessable auto-expiring viewer URL. Separate from SOS incidents.
+     */
+    fun startLiveLocationSession(
+        sessionId: String,
+        durationMinutes: Int,
+        recipientPhones: List<String>,
+        latitude: Double,
+        longitude: Double,
+        accuracyMeters: Float
+    ): Result<LiveLocationSessionResponse> {
+        val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
+        if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
+
+        ensureDeviceRegistered()
+        val headers = buildAuthenticatedHeaders(cfg, "live-start|$sessionId|$durationMinutes")
+        val phonesJson = recipientPhones.joinToString(",") { "\"${jsonEscape(it)}\"" }
+        val jsonBody = """{"sessionId":"${jsonEscape(sessionId)}","durationMinutes":$durationMinutes,"recipientPhones":[$phonesJson],"latitude":$latitude,"longitude":$longitude,"accuracyMeters":$accuracyMeters}"""
+
+        return try {
+            val resp = transport.postJson("${cfg.functionsBaseUrl()}/live-location/start", jsonBody, headers)
+            if (resp.isSuccessful) {
+                val shareUrl = """"shareUrl"\s*:\s*"([^"]+)"""".toRegex().find(resp.body)?.groupValues?.get(1)
+                val expiresAt = """"expiresAtEpochMs"\s*:\s*(\d+)""".toRegex().find(resp.body)?.groupValues?.get(1)?.toLongOrNull()
+                    ?: (System.currentTimeMillis() + durationMinutes * 60_000L)
+                if (shareUrl.isNullOrBlank()) {
+                    Result.failure(IllegalStateException("Backend did not return a live share URL"))
+                } else {
+                    Result.success(LiveLocationSessionResponse(sessionId, shareUrl, expiresAt, durationMinutes))
+                }
+            } else {
+                Result.failure(IllegalStateException("Live location start HTTP ${resp.statusCode}: ${resp.body.take(120)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Pushes a fresh GPS coordinate update to an active live location sharing session.
+     */
+    fun updateLiveLocationSession(
+        sessionId: String,
+        latitude: Double,
+        longitude: Double,
+        accuracyMeters: Float
+    ): Result<Unit> {
+        val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
+        if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
+
+        val headers = buildAuthenticatedHeaders(cfg, "live-update|$sessionId")
+        val jsonBody = """{"sessionId":"${jsonEscape(sessionId)}","latitude":$latitude,"longitude":$longitude,"accuracyMeters":$accuracyMeters}"""
+
+        return try {
+            val resp = transport.postJson("${cfg.functionsBaseUrl()}/live-location/update", jsonBody, headers)
+            if (resp.isSuccessful) Result.success(Unit)
+            else Result.failure(IllegalStateException("Live location update HTTP ${resp.statusCode}"))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Stops an active live location sharing session early and expires its viewer link immediately.
+     */
+    fun stopLiveLocationSession(sessionId: String): Result<Unit> {
+        val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
+        if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
+
+        val headers = buildAuthenticatedHeaders(cfg, "live-stop|$sessionId")
+        val jsonBody = """{"sessionId":"${jsonEscape(sessionId)}"}"""
+
+        return try {
+            val resp = transport.postJson("${cfg.functionsBaseUrl()}/live-location/stop", jsonBody, headers)
+            if (resp.isSuccessful) Result.success(Unit)
+            else Result.failure(IllegalStateException("Live location stop HTTP ${resp.statusCode}"))
+        } catch (e: Exception) {
+            Result.failure(e)
         }
     }
 

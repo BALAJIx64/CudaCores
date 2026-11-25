@@ -2,12 +2,15 @@ package com.guardiangrid.ui
 
 import androidx.activity.compose.BackHandler
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.Crossfade
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -18,6 +21,7 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.NavigationBar
@@ -46,6 +50,7 @@ import com.guardiangrid.location.GuardianLocationManager
 import com.guardiangrid.modules.audio.AudioModuleStub
 import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
 import com.guardiangrid.ui.brand.GuardianGridSplashScreen
+import com.guardiangrid.ui.brand.rememberIsReducedMotion
 import com.guardiangrid.ui.guardian.GuardianPairingScreen
 import kotlinx.coroutines.delay
 import com.guardiangrid.ui.theme.BrandMagenta
@@ -89,10 +94,11 @@ fun GuardianGridMainScreen(
 ) {
     val state by EmergencyStateHolder.state.collectAsState()
     var currentDestination by remember { mutableStateOf(MainNavDestination.DASHBOARD) }
+    val isReducedMotion = rememberIsReducedMotion()
     var showSplash by remember { mutableStateOf(true) }
 
-    LaunchedEffect(Unit) {
-        delay(1150L)
+    LaunchedEffect(isReducedMotion) {
+        delay(if (isReducedMotion) 350L else 950L)
         showSplash = false
     }
 
@@ -133,104 +139,119 @@ fun GuardianGridMainScreen(
                     }
                 )
             }
-            showSplash -> {
-                GuardianGridSplashScreen()
-            }
             else -> {
-                Scaffold(
+                Crossfade(
+                    targetState = showSplash,
+                    animationSpec = tween(durationMillis = if (isReducedMotion) 120 else 280),
+                    label = "SplashToAppCrossfade"
+                ) { isSplashVisible ->
+                    if (isSplashVisible) {
+                        GuardianGridSplashScreen(
+                            onSkip = { showSplash = false }
+                        )
+                    } else {
+                        Scaffold(
                     modifier = Modifier.fillMaxSize(),
-                    containerColor = DarkBackground,
+                    containerColor = MaterialTheme.colorScheme.background,
                     bottomBar = {
-                        NavigationBar(
+                        Column(
                             modifier = Modifier
                                 .fillMaxWidth()
-                                .border(1.dp, DarkBorder)
-                                .navigationBarsPadding(),
-                            containerColor = DarkSurface,
-                            tonalElevation = 4.dp
+                                .background(MaterialTheme.colorScheme.surface)
+                                .navigationBarsPadding()
                         ) {
-                            NavigationBarItem(
-                                selected = currentDestination == MainNavDestination.DASHBOARD,
-                                onClick = { currentDestination = MainNavDestination.DASHBOARD },
-                                icon = {
-                                    Icon(
-                                        imageVector = Icons.Default.Security,
-                                        contentDescription = "Home",
-                                        modifier = Modifier.size(22.dp)
-                                    )
-                                },
-                                label = {
-                                    Text(
-                                        text = "Home",
-                                        fontSize = 11.sp,
-                                        fontWeight = if (currentDestination == MainNavDestination.DASHBOARD) FontWeight.Bold else FontWeight.Normal
-                                    )
-                                },
-                                colors = NavigationBarItemDefaults.colors(
-                                    selectedIconColor = BrandMagenta,
-                                    selectedTextColor = BrandMagenta,
-                                    unselectedIconColor = TextSecondary,
-                                    unselectedTextColor = TextSecondary,
-                                    indicatorColor = DarkSurfaceHighlight
-                                )
+                            HorizontalDivider(
+                                thickness = 1.dp,
+                                color = MaterialTheme.colorScheme.outlineVariant
                             )
+                            NavigationBar(
+                                modifier = Modifier.fillMaxWidth(),
+                                containerColor = MaterialTheme.colorScheme.surface,
+                                tonalElevation = 0.dp
+                            ) {
+                                NavigationBarItem(
+                                    selected = currentDestination == MainNavDestination.DASHBOARD,
+                                    onClick = { currentDestination = MainNavDestination.DASHBOARD },
+                                    icon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Security,
+                                            contentDescription = "Home",
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = "Home",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = if (currentDestination == MainNavDestination.DASHBOARD) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    },
+                                    colors = NavigationBarItemDefaults.colors(
+                                        selectedIconColor = BrandMagenta,
+                                        selectedTextColor = BrandMagenta,
+                                        unselectedIconColor = TextSecondary,
+                                        unselectedTextColor = TextSecondary,
+                                        indicatorColor = BrandMagenta.copy(alpha = 0.14f)
+                                    )
+                                )
 
-                            NavigationBarItem(
-                                selected = currentDestination == MainNavDestination.INCIDENTS,
-                                onClick = { currentDestination = MainNavDestination.INCIDENTS },
-                                icon = {
-                                    Icon(
-                                        imageVector = Icons.Default.History,
-                                        contentDescription = "Incidents",
-                                        modifier = Modifier.size(22.dp)
+                                NavigationBarItem(
+                                    selected = currentDestination == MainNavDestination.INCIDENTS,
+                                    onClick = { currentDestination = MainNavDestination.INCIDENTS },
+                                    icon = {
+                                        Icon(
+                                            imageVector = Icons.Default.History,
+                                            contentDescription = "Incidents",
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = "Incidents",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = if (currentDestination == MainNavDestination.INCIDENTS) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    },
+                                    colors = NavigationBarItemDefaults.colors(
+                                        selectedIconColor = BrandMagenta,
+                                        selectedTextColor = BrandMagenta,
+                                        unselectedIconColor = TextSecondary,
+                                        unselectedTextColor = TextSecondary,
+                                        indicatorColor = BrandMagenta.copy(alpha = 0.14f)
                                     )
-                                },
-                                label = {
-                                    Text(
-                                        text = "Incidents",
-                                        fontSize = 11.sp,
-                                        fontWeight = if (currentDestination == MainNavDestination.INCIDENTS) FontWeight.Bold else FontWeight.Normal
-                                    )
-                                },
-                                colors = NavigationBarItemDefaults.colors(
-                                    selectedIconColor = BrandMagenta,
-                                    selectedTextColor = BrandMagenta,
-                                    unselectedIconColor = TextSecondary,
-                                    unselectedTextColor = TextSecondary,
-                                    indicatorColor = DarkSurfaceHighlight
                                 )
-                            )
 
-                            NavigationBarItem(
-                                selected = currentDestination == MainNavDestination.SETTINGS ||
-                                        currentDestination == MainNavDestination.EMERGENCY_CONTACTS ||
-                                        currentDestination == MainNavDestination.COMMUNICATION_CONFIG ||
-                                        currentDestination == MainNavDestination.DELIVERY_STATUS ||
-                                        currentDestination == MainNavDestination.OFFLINE_QUEUE ||
-                                        currentDestination == MainNavDestination.GUARDIAN_PAIRING,
-                                onClick = { currentDestination = MainNavDestination.SETTINGS },
-                                icon = {
-                                    Icon(
-                                        imageVector = Icons.Default.Settings,
-                                        contentDescription = "Settings",
-                                        modifier = Modifier.size(22.dp)
+                                NavigationBarItem(
+                                    selected = currentDestination == MainNavDestination.SETTINGS ||
+                                            currentDestination == MainNavDestination.EMERGENCY_CONTACTS ||
+                                            currentDestination == MainNavDestination.COMMUNICATION_CONFIG ||
+                                            currentDestination == MainNavDestination.DELIVERY_STATUS ||
+                                            currentDestination == MainNavDestination.OFFLINE_QUEUE ||
+                                            currentDestination == MainNavDestination.GUARDIAN_PAIRING,
+                                    onClick = { currentDestination = MainNavDestination.SETTINGS },
+                                    icon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Settings,
+                                            contentDescription = "Settings",
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = "Settings",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = if (currentDestination == MainNavDestination.SETTINGS) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    },
+                                    colors = NavigationBarItemDefaults.colors(
+                                        selectedIconColor = BrandMagenta,
+                                        selectedTextColor = BrandMagenta,
+                                        unselectedIconColor = TextSecondary,
+                                        unselectedTextColor = TextSecondary,
+                                        indicatorColor = BrandMagenta.copy(alpha = 0.14f)
                                     )
-                                },
-                                label = {
-                                    Text(
-                                        text = "Settings",
-                                        fontSize = 11.sp,
-                                        fontWeight = if (currentDestination == MainNavDestination.SETTINGS) FontWeight.Bold else FontWeight.Normal
-                                    )
-                                },
-                                colors = NavigationBarItemDefaults.colors(
-                                    selectedIconColor = BrandMagenta,
-                                    selectedTextColor = BrandMagenta,
-                                    unselectedIconColor = TextSecondary,
-                                    unselectedTextColor = TextSecondary,
-                                    indicatorColor = DarkSurfaceHighlight
                                 )
-                            )
+                            }
                         }
                     }
                 ) { innerPadding ->
@@ -345,6 +366,8 @@ fun GuardianGridMainScreen(
                             }
                         }
                     }
+                }
+                }
                 }
             }
         }

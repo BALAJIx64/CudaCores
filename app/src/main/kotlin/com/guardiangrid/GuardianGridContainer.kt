@@ -7,6 +7,7 @@ import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.core.state.FileIncidentRepository
 import com.guardiangrid.core.state.IncidentRepository
 import com.guardiangrid.location.GuardianLocationManager
+import com.guardiangrid.location.LiveLocationShareManager
 import com.guardiangrid.modules.audio.AudioModuleStub
 import com.guardiangrid.modules.communication.EmergencyCommunicatorImpl
 import com.guardiangrid.modules.communication.guardian.GuardianConnectivityManager
@@ -54,6 +55,7 @@ interface GuardianGridContainer {
     val guardianConnectivityManager: GuardianConnectivityManager
     val guardianRelayClient: GuardianRelayClient
     val supabaseBackendClient: SupabaseEmergencyBackendClient
+    val liveLocationShareManager: LiveLocationShareManager
 }
 
 /**
@@ -118,6 +120,15 @@ class DefaultGuardianGridContainer(
 
     override val locationManager: GuardianLocationManager by lazy {
         customLocationManager ?: GuardianLocationManager(appContext)
+    }
+
+    override val liveLocationShareManager: LiveLocationShareManager by lazy {
+        val sms = if (appContext != null) AndroidSmsSender(appContext) else MockSmsSender()
+        LiveLocationShareManager(
+            locationManager = locationManager,
+            backendClient = supabaseBackendClient,
+            smsSender = sms
+        )
     }
 
     override val communicator: EmergencyCommunicator by lazy {

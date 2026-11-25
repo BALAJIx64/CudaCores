@@ -1116,5 +1116,205 @@ Deno.serve(async (req: Request) => {
     return jsonResp({ ok: true, alerts }, 200);
   }
 
+  // -------------------------------------------------------------
+  // Route 10: Start Standalone Live Location Sharing Session
+  // -------------------------------------------------------------
+  if (req.method === "POST" && path.endsWith("/live-location/start")) {
+    const body = await req.json();
+    const sessionId = String(body.sessionId ?? crypto.randomUUID()).trim();
+    const durationMinutes = Math.min(Math.max(Number(body.durationMinutes ?? 60), 15), 1440);
+    const recipientPhones: string[] = Array.isArray(body.recipientPhones)
+      ? body.recipientPhones.map((p: unknown) => String(p).trim()).filter(Boolean)
+      : [];
+
+    const auth = await verifyRegisteredDeviceRequest(req, supabase, `live-start|${sessionId}|${durationMinutes}`);
+    if (!auth.ok || !auth.deviceId) return jsonResp({ ok: false, error: auth.reason }, auth.status);
+
+    const shareToken = randomHex(32); // 256-bit unguessable token
+    const shareTokenHash = await sha256Hex(shareToken);
+    const expiresAtMs = Date.now() + durationMinutes * 60 * 1000;
+    const expiresAtIso = new Date(expiresAtMs).toISOString();
+
+    const { error } = await supabase.from("live_location_sessions").insert({
+      session_id: sessionId,
+      host_device_id: auth.deviceId,
+      share_token_hash: shareTokenHash,
+      recipient_phones: recipientPhones,
+      duration_minutes: durationMinutes,
+      latitude: body.latitude ?? null,
+      longitude: body.longitude ?? null,
+      accuracy_meters: body.accuracyMeters ?? null,
+      status: "ACTIVE",
+      expires_at: expiresAtIso,
+    });
+
+    if (error) return jsonResp({ ok: false, error: error.message }, 500);
+
+    const shareUrl = `${SUPABASE_URL.replace(/\/$/, "")}/functions/v1/emergency-relay/live-location/view?token=${shareToken}`;
+    return jsonResp({
+      ok: true,
+      sessionId,
+      shareUrl,
+      expiresAtEpochMs: expiresAtMs,
+      durationMinutes,
+    }, 200);
+  }
+
+  // -------------------------------------------------------------
+  // Route 11: Push Live Location Update for Active Session
+  // -------------------------------------------------------------
+  if (req.method === "POST" && path.endsWith("/live-location/update")) {
+    const body = await req.json();
+    const sessionId = String(body.sessionId ?? "").trim();
+    if (!sessionId) return jsonResp({ ok: false, error: "Missing sessionId" }, 400);
+
+    const auth = await verifyRegisteredDeviceRequest(req, supabase, `live-update|${sessionId}`);
+    if (!auth.ok || !auth.deviceId) return jsonResp({ ok: false, error: auth.reason }, auth.status);
+
+    const { data: sess } = await supabase
+      .from("live_location_sessions")
+      .select("host_device_id, status, expires_at")
+      .eq("session_id", sessionId)
+      .maybeSingle();
+
+    if (!sess) return jsonResp({ ok: false, error: "Session not found" }, 404);
+    if (sess.host_device_id !== auth.deviceId) return jsonResp({ ok: false, error: "Forbidden" }, 403);
+    if (sess.status !== "ACTIVE" || new Date(sess.expires_at).getTime() <= Date.now()) {
+      return jsonResp({ ok: false, error: "Live location session has expired or stopped" }, 410);
+    }
+
+    const { error } = await supabase
+      .from("live_location_sessions")
+      .update({
+        latitude: body.latitude ?? null,
+        longitude: body.longitude ?? null,
+        accuracy_meters: body.accuracyMeters ?? null,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("session_id", sessionId);
+
+    if (error) return jsonResp({ ok: false, error: error.message }, 500);
+    return jsonResp({ ok: true, sessionId, updatedAtEpochMs: Date.now() }, 200);
+  }
+
+  // -------------------------------------------------------------
+  // Route 12: Stop Live Location Sharing Session Early
+  // -------------------------------------------------------------
+  if (req.method === "POST" && path.endsWith("/live-location/stop")) {
+    const body = await req.json();
+    const sessionId = String(body.sessionId ?? "").trim();
+    if (!sessionId) return jsonResp({ ok: false, error: "Missing sessionId" }, 400);
+
+    const auth = await verifyRegisteredDeviceRequest(req, supabase, `live-stop|${sessionId}`);
+    if (!auth.ok || !auth.deviceId) return jsonResp({ ok: false, error: auth.reason }, auth.status);
+
+    const { data: sess } = await supabase
+      .from("live_location_sessions")
+      .select("host_device_id")
+      .eq("session_id", sessionId)
+      .maybeSingle();
+
+    if (!sess) return jsonResp({ ok: false, error: "Session not found" }, 404);
+    if (sess.host_device_id !== auth.deviceId) return jsonResp({ ok: false, error: "Forbidden" }, 403);
+
+    const { error } = await supabase
+      .from("live_location_sessions")
+      .update({
+        status: "STOPPED",
+        stopped_at: new Date().toISOString(),
+      })
+      .eq("session_id", sessionId);
+
+    if (error) return jsonResp({ ok: false, error: error.message }, 500);
+    return jsonResp({ ok: true, sessionId, status: "STOPPED" }, 200);
+  }
+
+  // -------------------------------------------------------------
+  // Route 13: Public Token-Scoped Live Location Viewer (HTML / JSON)
+  // -------------------------------------------------------------
+  if (req.method === "GET" && path.endsWith("/live-location/view")) {
+    const token = String(url.searchParams.get("token") ?? "").trim();
+    const wantsJson = url.searchParams.get("format") === "json";
+    if (!token || token.length < 32) {
+      return wantsJson
+        ? jsonResp({ ok: false, error: "Invalid link token" }, 404)
+        : new Response("<h2>Invalid GuardianGrid live location link.</h2>", { status: 404, headers: { "Content-Type": "text/html" } });
+    }
+
+    const tokenHash = await sha256Hex(token);
+    const { data: sess } = await supabase
+      .from("live_location_sessions")
+      .select("session_id, status, latitude, longitude, accuracy_meters, updated_at, expires_at")
+      .eq("share_token_hash", tokenHash)
+      .maybeSingle();
+
+    if (!sess) {
+      return wantsJson
+        ? jsonResp({ ok: false, error: "Live location session not found" }, 404)
+        : new Response("<h2>Live location session not found.</h2>", { status: 404, headers: { "Content-Type": "text/html" } });
+    }
+
+    const isExpired = new Date(sess.expires_at).getTime() <= Date.now();
+    if (sess.status !== "ACTIVE" || isExpired) {
+      if (isExpired && sess.status === "ACTIVE") {
+        await supabase.from("live_location_sessions").update({ status: "EXPIRED" }).eq("session_id", sess.session_id);
+      }
+      return wantsJson
+        ? jsonResp({ ok: false, status: isExpired ? "EXPIRED" : sess.status, error: "Sharing has ended" }, 410)
+        : new Response(
+            "<html><body style='font-family:sans-serif;background:#0D0E11;color:#F3F4F6;padding:32px;text-align:center'><h2>Live Location Sharing Ended</h2><p>This GuardianGrid link has expired or was stopped by the sender.</p></body></html>",
+            { status: 410, headers: { "Content-Type": "text/html" } }
+          );
+    }
+
+    if (wantsJson) {
+      return jsonResp({
+        ok: true,
+        status: "ACTIVE",
+        latitude: sess.latitude,
+        longitude: sess.longitude,
+        accuracyMeters: sess.accuracy_meters,
+        updatedAt: sess.updated_at,
+        expiresAt: sess.expires_at,
+      }, 200);
+    }
+
+    const html = `<!doctype html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>GuardianGrid Live Location</title>
+<style>body{margin:0;font-family:system-ui,-apple-system,sans-serif;background:#0D0E11;color:#F3F4F6;display:flex;justify-content:center;padding:20px}
+.card{max-width:460px;width:100%;background:#16181D;border:1px solid #2D323E;border-radius:18px;padding:20px}
+.badge{display:inline-block;background:#10B98124;color:#10B981;padding:4px 10px;border-radius:16px;font-size:12px;font-weight:700}
+.coords{font-family:monospace;font-size:18px;margin:14px 0}
+.btn{display:block;text-align:center;background:#E0115F;color:#fff;text-decoration:none;padding:12px;border-radius:12px;font-weight:700;margin-top:16px}</style>
+</head><body><div class="card">
+<span class="badge" id="status">LIVE SHARING ACTIVE</span>
+<h2>GuardianGrid Live Location</h2>
+<div class="coords" id="coords">${sess.latitude ?? "--"}, ${sess.longitude ?? "--"}</div>
+<div id="meta" style="color:#9CA3AF;font-size:13px">Accuracy: ±${Math.round(sess.accuracy_meters ?? 0)}m • Auto-refreshing every 5s</div>
+<a class="btn" id="maplink" target="_blank" href="https://maps.google.com/?q=${sess.latitude},${sess.longitude}">Open in Maps</a>
+</div>
+<script>
+const apiUrl = location.pathname + "?token=" + encodeURIComponent(new URLSearchParams(location.search).get("token")) + "&format=json";
+setInterval(async () => {
+  try {
+    const r = await fetch(apiUrl);
+    if (r.status === 410) {
+      document.getElementById("status").textContent = "SHARING ENDED";
+      document.getElementById("status").style.color = "#E53935";
+      return;
+    }
+    const d = await r.json();
+    if (d.ok && d.latitude != null) {
+      document.getElementById("coords").textContent = d.latitude.toFixed(5) + ", " + d.longitude.toFixed(5);
+      document.getElementById("meta").textContent = "Accuracy: ±" + Math.round(d.accuracyMeters || 0) + "m • Updated " + new Date(d.updatedAt).toLocaleTimeString();
+      document.getElementById("maplink").href = "https://maps.google.com/?q=" + d.latitude + "," + d.longitude;
+    }
+  } catch (e) {}
+}, 5000);
+</script></body></html>`;
+    return new Response(html, { status: 200, headers: { "Content-Type": "text/html; charset=utf-8" } });
+  }
+
   return jsonResp({ ok: false, error: "Unsupported route" }, 404);
 });
