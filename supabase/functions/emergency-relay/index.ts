@@ -1,9 +1,11 @@
 // GuardianGrid Authenticated Emergency Relay Edge Function (Supabase / Deno)
-// Keeps TELEGRAM_BOT_TOKEN and GUARDIAN_HMAC_PEPPER exclusively on the backend.
+// Keeps TELEGRAM_BOT_TOKEN, GUARDIAN_HMAC_PEPPER, and SMS Provider credentials exclusively on the backend.
 // Required Supabase Secrets:
 //   SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, TELEGRAM_BOT_TOKEN, GUARDIAN_HMAC_PEPPER
 // Optional:
 //   GUARDIAN_DEFAULT_CHAT_ID
+//   TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_FROM_NUMBER
+//   SMS_WEBHOOK_URL, SMS_WEBHOOK_AUTH_TOKEN
 
 import { createClient, SupabaseClient } from "https://esm.sh/@supabase/supabase-js@2";
 
@@ -12,6 +14,12 @@ const SERVICE_ROLE_KEY = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY") ?? "";
 const TELEGRAM_BOT_TOKEN = Deno.env.get("TELEGRAM_BOT_TOKEN") ?? "";
 const DEFAULT_CHAT_ID = Deno.env.get("GUARDIAN_DEFAULT_CHAT_ID") ?? "";
 const HMAC_PEPPER = Deno.env.get("GUARDIAN_HMAC_PEPPER") ?? "";
+const TWILIO_ACCOUNT_SID = Deno.env.get("TWILIO_ACCOUNT_SID") ?? "";
+const TWILIO_AUTH_TOKEN = Deno.env.get("TWILIO_AUTH_TOKEN") ?? "";
+const TWILIO_FROM_NUMBER = Deno.env.get("TWILIO_FROM_NUMBER") ?? "";
+const SMS_WEBHOOK_URL = Deno.env.get("SMS_WEBHOOK_URL") ?? "";
+const SMS_WEBHOOK_AUTH_TOKEN = Deno.env.get("SMS_WEBHOOK_AUTH_TOKEN") ?? "";
+
 const AUDIO_BUCKET = "guardian-audio-evidence";
 const MAX_CLOCK_SKEW_MS = 5 * 60 * 1000;
 
@@ -52,7 +60,7 @@ function fromBase64(b64: string): Uint8Array {
   return out;
 }
 
-async function encryptDeviceSecret(rawSecret: string): Promise<string> {
+async function encryptSecret(rawSecret: string): Promise<string> {
   const key = await deriveAesKey();
   const iv = crypto.getRandomValues(new Uint8Array(12));
   const ct = await crypto.subtle.encrypt(
@@ -63,9 +71,9 @@ async function encryptDeviceSecret(rawSecret: string): Promise<string> {
   return `${toBase64(iv)}.${toBase64(new Uint8Array(ct))}`;
 }
 
-async function decryptDeviceSecret(packed: string): Promise<string> {
+async function decryptSecret(packed: string): Promise<string> {
   const [ivB64, ctB64] = packed.split(".");
-  if (!ivB64 || !ctB64) throw new Error("Malformed encrypted device key");
+  if (!ivB64 || !ctB64) throw new Error("Malformed encrypted secret");
   const key = await deriveAesKey();
   const plain = await crypto.subtle.decrypt(
     { name: "AES-GCM", iv: fromBase64(ivB64) },
@@ -99,6 +107,33 @@ function timingSafeEqualHex(a: string, b: string): boolean {
   return diff === 0;
 }
 
+function randomHex(byteLength = 32): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(byteLength));
+  return Array.from(bytes).map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+// Canonical BLE emergency-alert string representation for deterministic signature computation
+export function buildBleCanonicalString(packet: {
+  alertId: string;
+  accountId: string;
+  senderDeviceId: string;
+  tokenId: string;
+  issuedAt: number;
+  expiresAt: number;
+  nonce: string;
+  alertType: string;
+  latitude?: number | null;
+  longitude?: number | null;
+  accuracyMeters?: number | null;
+  emergencyMessage?: string | null;
+}): string {
+  const latStr = packet.latitude != null ? String(packet.latitude) : "";
+  const lonStr = packet.longitude != null ? String(packet.longitude) : "";
+  const accStr = packet.accuracyMeters != null ? String(packet.accuracyMeters) : "";
+  const msgStr = packet.emergencyMessage ?? "";
+  return `v1|${packet.alertId}|${packet.accountId}|${packet.senderDeviceId}|${packet.tokenId}|${packet.issuedAt}|${packet.expiresAt}|${packet.nonce}|${packet.alertType}|${latStr}|${lonStr}|${accStr}|${msgStr}`;
+}
+
 async function verifyRegisteredDeviceRequest(
   req: Request,
   supabase: SupabaseClient,
@@ -127,7 +162,7 @@ async function verifyRegisteredDeviceRequest(
     return { ok: false, status: 401, reason: "Device is not registered" };
   }
 
-  const deviceSecret = await decryptDeviceSecret(devRow.secret_ciphertext);
+  const deviceSecret = await decryptSecret(devRow.secret_ciphertext);
   const expectedSig = await hmacSha256Hex(deviceSecret, `${tsRaw}|${nonce}|${canonicalSuffix}`);
   if (!timingSafeEqualHex(expectedSig, sig)) {
     return { ok: false, status: 401, reason: "Invalid device HMAC signature" };
@@ -160,6 +195,107 @@ async function verifyAuthorizedTargets(
   return (data ?? []).map((r: { guardian_device_id: string }) => r.guardian_device_id);
 }
 
+/**
+ * Server-side SMS Dispatcher.
+ * Uses Twilio if configured, or generic HTTP SMS gateway if configured.
+ * Never simulates success.
+ */
+interface SmsDispatchResult {
+  success: boolean;
+  provider: string;
+  providerMessageId?: string;
+  errorMessage?: string;
+}
+
+async function dispatchServerSideSms(
+  toPhoneNumber: string,
+  messageBody: string,
+): Promise<SmsDispatchResult> {
+  // 1. Twilio Provider
+  if (TWILIO_ACCOUNT_SID && TWILIO_AUTH_TOKEN && TWILIO_FROM_NUMBER) {
+    try {
+      const url = `https://api.twilio.com/2010-04-01/Accounts/${TWILIO_ACCOUNT_SID}/Messages.json`;
+      const form = new URLSearchParams();
+      form.append("To", toPhoneNumber);
+      form.append("From", TWILIO_FROM_NUMBER);
+      form.append("Body", messageBody);
+
+      const authHeader = `Basic ${btoa(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`)}`;
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: {
+          "Authorization": authHeader,
+          "Content-Type": "application/x-www-form-urlencoded",
+        },
+        body: form.toString(),
+      });
+
+      const respJson = await resp.json().catch(() => ({}));
+      if (resp.ok) {
+        return {
+          success: true,
+          provider: "TWILIO",
+          providerMessageId: respJson.sid || undefined,
+        };
+      } else {
+        return {
+          success: false,
+          provider: "TWILIO",
+          errorMessage: `Twilio error ${resp.status}: ${respJson.message || JSON.stringify(respJson)}`,
+        };
+      }
+    } catch (e: unknown) {
+      return {
+        success: false,
+        provider: "TWILIO",
+        errorMessage: `Twilio network failure: ${(e as Error).message}`,
+      };
+    }
+  }
+
+  // 2. Generic HTTP SMS Gateway
+  if (SMS_WEBHOOK_URL) {
+    try {
+      const headers: Record<string, string> = { "Content-Type": "application/json" };
+      if (SMS_WEBHOOK_AUTH_TOKEN) {
+        headers["Authorization"] = `Bearer ${SMS_WEBHOOK_AUTH_TOKEN}`;
+      }
+      const resp = await fetch(SMS_WEBHOOK_URL, {
+        method: "POST",
+        headers,
+        body: JSON.stringify({ to: toPhoneNumber, message: messageBody }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (resp.ok) {
+        return {
+          success: true,
+          provider: "GENERIC_HTTP",
+          providerMessageId: data.messageId || data.id || undefined,
+        };
+      } else {
+        return {
+          success: false,
+          provider: "GENERIC_HTTP",
+          errorMessage: `Generic HTTP SMS gateway returned status ${resp.status}`,
+        };
+      }
+    } catch (e: unknown) {
+      return {
+        success: false,
+        provider: "GENERIC_HTTP",
+        errorMessage: `Generic HTTP SMS gateway error: ${(e as Error).message}`,
+      };
+    }
+  }
+
+  // 3. Neither provider is configured — fail explicitly. Never simulate success.
+  return {
+    success: false,
+    provider: "NONE",
+    errorMessage: "Server SMS provider credentials not configured (TWILIO_ACCOUNT_SID or SMS_WEBHOOK_URL required)",
+  };
+}
+
 Deno.serve(async (req: Request) => {
   if (!SUPABASE_URL || !SERVICE_ROLE_KEY || !HMAC_PEPPER) {
     return jsonResp({ ok: false, error: "Server secrets misconfigured" }, 500);
@@ -169,8 +305,9 @@ Deno.serve(async (req: Request) => {
   const path = url.pathname;
   const supabase = createClient(SUPABASE_URL, SERVICE_ROLE_KEY);
 
-  // 1. Register / rotate device credentials
-  // First registration accepts device-generated per-install HMAC secret; re-registration requires existing valid signature.
+  // -------------------------------------------------------------
+  // Route 1: Register / rotate device credentials
+  // -------------------------------------------------------------
   if (req.method === "POST" && path.endsWith("/register-device")) {
     const payload = await req.json();
     const deviceId = String(payload.deviceId ?? "").trim();
@@ -191,7 +328,7 @@ Deno.serve(async (req: Request) => {
       if (!auth.ok) return jsonResp({ ok: false, error: "Device already registered; signature required to update" }, 403);
     }
 
-    const encrypted = await encryptDeviceSecret(deviceSecret);
+    const encrypted = await encryptSecret(deviceSecret);
     const fingerprint = await sha256Hex(deviceSecret);
     const { error } = await supabase.from("guardian_devices").upsert({
       device_id: deviceId,
@@ -205,7 +342,9 @@ Deno.serve(async (req: Request) => {
     return jsonResp({ ok: true, deviceId, registered: true }, 200);
   }
 
-  // 2. Register active Host <-> Guardian pairing authorization
+  // -------------------------------------------------------------
+  // Route 2: Register active Host <-> Guardian pairing authorization
+  // -------------------------------------------------------------
   if (req.method === "POST" && path.endsWith("/pair")) {
     const body = await req.json();
     const hostDeviceId = String(body.hostDeviceId ?? "").trim();
@@ -227,7 +366,285 @@ Deno.serve(async (req: Request) => {
     return jsonResp({ ok: true, hostDeviceId, guardianDeviceId, paired: true }, 200);
   }
 
-  // 3. Dispatch Emergency Alert Envelope
+  // -------------------------------------------------------------
+  // Route 3: Issue Short-Lived BLE Emergency Signing Token (Sender Phone)
+  // -------------------------------------------------------------
+  if (req.method === "POST" && path.endsWith("/issue-ble-token")) {
+    const body = await req.json();
+    const accountId = String(body.accountId ?? "").trim();
+    const deviceId = String(body.deviceId ?? "").trim();
+    const validityHours = Math.min(Math.max(Number(body.validityHours ?? 72), 1), 168); // 1h to 7 days, default 72h
+
+    if (!accountId || !deviceId) {
+      return jsonResp({ ok: false, error: "Missing accountId or deviceId" }, 400);
+    }
+
+    // Validate device identity via HMAC request header
+    const auth = await verifyRegisteredDeviceRequest(req, supabase, `issue-ble-token|${accountId}|${deviceId}`);
+    if (!auth.ok || !auth.deviceId) {
+      return jsonResp({ ok: false, error: auth.reason || "Device authorization required" }, auth.status);
+    }
+    if (auth.deviceId !== deviceId) {
+      return jsonResp({ ok: false, error: "Authenticated device mismatch" }, 403);
+    }
+
+    const tokenId = crypto.randomUUID();
+    const tokenSecret = randomHex(32); // 256-bit cryptographically secure random secret
+    const tokenHash = await sha256Hex(tokenSecret);
+    const tokenCiphertext = await encryptSecret(tokenSecret);
+
+    const now = Date.now();
+    const issuedAt = new Date(now).toISOString();
+    const expiresAtMs = now + validityHours * 3600 * 1000;
+    const expiresAt = new Date(expiresAtMs).toISOString();
+
+    const { error: insertErr } = await supabase.from("ble_emergency_tokens").insert({
+      token_id: tokenId,
+      account_id: accountId,
+      device_id: deviceId,
+      token_hash: tokenHash,
+      token_ciphertext: tokenCiphertext,
+      issued_at: issuedAt,
+      expires_at: expiresAt,
+    });
+
+    if (insertErr) {
+      return jsonResp({ ok: false, error: `Failed to persist BLE token: ${insertErr.message}` }, 500);
+    }
+
+    return jsonResp({
+      ok: true,
+      tokenId,
+      tokenSecret,
+      issuedAt: now,
+      expiresAt: expiresAtMs,
+      accountId,
+      deviceId,
+    }, 200);
+  }
+
+  // -------------------------------------------------------------
+  // Route 4: BLE Emergency Alert Relay Endpoint (Relay Phone -> Backend)
+  // -------------------------------------------------------------
+  if (req.method === "POST" && path.endsWith("/ble-relay-alert")) {
+    const body = await req.json();
+    const relayDeviceId = String(body.relayDeviceId ?? "ANONYMOUS_RELAY").trim();
+    const packet = body.packet;
+
+    if (!packet || typeof packet !== "object") {
+      return jsonResp({ ok: false, error: "Missing or malformed emergency alert packet" }, 400);
+    }
+
+    const {
+      protocolVersion,
+      alertId,
+      accountId,
+      senderDeviceId,
+      tokenId,
+      issuedAt,
+      expiresAt,
+      nonce,
+      alertType,
+      latitude,
+      longitude,
+      accuracyMeters,
+      emergencyMessage,
+      signature,
+    } = packet;
+
+    // 1. Structure validation
+    if (protocolVersion !== 1) {
+      return jsonResp({ ok: false, error: `Unsupported protocol version: ${protocolVersion}` }, 400);
+    }
+    if (!alertId || !accountId || !senderDeviceId || !tokenId || !signature || !nonce) {
+      return jsonResp({ ok: false, error: "Missing mandatory alert packet fields" }, 400);
+    }
+
+    // 2. Token / packet expiry checks
+    const now = Date.now();
+    if (expiresAt < now) {
+      return jsonResp({ ok: false, error: "Emergency alert token has expired" }, 400);
+    }
+    if (Math.abs(now - issuedAt) > 7 * 24 * 3600 * 1000) {
+      return jsonResp({ ok: false, error: "Alert issue timestamp exceeds validity window" }, 400);
+    }
+
+    // 3. Idempotency Check: Return existing acknowledgement if alertId was already successfully processed
+    const { data: existingAlert } = await supabase
+      .from("ble_emergency_alerts")
+      .select("alert_id, status, created_at")
+      .eq("alert_id", alertId)
+      .maybeSingle();
+
+    if (existingAlert) {
+      return jsonResp({
+        ok: true,
+        alertId: existingAlert.alert_id,
+        status: existingAlert.status,
+        acknowledged: true,
+        duplicate: true,
+      }, 200);
+    }
+
+    // 4. Retrieve short-lived signing token from DB
+    const { data: tokenRow, error: tokenErr } = await supabase
+      .from("ble_emergency_tokens")
+      .select("*")
+      .eq("token_id", tokenId)
+      .maybeSingle();
+
+    if (tokenErr || !tokenRow) {
+      return jsonResp({ ok: false, error: "Referenced BLE emergency token not found" }, 401);
+    }
+    if (tokenRow.revoked_at != null) {
+      return jsonResp({ ok: false, error: "Token has been revoked" }, 401);
+    }
+    if (tokenRow.account_id !== accountId) {
+      return jsonResp({ ok: false, error: "Token account mismatch" }, 403);
+    }
+    if (tokenRow.device_id !== senderDeviceId) {
+      return jsonResp({ ok: false, error: "Token sender device mismatch" }, 403);
+    }
+
+    // 5. Decrypt token secret and verify cryptographic signature
+    let tokenSecret: string;
+    try {
+      tokenSecret = await decryptSecret(tokenRow.token_ciphertext);
+    } catch (e: unknown) {
+      return jsonResp({ ok: false, error: `Failed to decrypt token key: ${(e as Error).message}` }, 500);
+    }
+
+    const canonicalString = buildBleCanonicalString(packet);
+    const expectedSig = await hmacSha256Hex(tokenSecret, canonicalString);
+    if (!timingSafeEqualHex(expectedSig, signature)) {
+      return jsonResp({ ok: false, error: "Invalid BLE alert packet signature" }, 401);
+    }
+
+    // 6. Anti-replay Nonce Check (atomic insert into ble_alert_nonces)
+    const { error: nonceErr } = await supabase.from("ble_alert_nonces").insert({
+      account_id: accountId,
+      nonce: String(nonce),
+      device_id: senderDeviceId,
+    });
+    if (nonceErr) {
+      return jsonResp({ ok: false, error: "Replay attack detected: nonce already consumed" }, 409);
+    }
+
+    // 7. Persist Alert in ble_emergency_alerts table
+    const { error: alertInsertErr } = await supabase.from("ble_emergency_alerts").insert({
+      alert_id: alertId,
+      account_id: accountId,
+      sender_device_id: senderDeviceId,
+      relay_device_id: relayDeviceId,
+      token_id: tokenId,
+      protocol_version: protocolVersion,
+      alert_type: alertType || "EMERGENCY",
+      latitude: latitude != null ? Number(latitude) : null,
+      longitude: longitude != null ? Number(longitude) : null,
+      accuracy_meters: accuracyMeters != null ? Number(accuracyMeters) : null,
+      emergency_message: emergencyMessage || "GuardianGrid BLE Emergency Alert",
+      signature: signature,
+      status: "RECEIVED",
+      raw_packet: packet,
+    });
+
+    if (alertInsertErr) {
+      // Handle potential race condition / concurrent duplicate
+      if (alertInsertErr.code === "23505") { // unique constraint violation
+        return jsonResp({
+          ok: true,
+          alertId,
+          status: "RECEIVED",
+          acknowledged: true,
+          duplicate: true,
+        }, 200);
+      }
+      return jsonResp({ ok: false, error: `Failed to record alert: ${alertInsertErr.message}` }, 500);
+    }
+
+    // Mark token consumed (if single-use policy or mark updated)
+    await supabase.from("ble_emergency_tokens").update({
+      consumed_at: new Date().toISOString(),
+    }).eq("token_id", tokenId);
+
+    // 8. Lookup Primary Emergency Contact for Account (Backend-only)
+    const { data: contacts } = await supabase
+      .from("guardian_emergency_contacts")
+      .select("*")
+      .eq("account_id", accountId)
+      .order("is_primary", { ascending: false })
+      .order("created_at", { ascending: true })
+      .limit(1);
+
+    const primaryContact = contacts?.[0];
+    let smsDispatched = false;
+    let smsError: string | null = null;
+    let finalAlertStatus = "RECEIVED";
+
+    if (primaryContact && primaryContact.phone_number) {
+      const mapsLink = (latitude != null && longitude != null)
+        ? `https://maps.google.com/?q=${latitude},${longitude}`
+        : "UNAVAILABLE";
+      const smsBody = `🚨 GUARDIANGRID ALERT: ${alertType || "EMERGENCY"} distress reported. Location: ${mapsLink}. Message: ${emergencyMessage || "I need immediate emergency assistance."}`;
+
+      // 9. Dispatch SMS using Backend Provider
+      const smsResult = await dispatchServerSideSms(primaryContact.phone_number, smsBody);
+
+      // Record dispatch attempt
+      await supabase.from("emergency_sms_dispatches").insert({
+        alert_id: alertId,
+        account_id: accountId,
+        recipient_phone: primaryContact.phone_number,
+        provider: smsResult.provider,
+        provider_message_id: smsResult.providerMessageId || null,
+        status: smsResult.success ? "SENT" : "FAILED",
+        error_message: smsResult.errorMessage || null,
+      });
+
+      if (smsResult.success) {
+        smsDispatched = true;
+        finalAlertStatus = "SMS_SENT";
+      } else {
+        smsError = smsResult.errorMessage || "SMS dispatch failed";
+        finalAlertStatus = "SMS_FAILED";
+      }
+    } else {
+      smsError = "No registered emergency contact found for account";
+      finalAlertStatus = "NO_CONTACT";
+    }
+
+    // Update alert status
+    await supabase.from("ble_emergency_alerts").update({
+      status: finalAlertStatus,
+      acknowledged_at: new Date().toISOString(),
+    }).eq("alert_id", alertId);
+
+    // Also optional Telegram notification if configured
+    if (TELEGRAM_BOT_TOKEN && DEFAULT_CHAT_ID) {
+      const mapsLink = (latitude != null && longitude != null)
+        ? `https://maps.google.com/?q=${latitude},${longitude}`
+        : "UNAVAILABLE";
+      const tgText = `🚨 GUARDIANGRID BLE RELAY EMERGENCY\nAlert: ${alertId}\nAccount: ${accountId}\nRelay Device: ${relayDeviceId}\nType: ${alertType}\nLocation: ${mapsLink}\nStatus: ${finalAlertStatus}`;
+      fetch(`https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ chat_id: DEFAULT_CHAT_ID, text: tgText }),
+      }).catch(() => {});
+    }
+
+    return jsonResp({
+      ok: true,
+      alertId,
+      status: finalAlertStatus,
+      smsDispatched,
+      smsError,
+      acknowledged: true,
+    }, 200);
+  }
+
+  // -------------------------------------------------------------
+  // Route 5: Dispatch Direct Emergency Alert Envelope (Standard Flow)
+  // -------------------------------------------------------------
   if (req.method === "POST" && path.endsWith("/alert")) {
     const body = await req.json();
     const incidentId = String(body.incidentId ?? "").trim();
@@ -288,7 +705,9 @@ Deno.serve(async (req: Request) => {
     return jsonResp({ ok: true, incidentId, messageId: telegramMessageId }, 200);
   }
 
-  // 4. Upload Sequential Emergency Audio WAV Chunk & Relay via Server-Side Telegram Token
+  // -------------------------------------------------------------
+  // Route 6: Upload Sequential Emergency Audio WAV Chunk
+  // -------------------------------------------------------------
   if (req.method === "POST" && path.endsWith("/audio-chunk")) {
     const form = await req.formData();
     const incidentId = String(form.get("incidentId") ?? "").trim();
@@ -309,7 +728,6 @@ Deno.serve(async (req: Request) => {
       return jsonResp({ ok: false, error: "Missing incidentId or audio WAV file" }, 400);
     }
 
-    // Verify incident ownership (prevent unauthorized device injecting audio into another host's incident)
     const { data: existingInc } = await supabase
       .from("emergency_incidents")
       .select("host_device_id")
@@ -391,7 +809,9 @@ Deno.serve(async (req: Request) => {
     }, 200);
   }
 
-  // 5. Mark Incident Recording Completed & Dispatch Completion Summary
+  // -------------------------------------------------------------
+  // Route 7: Mark Incident Recording Completed
+  // -------------------------------------------------------------
   if (req.method === "POST" && path.endsWith("/complete")) {
     const payload = await req.json();
     const incidentId = String(payload.incidentId ?? "").trim();
@@ -434,7 +854,9 @@ Deno.serve(async (req: Request) => {
     return jsonResp({ ok: true, incidentId, status: "COMPLETED", messageId: msgId }, 200);
   }
 
-  // 6. Paired Guardian Authorized Audio/Alert Retrieval (returns short-lived signed URLs ONLY for paired hosts)
+  // -------------------------------------------------------------
+  // Route 8: Paired Guardian Authorized Audio/Alert Retrieval
+  // -------------------------------------------------------------
   if (req.method === "GET" && path.endsWith("/inbox")) {
     const auth = await verifyRegisteredDeviceRequest(req, supabase, `inbox|${url.searchParams.get("incidentId") ?? "all"}`);
     if (!auth.ok || !auth.deviceId) return jsonResp({ ok: false, error: auth.reason }, auth.status);
@@ -469,7 +891,7 @@ Deno.serve(async (req: Request) => {
       for (const ch of chunks ?? []) {
         const { data: signed } = await supabase.storage
           .from(AUDIO_BUCKET)
-          .createSignedUrl(ch.storage_object_path, 300); // 5-min ephemeral private URL
+          .createSignedUrl(ch.storage_object_path, 300);
         signedChunks.push({
           chunkSequence: ch.chunk_sequence,
           isPreTrigger: ch.is_pre_trigger,
