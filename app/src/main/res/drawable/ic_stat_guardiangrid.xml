@@ -1,40 +1,35 @@
 <vector xmlns:android="http://schemas.android.com/apk/res/android"
     android:width="24dp"
     android:height="24dp"
-    android:viewportWidth="24"
-    android:viewportHeight="24">
+    android:viewportWidth="100"
+    android:viewportHeight="100">
 
-    <!-- Monochrome White Notification Silhouette for Android System Status Bar -->
-    <!-- Head -->
+    <!-- Monochrome White Notification Silhouette matching GuardianGrid Main Logo -->
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M 12,3.5 A 1.8,1.8 0 1,0 12,7.1 A 1.8,1.8 0 1,0 12,3.5 Z" />
+        android:pathData="M 14,19 L 40,36 L 38,38.5 L 20,27 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M 44,42.5 L 10,28 L 16,37 L 35,44.5 L 38,54 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M 12,40.5 L 33.5,48.5 L 35,54 L 18,47 Z" />
 
-    <!-- Central Torso -->
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M 10.9,8.5 C 11.4,8.2 12.6,8.2 13.1,8.5 C 13.3,10.5 13,14 12.5,16.5 L 12,20.5 L 11.5,16.5 C 11,14 10.7,10.5 10.9,8.5 Z" />
+        android:pathData="M 86,19 L 60,36 L 62,38.5 L 80,27 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M 56,42.5 L 90,28 L 84,37 L 65,44.5 L 62,54 Z" />
+    <path
+        android:fillColor="#FFFFFFFF"
+        android:pathData="M 88,40.5 L 66.5,48.5 L 65,54 L 82,47 Z" />
 
-    <!-- Left Wing -->
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M 10.8,9 C 8.2,7.2 4.5,5.6 1.8,6.8 C 3.4,9 6.2,11.2 9,11.8 L 10.8,10.2 Z" />
+        android:pathData="M 50,19.8 A 6.2,6.2 0 1,0 50,32.2 A 6.2,6.2 0 1,0 50,19.8 Z" />
     <path
         android:fillColor="#FFFFFFFF"
-        android:pathData="M 10.5,10.8 C 7.6,10.6 4.8,9.8 2.8,10.3 C 4.2,12.7 7,14.4 10,14.7 Z" />
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M 10.8,13 C 8.5,14 6.2,14.2 4.4,14.4 C 6,16.4 8.7,17.4 11.2,16.7 Z" />
-
-    <!-- Right Wing -->
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M 13.2,9 C 15.8,7.2 19.5,5.6 22.2,6.8 C 20.6,9 17.8,11.2 15,11.8 L 13.2,10.2 Z" />
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M 13.5,10.8 C 16.4,10.6 19.2,9.8 21.2,10.3 C 19.8,12.7 17,14.4 14,14.7 Z" />
-    <path
-        android:fillColor="#FFFFFFFF"
-        android:pathData="M 13.2,13 C 15.5,14 17.8,14.2 19.6,14.4 C 18,16.4 15.3,17.4 12.8,16.7 Z" />
+        android:pathData="M 47.6,37.2 Q 50,33.5 52.4,37.2 L 63.2,74.5 Q 64.5,80.5 58.5,80.5 L 41.5,80.5 Q 35.5,80.5 36.8,74.5 Z" />
 
 </vector>

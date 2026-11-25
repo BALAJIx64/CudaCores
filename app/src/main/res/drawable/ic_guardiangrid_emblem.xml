@@ -4,44 +4,36 @@
     android:viewportWidth="100"
     android:viewportHeight="100">
 
-    <!-- Lower Wing Feathers (Dark Accent Magenta) -->
+    <!-- Left Wing: 3 Symmetrical Geometric Blades -->
+    <path
+        android:fillColor="#AD1457"
+        android:pathData="M 14,19 L 40,36 L 38,38.5 L 20,27 Z" />
     <path
         android:fillColor="#9C1042"
-        android:pathData="M 46,50 C 36,54 26,55 18,56 C 25,64 36,68 47,65 Z" />
+        android:pathData="M 44,42.5 L 10,28 L 16,37 L 35,44.5 L 38,54 Z" />
+    <path
+        android:fillColor="#AD1457"
+        android:pathData="M 12,40.5 L 33.5,48.5 L 35,54 L 18,47 Z" />
+
+    <!-- Right Wing: 3 Symmetrical Geometric Blades -->
+    <path
+        android:fillColor="#AD1457"
+        android:pathData="M 86,19 L 60,36 L 62,38.5 L 80,27 Z" />
     <path
         android:fillColor="#9C1042"
-        android:pathData="M 54,50 C 64,54 74,55 82,56 C 75,64 64,68 53,65 Z" />
-
-    <!-- Middle Wing Feathers (Vibrant Magenta) -->
+        android:pathData="M 56,42.5 L 90,28 L 84,37 L 65,44.5 L 62,54 Z" />
     <path
-        android:fillColor="#D81B60"
-        android:pathData="M 45,41 C 33,40 20,37 11,39 C 17,49 29,56 42,57 L 45,48 Z" />
-    <path
-        android:fillColor="#D81B60"
-        android:pathData="M 55,41 C 67,40 80,37 89,39 C 83,49 71,56 58,57 L 55,48 Z" />
+        android:fillColor="#AD1457"
+        android:pathData="M 88,40.5 L 66.5,48.5 L 65,54 L 82,47 Z" />
 
-    <!-- Upper Outstretched Wings (Primary Vibrant Magenta) -->
+    <!-- Central Guardian Head -->
     <path
         android:fillColor="#E0115F"
-        android:pathData="M 46,34 C 34,26 18,19 6,24 C 13,33 26,42 38,45 L 46,39 Z" />
+        android:pathData="M 50,19.8 A 6.2,6.2 0 1,0 50,32.2 A 6.2,6.2 0 1,0 50,19.8 Z" />
+
+    <!-- Central Guardian Torso (Rounded A-Frame) -->
     <path
         android:fillColor="#E0115F"
-        android:pathData="M 54,34 C 66,26 82,19 94,24 C 87,33 74,42 62,45 L 54,39 Z" />
-
-    <!-- Stylized Central Guardian Body -->
-    <!-- Head -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M 50,14 A 6,6 0 1,0 50,26 A 6,6 0 1,0 50,14 Z" />
-
-    <!-- Torso Crest -->
-    <path
-        android:fillColor="#E0115F"
-        android:pathData="M 46,32 C 48,29 52,29 54,32 C 55,42 54,58 52,66 L 50,82 L 48,66 C 46,58 45,42 46,32 Z" />
-
-    <!-- Core Inner Light Line -->
-    <path
-        android:fillColor="#FFFFFF"
-        android:pathData="M 49,36 L 51,36 L 50.5,68 L 49.5,68 Z" />
+        android:pathData="M 47.6,37.2 Q 50,33.5 52.4,37.2 L 63.2,74.5 Q 64.5,80.5 58.5,80.5 L 41.5,80.5 Q 35.5,80.5 36.8,74.5 Z" />
 
 </vector>

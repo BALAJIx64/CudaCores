@@ -28,20 +28,32 @@ import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.MyLocation
 import androidx.compose.material.icons.filled.PersonAdd
+import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.ShareLocation
+import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.Checkbox
+import androidx.compose.material3.CheckboxDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.FilledTonalIconButton
+import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilterChipDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.LinearProgressIndicator
+import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
@@ -49,6 +61,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -71,11 +84,15 @@ import com.guardiangrid.GuardianGridApp
 import com.guardiangrid.core.interfaces.EmergencyCommunicator
 import com.guardiangrid.core.models.DeliveryStatus
 import com.guardiangrid.core.models.DistressType
+import com.guardiangrid.core.models.EmergencyContact
+import com.guardiangrid.core.models.LocationData
 import com.guardiangrid.core.state.DurableIncident
 import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.core.state.EmergencyStateHolder
 import com.guardiangrid.core.state.MonitoringServiceState
 import com.guardiangrid.location.GuardianLocationManager
+import com.guardiangrid.location.LiveLocationShareManager
+import com.guardiangrid.location.LiveLocationShareState
 import com.guardiangrid.modules.audio.AudioCaptureStatus
 import com.guardiangrid.modules.audio.AudioModuleStub
 import com.guardiangrid.modules.audio.LiveAudioMetrics
@@ -190,19 +207,22 @@ fun DashboardScreen(
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     MonitoringStatusBadge(state = state.monitoringServiceState)
 
-                    IconButton(
+                    FilledTonalIconButton(
                         onClick = onNavigateToSettings,
-                        modifier = Modifier.size(36.dp)
+                        modifier = Modifier.size(44.dp),
+                        colors = IconButtonDefaults.filledTonalIconButtonColors(
+                            containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                            contentColor = TextSecondary
+                        )
                     ) {
                         Icon(
                             imageVector = Icons.Default.Settings,
                             contentDescription = "Settings",
-                            tint = TextSecondary,
-                            modifier = Modifier.size(22.dp)
+                            modifier = Modifier.size(20.dp)
                         )
                     }
                 }
@@ -342,11 +362,11 @@ fun DashboardScreen(
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = DarkSurface),
-                shape = RoundedCornerShape(18.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                shape = RoundedCornerShape(20.dp),
                 border = CardDefaults.outlinedCardBorder().copy(
                     brush = androidx.compose.ui.graphics.SolidColor(
-                        if (isServiceActive) SafeGreen.copy(alpha = 0.3f) else DarkBorder
+                        if (isServiceActive) SafeGreen.copy(alpha = 0.35f) else MaterialTheme.colorScheme.outline
                     )
                 )
             ) {
@@ -359,14 +379,14 @@ fun DashboardScreen(
                     ) {
                         Box(
                             modifier = Modifier
-                                .size(44.dp)
-                                .clip(CircleShape)
-                                .background(statusAccent.copy(alpha = 0.15f))
-                                .border(1.5.dp, statusAccent.copy(alpha = 0.4f), CircleShape),
+                                .size(48.dp)
+                                .clip(RoundedCornerShape(14.dp))
+                                .background(statusAccent.copy(alpha = 0.14f))
+                                .border(1.dp, statusAccent.copy(alpha = 0.35f), RoundedCornerShape(14.dp)),
                             contentAlignment = Alignment.Center
                         ) {
                             Icon(
-                                imageVector = if (isServiceActive) Icons.Default.Security else Icons.Default.Security,
+                                imageVector = Icons.Default.Security,
                                 contentDescription = null,
                                 tint = statusAccent,
                                 modifier = Modifier.size(24.dp)
@@ -378,17 +398,15 @@ fun DashboardScreen(
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
                                 text = statusTitle,
-                                fontSize = 15.sp,
+                                style = MaterialTheme.typography.titleMedium,
                                 fontWeight = FontWeight.Black,
-                                color = if (isServiceActive) TextPrimary else TextSecondary,
-                                letterSpacing = 0.5.sp
+                                color = if (isServiceActive) TextPrimary else TextSecondary
                             )
                             Spacer(modifier = Modifier.height(2.dp))
                             Text(
                                 text = statusDescription,
-                                fontSize = 11.sp,
-                                color = TextSecondary,
-                                lineHeight = 15.sp
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
                             )
                         }
                     }
@@ -415,12 +433,12 @@ fun DashboardScreen(
                         enabled = !isTransitioning,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(44.dp),
+                            .height(48.dp),
                         colors = ButtonDefaults.buttonColors(
                             containerColor = if (isServiceActive) DarkSurfaceHighlight else BrandMagenta,
                             disabledContainerColor = DarkSurfaceHighlight
                         ),
-                        shape = RoundedCornerShape(10.dp)
+                        shape = RoundedCornerShape(14.dp)
                     ) {
                         Text(
                             text = when (state.monitoringServiceState) {
@@ -431,8 +449,7 @@ fun DashboardScreen(
                                 MonitoringServiceState.ERROR -> "Retry Activation"
                                 MonitoringServiceState.STOPPED -> "Activate Protection"
                             },
-                            fontWeight = FontWeight.Bold,
-                            fontSize = 13.sp,
+                            style = MaterialTheme.typography.labelLarge,
                             color = if (isServiceActive) EmergencyLightRed else Color.White
                         )
                     }
@@ -455,75 +472,83 @@ fun DashboardScreen(
                 // Primary Manual SOS Control (Hold 0.8s prevents accidental pocket/scroll taps)
                 Box(
                     modifier = Modifier
-                        .size(168.dp)
+                        .size(188.dp)
                         .clip(CircleShape)
-                        .background(EmergencyRed)
-                        .border(4.dp, EmergencyLightRed.copy(alpha = 0.55f), CircleShape)
-                        .pointerInput(Unit) {
-                            detectTapGestures(
-                                onPress = {
-                                    holdHintMessage = ""
-                                    var triggered = false
-                                    val holdJob = scope.launch {
-                                        val steps = 16
-                                        val totalMs = 800L
-                                        for (i in 1..steps) {
-                                            delay(totalMs / steps)
-                                            sosHoldProgress = i.toFloat() / steps
-                                        }
-                                        triggered = true
-                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        val freshLoc = locationManager.acquireFreshLocation(2500L)
-                                        coordinator.triggerManualSos("Dashboard_SOS_Button", freshLoc)
-                                        sosHoldProgress = 0f
-                                    }
-                                    try {
-                                        awaitRelease()
-                                    } finally {
-                                        holdJob.cancel()
-                                        if (!triggered) {
-                                            sosHoldProgress = 0f
-                                            holdHintMessage = "Hold SOS button briefly (0.8s) to dispatch alert"
-                                        }
-                                    }
-                                }
-                            )
-                        },
+                        .background(EmergencyRed.copy(alpha = 0.14f))
+                        .border(1.5.dp, EmergencyRed.copy(alpha = 0.30f), CircleShape),
                     contentAlignment = Alignment.Center
                 ) {
-                    if (sosHoldProgress > 0f) {
-                        CircularProgressIndicator(
-                            progress = { sosHoldProgress },
-                            modifier = Modifier.size(156.dp),
-                            color = Color.White,
-                            strokeWidth = 6.dp,
-                            trackColor = Color.Transparent
-                        )
-                    }
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        verticalArrangement = Arrangement.Center
+                    Box(
+                        modifier = Modifier
+                            .size(164.dp)
+                            .clip(CircleShape)
+                            .background(EmergencyRed)
+                            .border(3.dp, EmergencyLightRed.copy(alpha = 0.65f), CircleShape)
+                            .pointerInput(Unit) {
+                                detectTapGestures(
+                                    onPress = {
+                                        holdHintMessage = ""
+                                        var triggered = false
+                                        val holdJob = scope.launch {
+                                            val steps = 16
+                                            val totalMs = 800L
+                                            for (i in 1..steps) {
+                                                delay(totalMs / steps)
+                                                sosHoldProgress = i.toFloat() / steps
+                                            }
+                                            triggered = true
+                                            haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                            val freshLoc = locationManager.acquireFreshLocation(2500L)
+                                            coordinator.triggerManualSos("Dashboard_SOS_Button", freshLoc)
+                                            sosHoldProgress = 0f
+                                        }
+                                        try {
+                                            awaitRelease()
+                                        } finally {
+                                            holdJob.cancel()
+                                            if (!triggered) {
+                                                sosHoldProgress = 0f
+                                                holdHintMessage = "Hold SOS button briefly (0.8s) to dispatch alert"
+                                            }
+                                        }
+                                    }
+                                )
+                            },
+                        contentAlignment = Alignment.Center
                     ) {
-                        Icon(
-                            imageVector = Icons.Default.Campaign,
-                            contentDescription = "SOS Emergency Trigger",
-                            tint = Color.White,
-                            modifier = Modifier.size(44.dp)
-                        )
-                        Spacer(modifier = Modifier.height(2.dp))
-                        Text(
-                            text = "SOS",
-                            fontSize = 28.sp,
-                            fontWeight = FontWeight.Black,
-                            color = Color.White,
-                            letterSpacing = 1.sp
-                        )
-                        Text(
-                            text = if (sosHoldProgress > 0f) "KEEP HOLDING..." else "HOLD FOR HELP",
-                            fontSize = 9.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White.copy(alpha = 0.9f)
-                        )
+                        if (sosHoldProgress > 0f) {
+                            CircularProgressIndicator(
+                                progress = { sosHoldProgress },
+                                modifier = Modifier.size(152.dp),
+                                color = Color.White,
+                                strokeWidth = 6.dp,
+                                trackColor = Color.Transparent
+                            )
+                        }
+                        Column(
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Campaign,
+                                contentDescription = "SOS Emergency Trigger",
+                                tint = Color.White,
+                                modifier = Modifier.size(44.dp)
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "SOS",
+                                fontSize = 28.sp,
+                                fontWeight = FontWeight.Black,
+                                color = Color.White,
+                                letterSpacing = 1.2.sp
+                            )
+                            Text(
+                                text = if (sosHoldProgress > 0f) "KEEP HOLDING..." else "HOLD FOR HELP",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = Color.White.copy(alpha = 0.92f)
+                            )
+                        }
                     }
                 }
 
@@ -609,6 +634,21 @@ fun DashboardScreen(
                     }
                 }
             }
+        }
+
+        // --- C2. Share Your Location (Optional, Standalone Live Location Sharing below SOS) ---
+        item {
+            ShareLocationSection(
+                liveLocationShareManager = container?.liveLocationShareManager,
+                locationManager = locationManager,
+                currentLocation = state.currentLocation,
+                isLocationPermissionGranted = state.isLocationPermissionGranted,
+                isSmsPermissionGranted = state.isSmsPermissionGranted,
+                isGpsEnabled = state.isGpsEnabled,
+                trustedContacts = state.trustedContacts,
+                onRequestPermissions = { showPermissionDialog = true },
+                onNavigateToContacts = onNavigateToContacts
+            )
         }
 
         // --- D. Monitoring Health (Real Subsystem State Grid) ---
@@ -870,51 +910,57 @@ private fun HealthIndicatorCard(
 ) {
     Card(
         modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(16.dp),
         border = CardDefaults.outlinedCardBorder().copy(
             brush = androidx.compose.ui.graphics.SolidColor(
-                if (isActive) SafeGreen.copy(alpha = 0.25f) else DarkBorder
+                if (isActive) SafeGreen.copy(alpha = 0.30f) else MaterialTheme.colorScheme.outline
             )
         )
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(modifier = Modifier.padding(14.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = icon,
-                    contentDescription = null,
-                    tint = if (isActive) SafeGreen else TextDisabled,
-                    modifier = Modifier.size(18.dp)
-                )
                 Box(
                     modifier = Modifier
-                        .size(7.dp)
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(if (isActive) SafeGreen.copy(alpha = 0.14f) else DarkSurfaceElevated),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = icon,
+                        contentDescription = null,
+                        tint = if (isActive) SafeGreen else TextDisabled,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
                         .clip(CircleShape)
                         .background(if (isActive) SafeGreen else TextDisabled)
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             Text(
                 text = title,
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.labelMedium,
                 color = TextSecondary
             )
             Text(
                 text = status,
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp),
                 color = if (isActive) TextPrimary else TextDisabled
             )
             Text(
                 text = detail,
-                fontSize = 10.sp,
+                style = MaterialTheme.typography.bodySmall.copy(fontSize = 10.sp),
                 color = TextTertiary,
                 maxLines = 1
             )
@@ -941,46 +987,56 @@ private fun MicrophoneTelemetryCard(
 
     Card(
         modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(16.dp),
         border = CardDefaults.outlinedCardBorder().copy(
             brush = androidx.compose.ui.graphics.SolidColor(
-                if (isPhysicalMicActive) SafeGreen.copy(alpha = 0.3f) else if (hasError) EmergencyRed.copy(alpha = 0.3f) else DarkBorder
+                if (isPhysicalMicActive) SafeGreen.copy(alpha = 0.35f) else if (hasError) EmergencyRed.copy(alpha = 0.35f) else MaterialTheme.colorScheme.outline
             )
         )
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(modifier = Modifier.padding(14.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.Default.Mic,
-                    contentDescription = null,
-                    tint = if (isPhysicalMicActive) SafeGreen else if (hasError) EmergencyRed else TextDisabled,
-                    modifier = Modifier.size(18.dp)
-                )
                 Box(
                     modifier = Modifier
-                        .size(7.dp)
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(
+                            if (isPhysicalMicActive) SafeGreen.copy(alpha = 0.14f)
+                            else if (hasError) EmergencyRed.copy(alpha = 0.14f)
+                            else DarkSurfaceElevated
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.Mic,
+                        contentDescription = null,
+                        tint = if (isPhysicalMicActive) SafeGreen else if (hasError) EmergencyRed else TextDisabled,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
                         .clip(CircleShape)
                         .background(if (isPhysicalMicActive) SafeGreen else if (hasError) EmergencyRed else TextDisabled)
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             Text(
                 text = "Microphone",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.labelMedium,
                 color = TextSecondary
             )
             Text(
                 text = if (isPhysicalMicActive) "Listening" else if (audioMetrics.isUsingMockCapture) "Simulated" else if (hasError) "Mic Error" else "Idle",
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp),
                 color = if (isPhysicalMicActive) TextPrimary else if (hasError) EmergencyLightRed else TextDisabled
             )
 
@@ -1027,42 +1083,53 @@ private fun MotionTelemetryCard(
 
     Card(
         modifier = modifier,
-        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-        shape = RoundedCornerShape(12.dp),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(16.dp),
         border = CardDefaults.outlinedCardBorder().copy(
             brush = androidx.compose.ui.graphics.SolidColor(
-                if (isActive) SafeGreen.copy(alpha = 0.3f)
-                else if (!isAccelAvailable) EmergencyRed.copy(alpha = 0.3f)
-                else DarkBorder
+                if (isActive) SafeGreen.copy(alpha = 0.35f)
+                else if (!isAccelAvailable) EmergencyRed.copy(alpha = 0.35f)
+                else MaterialTheme.colorScheme.outline
             )
         )
     ) {
-        Column(modifier = Modifier.padding(12.dp)) {
+        Column(modifier = Modifier.padding(14.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Icon(
-                    imageVector = Icons.AutoMirrored.Filled.DirectionsRun,
-                    contentDescription = "Motion Sensors",
-                    tint = if (isActive) SafeGreen else if (!isAccelAvailable) EmergencyRed else TextDisabled,
-                    modifier = Modifier.size(18.dp)
-                )
                 Box(
                     modifier = Modifier
-                        .size(7.dp)
+                        .size(32.dp)
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(
+                            if (isActive) SafeGreen.copy(alpha = 0.14f)
+                            else if (!isAccelAvailable) EmergencyRed.copy(alpha = 0.14f)
+                            else DarkSurfaceElevated
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.DirectionsRun,
+                        contentDescription = "Motion Sensors",
+                        tint = if (isActive) SafeGreen else if (!isAccelAvailable) EmergencyRed else TextDisabled,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Box(
+                    modifier = Modifier
+                        .size(8.dp)
                         .clip(CircleShape)
                         .background(if (isActive) SafeGreen else if (!isAccelAvailable) EmergencyRed else TextDisabled)
                 )
             }
 
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(10.dp))
 
             Text(
                 text = "Motion Sensors",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.SemiBold,
+                style = MaterialTheme.typography.labelMedium,
                 color = TextSecondary
             )
             Text(
@@ -1071,8 +1138,7 @@ private fun MotionTelemetryCard(
                     isActive -> "Active"
                     else -> "Standby"
                 },
-                fontSize = 13.sp,
-                fontWeight = FontWeight.Bold,
+                style = MaterialTheme.typography.titleMedium.copy(fontSize = 14.sp),
                 color = when {
                     !isAccelAvailable -> EmergencyLightRed
                     isActive -> TextPrimary
@@ -1107,6 +1173,461 @@ private fun MotionTelemetryCard(
                     color = if (!isAccelAvailable) EmergencyRed else TextTertiary,
                     maxLines = 1
                 )
+            }
+        }
+    }
+}
+
+/**
+ * Standalone Material 3 "Share your location" section (completely separate from SOS).
+ * Lets the user view current location status, pick one or more trusted contacts,
+ * choose a duration (e.g. 1 hour or 8 hours), send a live auto-expiring link via SMS,
+ * and stop sharing early at any time.
+ */
+@Composable
+private fun ShareLocationSection(
+    liveLocationShareManager: LiveLocationShareManager?,
+    locationManager: GuardianLocationManager,
+    currentLocation: LocationData?,
+    isLocationPermissionGranted: Boolean,
+    isSmsPermissionGranted: Boolean,
+    isGpsEnabled: Boolean,
+    trustedContacts: List<EmergencyContact>,
+    onRequestPermissions: () -> Unit,
+    onNavigateToContacts: () -> Unit
+) {
+    val shareState by liveLocationShareManager?.state?.collectAsState()
+        ?: remember { mutableStateOf(LiveLocationShareState()) }
+    val scope = rememberCoroutineScope()
+
+    var isLoadingLocation by remember { mutableStateOf(false) }
+    var selectedContactIds by remember(trustedContacts) {
+        mutableStateOf(
+            trustedContacts.filter { it.isPrimary }.map { it.id }.toSet()
+        )
+    }
+    var selectedDurationMinutes by remember { mutableIntStateOf(60) } // Default: 1 hour
+    var localErrorMessage by remember { mutableStateOf<String?>(null) }
+
+    // Attempt initial fix when permission is granted and location is not yet loaded
+    LaunchedEffect(isLocationPermissionGranted, currentLocation == null) {
+        if (isLocationPermissionGranted && currentLocation == null && isGpsEnabled) {
+            isLoadingLocation = true
+            locationManager.acquireFreshLocation(2500L)
+            isLoadingLocation = false
+        }
+    }
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+        shape = RoundedCornerShape(20.dp),
+        border = CardDefaults.outlinedCardBorder().copy(
+            brush = androidx.compose.ui.graphics.SolidColor(
+                if (shareState.isSharing) SafeGreen.copy(alpha = 0.40f) else MaterialTheme.colorScheme.outline
+            )
+        )
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(18.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            // Section Header
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(10.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .size(40.dp)
+                            .clip(RoundedCornerShape(12.dp))
+                            .background(
+                                if (shareState.isSharing) SafeGreen.copy(alpha = 0.14f)
+                                else BrandMagenta.copy(alpha = 0.14f)
+                            ),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.ShareLocation,
+                            contentDescription = null,
+                            tint = if (shareState.isSharing) SafeGreen else BrandMagenta,
+                            modifier = Modifier.size(22.dp)
+                        )
+                    }
+                    Column {
+                        Text(
+                            text = "Share your location",
+                            style = MaterialTheme.typography.titleMedium,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Optional live link via SMS • Separate from SOS",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = TextSecondary
+                        )
+                    }
+                }
+
+                if (shareState.isSharing) {
+                    Surface(
+                        shape = RoundedCornerShape(16.dp),
+                        color = SafeGreen.copy(alpha = 0.16f)
+                    ) {
+                        Text(
+                            text = "LIVE",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = SafeGreen,
+                            modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp)
+                        )
+                    }
+                }
+            }
+
+            // Current Location Display (Loading, Permission Denied, Unavailable, or Active Fix)
+            Surface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(14.dp),
+                color = DarkSurfaceElevated
+            ) {
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(12.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(
+                        modifier = Modifier.weight(1f),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp)
+                    ) {
+                        if (isLoadingLocation) {
+                            CircularProgressIndicator(
+                                modifier = Modifier.size(18.dp),
+                                strokeWidth = 2.dp,
+                                color = BrandMagenta
+                            )
+                        } else {
+                            Icon(
+                                imageVector = Icons.Default.MyLocation,
+                                contentDescription = null,
+                                tint = when {
+                                    !isLocationPermissionGranted -> WarningAmber
+                                    currentLocation != null -> SafeGreen
+                                    else -> EmergencyLightRed
+                                },
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                        Column {
+                            Text(
+                                text = when {
+                                    !isLocationPermissionGranted -> "Location permission denied"
+                                    isLoadingLocation -> "Acquiring current location..."
+                                    currentLocation != null -> "%.5f, %.5f".format(
+                                        Locale.US,
+                                        currentLocation.latitude,
+                                        currentLocation.longitude
+                                    )
+                                    !isGpsEnabled -> "Location services turned off"
+                                    else -> "Current location unavailable"
+                                },
+                                style = MaterialTheme.typography.bodyMedium,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = when {
+                                    !isLocationPermissionGranted -> "Grant location access to share live updates."
+                                    isLoadingLocation -> "Waiting for GPS or network fix..."
+                                    currentLocation != null -> "Accuracy ±${currentLocation.accuracyMeters.toInt()}m (${currentLocation.provider})"
+                                    else -> "Enable GPS and tap Refresh to retry."
+                                },
+                                style = MaterialTheme.typography.bodySmall,
+                                color = TextSecondary
+                            )
+                        }
+                    }
+
+                    if (!isLocationPermissionGranted) {
+                        TextButton(onClick = onRequestPermissions) {
+                            Text("Grant", color = WarningAmber, fontWeight = FontWeight.Bold)
+                        }
+                    } else if (!isLoadingLocation) {
+                        IconButton(
+                            onClick = {
+                                scope.launch {
+                                    isLoadingLocation = true
+                                    locationManager.acquireFreshLocation(2500L)
+                                    isLoadingLocation = false
+                                }
+                            },
+                            modifier = Modifier.size(36.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Refresh,
+                                contentDescription = "Refresh Location",
+                                tint = TextSecondary,
+                                modifier = Modifier.size(18.dp)
+                            )
+                        }
+                    }
+                }
+            }
+
+            if (shareState.isSharing) {
+                // Active Live Sharing Status + Stop Sharing Early
+                val remainingMinutes = ((shareState.expiresAtEpochMs - System.currentTimeMillis()) / 60_000L)
+                    .coerceAtLeast(0L)
+                val lastUpdateText = if (shareState.lastUpdatedEpochMs > 0L) {
+                    SimpleDateFormat("HH:mm:ss", Locale.getDefault()).format(Date(shareState.lastUpdatedEpochMs))
+                } else {
+                    "Just now"
+                }
+
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(14.dp),
+                    color = SafeGreen.copy(alpha = 0.08f)
+                ) {
+                    Column(
+                        modifier = Modifier.padding(12.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
+                        Text(
+                            text = "Sharing with ${shareState.recipientNames.joinToString(", ")}",
+                            style = MaterialTheme.typography.bodyMedium,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Time left: ${remainingMinutes}m • Last update: $lastUpdateText",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = SafeGreen
+                        )
+                        shareState.shareUrl?.let { url ->
+                            Text(
+                                text = url,
+                                style = MaterialTheme.typography.bodySmall,
+                                fontFamily = FontFamily.Monospace,
+                                color = TextSecondary,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+
+                Button(
+                    onClick = { liveLocationShareManager?.stopSharing() },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = EmergencyRed),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.StopCircle,
+                        contentDescription = null,
+                        tint = Color.White,
+                        modifier = Modifier.size(18.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text(
+                        text = "Stop Sharing Early",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Color.White
+                    )
+                }
+            } else {
+                // Contact Selection
+                Text(
+                    text = "Select contacts",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TextSecondary
+                )
+
+                if (trustedContacts.isEmpty()) {
+                    OutlinedButton(
+                        onClick = onNavigateToContacts,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PersonAdd,
+                            contentDescription = null,
+                            tint = BrandMagenta,
+                            modifier = Modifier.size(18.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text("Add Trusted Contacts", color = BrandMagenta)
+                    }
+                } else {
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        trustedContacts.forEach { contact ->
+                            val isSelected = selectedContactIds.contains(contact.id)
+                            Surface(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable {
+                                        selectedContactIds = if (isSelected) {
+                                            selectedContactIds - contact.id
+                                        } else {
+                                            selectedContactIds + contact.id
+                                        }
+                                    },
+                                shape = RoundedCornerShape(12.dp),
+                                color = if (isSelected) BrandMagenta.copy(alpha = 0.12f) else DarkSurfaceElevated,
+                                border = BorderStroke(
+                                    1.dp,
+                                    if (isSelected) BrandMagenta.copy(alpha = 0.45f) else DarkBorder
+                                )
+                            ) {
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Checkbox(
+                                        checked = isSelected,
+                                        onCheckedChange = { checked ->
+                                            selectedContactIds = if (checked) {
+                                                selectedContactIds + contact.id
+                                            } else {
+                                                selectedContactIds - contact.id
+                                            }
+                                        },
+                                        colors = CheckboxDefaults.colors(
+                                            checkedColor = BrandMagenta,
+                                            uncheckedColor = TextSecondary
+                                        )
+                                    )
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = contact.name,
+                                            style = MaterialTheme.typography.bodyMedium,
+                                            fontWeight = FontWeight.SemiBold,
+                                            color = TextPrimary
+                                        )
+                                        Text(
+                                            text = "${contact.phoneNumber} • ${contact.relationship}",
+                                            style = MaterialTheme.typography.bodySmall,
+                                            color = TextSecondary
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // Duration Selection (1 hour, 8 hours, etc.)
+                Text(
+                    text = "Sharing duration",
+                    style = MaterialTheme.typography.labelMedium,
+                    color = TextSecondary
+                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp)
+                ) {
+                    val durations = listOf(
+                        30 to "30 min",
+                        60 to "1 hour",
+                        480 to "8 hours"
+                    )
+                    durations.forEach { (mins, label) ->
+                        FilterChip(
+                            selected = selectedDurationMinutes == mins,
+                            onClick = { selectedDurationMinutes = mins },
+                            label = { Text(label) },
+                            colors = FilterChipDefaults.filterChipColors(
+                                selectedContainerColor = BrandMagenta.copy(alpha = 0.20f),
+                                selectedLabelColor = BrandMagenta
+                            )
+                        )
+                    }
+                }
+
+                // Clear Pre-Send Disclosure
+                val durationDisplay = when (selectedDurationMinutes) {
+                    60 -> "1 hour"
+                    480 -> "8 hours"
+                    else -> "$selectedDurationMinutes minutes"
+                }
+                Text(
+                    text = "Selected contacts will receive an SMS with a private, auto-expiring link showing your live location for $durationDisplay. Updates stop automatically when the timer ends or when you tap Stop Sharing.",
+                    style = MaterialTheme.typography.bodySmall,
+                    color = TextSecondary
+                )
+
+                if (!isSmsPermissionGranted) {
+                    OutlinedButton(
+                        onClick = onRequestPermissions,
+                        modifier = Modifier.fillMaxWidth(),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Text("Grant SMS Permission to Send Link", color = WarningAmber)
+                    }
+                }
+
+                val displayError = localErrorMessage ?: shareState.errorMessage
+                if (!displayError.isNullOrBlank()) {
+                    Text(
+                        text = displayError,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = EmergencyLightRed
+                    )
+                }
+
+                val selectedContacts = trustedContacts.filter { selectedContactIds.contains(it.id) }
+                Button(
+                    onClick = {
+                        localErrorMessage = null
+                        val mgr = liveLocationShareManager
+                        if (mgr == null) {
+                            localErrorMessage = "Live location manager unavailable."
+                        } else {
+                            scope.launch {
+                                mgr.startSharing(selectedContacts, selectedDurationMinutes)
+                            }
+                        }
+                    },
+                    enabled = selectedContacts.isNotEmpty() &&
+                        isLocationPermissionGranted &&
+                        currentLocation != null &&
+                        isSmsPermissionGranted &&
+                        !shareState.isStarting,
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(48.dp),
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = BrandMagenta,
+                        disabledContainerColor = DarkSurfaceHighlight
+                    ),
+                    shape = RoundedCornerShape(14.dp)
+                ) {
+                    if (shareState.isStarting) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(18.dp),
+                            strokeWidth = 2.dp,
+                            color = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                    }
+                    Text(
+                        text = if (shareState.isStarting) "Starting Live Share..." else "Continue",
+                        style = MaterialTheme.typography.labelLarge,
+                        color = Color.White
+                    )
+                }
             }
         }
     }

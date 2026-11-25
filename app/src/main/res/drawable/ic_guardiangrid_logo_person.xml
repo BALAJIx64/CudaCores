@@ -1,0 +1,17 @@
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="96dp"
+    android:height="96dp"
+    android:viewportWidth="100"
+    android:viewportHeight="100">
+
+    <!-- Central Guardian Head (Exact geometry from ic_guardiangrid_emblem) -->
+    <path
+        android:fillColor="#E0115F"
+        android:pathData="M 50,19.8 A 6.2,6.2 0 1,0 50,32.2 A 6.2,6.2 0 1,0 50,19.8 Z" />
+
+    <!-- Central Guardian Torso (Exact geometry from ic_guardiangrid_emblem) -->
+    <path
+        android:fillColor="#E0115F"
+        android:pathData="M 47.6,37.2 Q 50,33.5 52.4,37.2 L 63.2,74.5 Q 64.5,80.5 58.5,80.5 L 41.5,80.5 Q 35.5,80.5 36.8,74.5 Z" />
+
+</vector>
