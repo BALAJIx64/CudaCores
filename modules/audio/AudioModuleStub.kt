@@ -21,14 +21,19 @@ import java.io.File
  */
 class AudioModuleStub(
     cacheDirectory: File? = null,
-    modelDirectory: File? = null
+    modelDirectory: File? = null,
+    audioConfig: AudioDetectionConfig = AudioDetectionConfig()
 ) : AudioDistressDetector, AudioEvidenceRecorder {
 
     // Core Subsystem Components (10-second volatile RAM rolling buffer)
     val circularBuffer: CircularAudioBuffer = CircularAudioBuffer(durationMs = 10_000L, sampleRate = 16000)
     val captureManager: AudioCaptureManager = AudioCaptureManager(sampleRate = 16000, circularBuffer = circularBuffer)
-    val screamClassifier: ScreamDistressClassifier = ScreamDistressClassifier(modelDirectory, circularBuffer)
+    val screamClassifier: ScreamDistressClassifier = ScreamDistressClassifier(modelDirectory, circularBuffer, audioConfig)
     val evidenceRecorder: TwoStageAudioEvidenceRecorder = TwoStageAudioEvidenceRecorder(circularBuffer, captureManager, cacheDirectory)
+
+    fun updateDetectionConfig(config: AudioDetectionConfig) {
+        screamClassifier.updateConfig(config)
+    }
 
     val liveMetrics: StateFlow<LiveAudioMetrics>
         get() = captureManager.liveMetrics
@@ -84,7 +89,7 @@ class AudioModuleStub(
         incidentId: String,
         preTriggerDurationMs: Long = 10_000L,
         chunkDurationMs: Long = 10_000L,
-        maxRecordingDurationMs: Long = 300_000L
+        maxRecordingDurationMs: Long = 60_000L
     ): IncidentAudioRelaySession {
         return evidenceRecorder.startIncidentRelaySession(
             incidentId = incidentId,

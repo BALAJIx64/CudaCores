@@ -58,8 +58,10 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.guardiangrid.core.models.DeliveryChannel
 import com.guardiangrid.core.models.DeliveryStatus
+import com.guardiangrid.core.state.AudioEvidenceUploadProgress
 import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.core.state.EmergencyStateHolder
+import com.guardiangrid.core.state.EvidenceUploadStage
 import com.guardiangrid.core.state.MonitoringServiceState
 import com.guardiangrid.ui.theme.BrandMagenta
 import com.guardiangrid.ui.theme.DarkBackground
@@ -360,7 +362,7 @@ fun EmergencyAlertScreen(
                     Text(
                         text = if (validEvidenceSegment != null) {
                             val f = File(validEvidenceSegment.filePath)
-                            "WAV Audio (${f.length() / 1024} KB) captured and stored safely in private storage:\n${f.name}"
+                            "Pre-Trigger + Sequential 10s WAVs (${f.length() / 1024} KB latest) stored privately on-device:\n${f.name}"
                         } else {
                             "Acoustic pre-incident buffer capturing. Stored in private app storage once stage one buffer flushes."
                         },
@@ -368,6 +370,64 @@ fun EmergencyAlertScreen(
                         color = TextSecondary,
                         lineHeight = 15.sp
                     )
+
+                    val audioPipeline = state.audioUploadProgress.filter { it.incidentId == incident?.incidentId }
+                    if (audioPipeline.isNotEmpty()) {
+                        Spacer(modifier = Modifier.height(10.dp))
+                        Text(
+                            text = "AUDIO CHUNK DELIVERY STATUS",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Black,
+                            color = TextTertiary,
+                            letterSpacing = 0.8.sp
+                        )
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                            audioPipeline.forEach { entry ->
+                                val (stageLabel, stageColor) = when (entry.stage) {
+                                    EvidenceUploadStage.CAPTURED -> "Captured" to TextSecondary
+                                    EvidenceUploadStage.QUEUED -> "Queued" to WarningAmber
+                                    EvidenceUploadStage.UPLOADING -> "Uploading" to InfoBlue
+                                    EvidenceUploadStage.DELIVERED -> "Delivered" to SafeGreen
+                                    EvidenceUploadStage.FAILED -> "Failed" to EmergencyRed
+                                }
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .clip(RoundedCornerShape(8.dp))
+                                        .background(DarkSurfaceElevated)
+                                        .padding(horizontal = 10.dp, vertical = 6.dp),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Column(modifier = Modifier.weight(1f)) {
+                                        Text(
+                                            text = "${entry.label} • ${"%.1f".format(Locale.US, entry.durationMs / 1000.0)}s",
+                                            fontSize = 11.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = TextPrimary
+                                        )
+                                        entry.detail?.let { det ->
+                                            Text(text = det, fontSize = 10.sp, color = TextSecondary)
+                                        }
+                                    }
+                                    Box(
+                                        modifier = Modifier
+                                            .clip(RoundedCornerShape(6.dp))
+                                            .background(stageColor.copy(alpha = 0.16f))
+                                            .padding(horizontal = 8.dp, vertical = 3.dp)
+                                    ) {
+                                        Text(
+                                            text = stageLabel.uppercase(),
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Black,
+                                            color = stageColor
+                                        )
+                                    }
+                                }
+                            }
+                        }
+                    }
                 }
             }
         }

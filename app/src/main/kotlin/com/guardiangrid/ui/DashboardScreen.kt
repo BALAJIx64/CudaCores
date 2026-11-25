@@ -130,7 +130,8 @@ fun DashboardScreen(
     onNavigateToIncidents: () -> Unit = {},
     onNavigateToContacts: () -> Unit = {},
     onNavigateToCommunication: () -> Unit = {},
-    onNavigateToOfflineQueue: () -> Unit = {}
+    onNavigateToOfflineQueue: () -> Unit = {},
+    onNavigateToGuardianPairing: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val haptics = LocalHapticFeedback.current
@@ -695,6 +696,46 @@ fun DashboardScreen(
                                 if (pendingQueueCount > 0) onNavigateToOfflineQueue() else onNavigateToCommunication()
                             }
                     )
+                }
+
+                // Quick-Access Guardian-to-Guardian Pairing & Audio Receiver Bar
+                val pairedGuardiansCount = container?.guardianConnectivityManager?.state?.collectAsState()?.value?.pairedGuardians?.size ?: 0
+                val pairedHostsCount = container?.guardianConnectivityManager?.state?.collectAsState()?.value?.pairedHosts?.size ?: 0
+                val rxAlertsCount = container?.guardianConnectivityManager?.state?.collectAsState()?.value?.receivedAlerts?.size ?: 0
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onNavigateToGuardianPairing() },
+                    colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                    shape = RoundedCornerShape(12.dp),
+                    border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(DarkBorder))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(horizontal = 12.dp, vertical = 10.dp),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Guardian QR Pairing & Audio Receiver",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "$pairedGuardiansCount Guardian(s) • $pairedHostsCount Host(s) • $rxAlertsCount Alert(s)",
+                                fontSize = 10.sp,
+                                color = if (pairedGuardiansCount > 0 || pairedHostsCount > 0) SafeGreen else TextSecondary
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = "Open Guardian Pairing",
+                            tint = BrandMagenta
+                        )
+                    }
                 }
             }
         }

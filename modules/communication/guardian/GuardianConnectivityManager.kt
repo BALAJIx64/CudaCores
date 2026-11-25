@@ -12,8 +12,11 @@ import java.util.UUID
 data class GuardianConnectivityState(
     val identity: DeviceIdentity,
     val relayServerUrl: String = "",
+    val activeInvitationId: String = "",
+    val activeInvitationToken: String = "",
     val activeInvitationUri: String = "",
     val activeInvitationExpiresAtMs: Long = 0L,
+    val isActiveInvitationRegisteredWithBackend: Boolean = false,
     val pairedDevices: List<PairedGuardianDevice> = emptyList(),
     val receivedAlerts: List<ReceivedGuardianAlert> = emptyList(),
     val lastSyncStatus: String = "Ready for pairing"
@@ -37,10 +40,13 @@ class GuardianConnectivityManager(
     private val pairingFile = File(storageDir, "paired_devices.dat")
     private val inboxFile = File(storageDir, "guardian_inbox.dat")
     private val configFile = File(storageDir, "relay_config.dat")
+    private val consumedInvitesFile = File(storageDir, "consumed_invites.dat")
     val receivedAudioDir = File(storageDir, "received_audio").apply { mkdirs() }
 
     private val _state: MutableStateFlow<GuardianConnectivityState>
     val state: StateFlow<GuardianConnectivityState> get() = _state.asStateFlow()
+
+    private val consumedInviteIds = linkedSetOf<String>()
 
     @Volatile
     private var activeInviteSecret: String = ""
@@ -51,21 +57,27 @@ class GuardianConnectivityManager(
         val relayUrl = loadRelayUrl()
         val peers = loadPairedDevices()
         val inbox = loadInbox()
+        loadConsumedInvites()
         val expiresAt = System.currentTimeMillis() + INVITATION_TTL_MS
-        val inviteSecret = GuardianCryptoCodec.randomHex(24)
-        activeInviteSecret = inviteSecret
+        val inviteId = "inv-${GuardianCryptoCodec.randomHex(8)}"
+        val inviteToken = GuardianCryptoCodec.randomHex(16)
+        activeInviteSecret = inviteToken
         val inviteUri = GuardianCryptoCodec.signInvitationUriPayload(
             identity = identity,
-            sharedSecretHex = inviteSecret,
+            oneTimeTokenHex = inviteToken,
             relayEndpointUrl = relayUrl.ifBlank { null },
-            expiresAtEpochMs = expiresAt
+            expiresAtEpochMs = expiresAt,
+            inviteId = inviteId
         )
         _state = MutableStateFlow(
             GuardianConnectivityState(
                 identity = identity,
                 relayServerUrl = relayUrl,
+                activeInvitationId = inviteId,
+                activeInvitationToken = inviteToken,
                 activeInvitationUri = inviteUri,
                 activeInvitationExpiresAtMs = expiresAt,
+                isActiveInvitationRegisteredWithBackend = false,
                 pairedDevices = peers,
                 receivedAlerts = inbox
             )
@@ -109,40 +121,172 @@ class GuardianConnectivityManager(
         val identity = _state.value.identity
         val relayUrl = _state.value.relayServerUrl.ifBlank { null }
         val expiresAt = System.currentTimeMillis() + INVITATION_TTL_MS
-        val secret = GuardianCryptoCodec.randomHex(24)
+        val inviteId = "inv-${GuardianCryptoCodec.randomHex(8)}"
+        val secret = GuardianCryptoCodec.randomHex(16)
         activeInviteSecret = secret
         val uri = GuardianCryptoCodec.signInvitationUriPayload(
             identity = identity,
-            sharedSecretHex = secret,
+            oneTimeTokenHex = secret,
             relayEndpointUrl = relayUrl,
-            expiresAtEpochMs = expiresAt
+            expiresAtEpochMs = expiresAt,
+            inviteId = inviteId
         )
         _state.value = _state.value.copy(
+            activeInvitationId = inviteId,
+            activeInvitationToken = secret,
             activeInvitationUri = uri,
-            activeInvitationExpiresAtMs = expiresAt
+            activeInvitationExpiresAtMs = expiresAt,
+            isActiveInvitationRegisteredWithBackend = false
         )
         return uri
     }
 
+    @Synchronized
+    fun getActiveInvitationModel(): PairingInvitation {
+        val st = _state.value
+        return PairingInvitation(
+            version = 2,
+            inviteId = st.activeInvitationId,
+            deviceId = st.identity.deviceId,
+            deviceName = st.identity.deviceName,
+            sharedSecretHex = st.activeInvitationToken,
+            relayEndpointUrl = st.relayServerUrl.ifBlank { null },
+            expiresAtEpochMs = st.activeInvitationExpiresAtMs,
+            signatureHex = ""
+        )
+    }
+
+    @Synchronized
+    fun markActiveInvitationRegistered(registered: Boolean, statusMessage: String? = null) {
+        _state.value = _state.value.copy(
+            isActiveInvitationRegisteredWithBackend = registered,
+            lastSyncStatus = statusMessage ?: _state.value.lastSyncStatus
+        )
+    }
+
     /**
-     * Parses and links a scanned/pasted invitation URI cleanly without account login.
-     *
-     * @param invitationUri The `guardiangrid://pair?...` string scanned or pasted from the peer device.
-     * @param roleOfScannedPeer [PairingRole.HOST] when this device acts as a Guardian watching the Host,
-     *                          or [PairingRole.GUARDIAN] when manually approving a peer as a Guardian.
+     * Validates a scanned/pasted invitation locally WITHOUT marking pairing successful.
+     * Checks cryptographic signature, expiration, self-pairing, and single-use consumption history.
+     */
+    @Synchronized
+    fun validateInvitationForBackend(invitationUri: String, nowEpochMs: Long = System.currentTimeMillis()): Result<PairingInvitation> {
+        val parsed = GuardianCryptoCodec.parseAndVerifyInvitation(invitationUri, nowEpochMs)
+        if (parsed.isFailure) return parsed
+        val invite = parsed.getOrThrow()
+        if (invite.deviceId == _state.value.identity.deviceId) {
+            return Result.failure(IllegalArgumentException("Cannot pair a device with itself"))
+        }
+        if (invite.inviteId.isNotBlank() && consumedInviteIds.contains(invite.inviteId)) {
+            return Result.failure(IllegalStateException("This pairing invitation has already been consumed and cannot be reused."))
+        }
+        return Result.success(invite)
+    }
+
+    /**
+     * Commits an authenticated pairing ONLY AFTER backend confirmation has succeeded,
+     * and records the invitation ID as consumed to prevent reuse.
+     */
+    @Synchronized
+    fun commitBackendConfirmedPairing(
+        peerDeviceId: String,
+        peerDisplayName: String,
+        roleOfPeer: PairingRole,
+        consumedInviteId: String? = null,
+        relayEndpointUrl: String? = null
+    ): PairedGuardianDevice {
+        if (!consumedInviteId.isNullOrBlank()) {
+            markInvitationConsumed(consumedInviteId)
+        }
+        val now = System.currentTimeMillis()
+        val peer = PairedGuardianDevice(
+            deviceId = peerDeviceId,
+            displayName = peerDisplayName.ifBlank { "GuardianGrid Device" },
+            role = roleOfPeer,
+            sharedSecretHex = "",
+            relayEndpointUrl = relayEndpointUrl ?: _state.value.relayServerUrl.ifBlank { null },
+            pairedAtEpochMs = now,
+            lastSeenEpochMs = now,
+            isActive = true
+        )
+        val updatedList = (_state.value.pairedDevices.filterNot { it.deviceId == peer.deviceId && it.role == peer.role } + peer)
+        persistPairedDevices(updatedList)
+        _state.value = _state.value.copy(
+            pairedDevices = updatedList,
+            lastSyncStatus = "Backend confirmed pairing with ${peer.displayName} (${peer.role.name})"
+        )
+        return peer
+    }
+
+    /**
+     * Reconciles server-confirmed Host and Guardian pairings from authenticated `GET /pairings`.
+     */
+    @Synchronized
+    fun reconcileBackendPairings(
+        confirmedGuardians: List<Pair<String, String>>,
+        confirmedHosts: List<Pair<String, String>>,
+        relayUrl: String? = null
+    ) {
+        val now = System.currentTimeMillis()
+        val existingByKey = _state.value.pairedDevices.associateBy { "${it.role.name}:${it.deviceId}" }
+        val resolved = mutableListOf<PairedGuardianDevice>()
+
+        for ((id, name) in confirmedGuardians) {
+            val prev = existingByKey["${PairingRole.GUARDIAN.name}:$id"]
+            resolved.add(
+                PairedGuardianDevice(
+                    deviceId = id,
+                    displayName = name.ifBlank { prev?.displayName ?: "Paired Guardian" },
+                    role = PairingRole.GUARDIAN,
+                    sharedSecretHex = prev?.sharedSecretHex ?: "",
+                    relayEndpointUrl = relayUrl ?: prev?.relayEndpointUrl ?: _state.value.relayServerUrl.ifBlank { null },
+                    pairedAtEpochMs = prev?.pairedAtEpochMs ?: now,
+                    lastSeenEpochMs = now,
+                    isActive = true
+                )
+            )
+        }
+        for ((id, name) in confirmedHosts) {
+            val prev = existingByKey["${PairingRole.HOST.name}:$id"]
+            resolved.add(
+                PairedGuardianDevice(
+                    deviceId = id,
+                    displayName = name.ifBlank { prev?.displayName ?: "Protected Host" },
+                    role = PairingRole.HOST,
+                    sharedSecretHex = prev?.sharedSecretHex ?: "",
+                    relayEndpointUrl = relayUrl ?: prev?.relayEndpointUrl ?: _state.value.relayServerUrl.ifBlank { null },
+                    pairedAtEpochMs = prev?.pairedAtEpochMs ?: now,
+                    lastSeenEpochMs = now,
+                    isActive = true
+                )
+            )
+        }
+
+        // Preserve any non-Supabase custom /v1 relay peers if backend list is superset-merged safely
+        val customOnly = _state.value.pairedDevices.filter { it.sharedSecretHex.isNotBlank() && resolved.none { r -> r.deviceId == it.deviceId && r.role == it.role } }
+        val merged = resolved + customOnly
+        persistPairedDevices(merged)
+        _state.value = _state.value.copy(
+            pairedDevices = merged,
+            lastSyncStatus = "Synced ${resolved.size} backend-confirmed pairing(s)"
+        )
+    }
+
+    /**
+     * Parses, checks single-use consumption & expiration, and links an offline/custom-relay invitation URI.
+     * Note: Supabase flows use [validateInvitationForBackend] followed by [commitBackendConfirmedPairing].
      */
     @Synchronized
     fun acceptPairingInvitation(
         invitationUri: String,
         roleOfScannedPeer: PairingRole = PairingRole.HOST
     ): Result<PairedGuardianDevice> {
-        val parsed = GuardianCryptoCodec.parseAndVerifyInvitation(invitationUri)
+        val parsed = validateInvitationForBackend(invitationUri)
         if (parsed.isFailure) {
             return Result.failure(parsed.exceptionOrNull()!!)
         }
         val invite = parsed.getOrThrow()
-        if (invite.deviceId == _state.value.identity.deviceId) {
-            return Result.failure(IllegalArgumentException("Cannot pair a device with itself"))
+        if (invite.inviteId.isNotBlank()) {
+            markInvitationConsumed(invite.inviteId)
         }
 
         val now = System.currentTimeMillis()
@@ -159,7 +303,6 @@ class GuardianConnectivityManager(
 
         val updatedList = (_state.value.pairedDevices.filterNot { it.deviceId == peer.deviceId && it.role == peer.role } + peer)
         persistPairedDevices(updatedList)
-        // Adopt relay endpoint from host invitation if local relay URL was unset
         if (!invite.relayEndpointUrl.isNullOrBlank() && _state.value.relayServerUrl.isBlank()) {
             configFile.writeText(invite.relayEndpointUrl)
             _state.value = _state.value.copy(relayServerUrl = invite.relayEndpointUrl)
@@ -472,10 +615,23 @@ class GuardianConnectivityManager(
         tmp.renameTo(target)
     }
 
+    private fun loadConsumedInvites() {
+        if (!consumedInvitesFile.exists()) return
+        runCatching {
+            consumedInvitesFile.readLines().mapNotNull { it.trim().ifBlank { null } }
+        }.getOrNull()?.let { consumedInviteIds.addAll(it) }
+    }
+
+    private fun markInvitationConsumed(inviteId: String) {
+        if (consumedInviteIds.add(inviteId)) {
+            atomicWrite(consumedInvitesFile, consumedInviteIds.joinToString("\n"))
+        }
+    }
+
     private fun escape(raw: String): String = raw.replace("\t", " ").replace("\n", "\\n")
     private fun unescape(raw: String): String = raw.replace("\\n", "\n")
 
     companion object {
-        const val INVITATION_TTL_MS = 24 * 60 * 60 * 1000L
+        const val INVITATION_TTL_MS = 10 * 60 * 1000L // 10 minutes
     }
 }

@@ -67,7 +67,8 @@ class MotionAnomalyDetectorImpl(
     )
 
     private var lastAnomalyTimestampMs = 0L
-    private val anomalyCooldownMs = 1000L
+    private var consecutiveCandidateType: DistressType? = null
+    private var consecutiveCandidateCount = 0
 
     fun setSensorSource(source: MotionSensorSource) {
         val wasActive = isMonitoring.get()
@@ -99,6 +100,8 @@ class MotionAnomalyDetectorImpl(
         sampleChannel = channel
 
         featureExtractor.reset()
+        consecutiveCandidateType = null
+        consecutiveCandidateCount = 0
 
         // Single sequential consumer preserves strict chronological sample order without per-sample coroutine allocation
         scope.launch {
@@ -186,18 +189,42 @@ class MotionAnomalyDetectorImpl(
         val now = sample.timestampEpochMs
 
         // Avoid spamming duplicate anomalies within cooldown window
-        if (now - lastAnomalyTimestampMs in 1..anomalyCooldownMs) {
+        if (now - lastAnomalyTimestampMs in 1..config.anomalyCooldownMs) {
             return
         }
 
-        val classified = detectAnomaly(features) ?: return
+        val classified = detectAnomaly(features)
+        if (classified == null) {
+            consecutiveCandidateType = null
+            consecutiveCandidateCount = 0
+            return
+        }
 
-        // Run false alarm filter
+        // Run false alarm filter BEFORE counting persistence
         if (falseAlarmFilter.isFalseAlarm(features, classified.first)) {
+            consecutiveCandidateType = null
+            consecutiveCandidateCount = 0
+            return
+        }
+
+        // Temporal confirmation: require consecutive qualifying samples unless a genuine
+        // fall-impact already exhibited prolonged preceding freefall
+        val hasVerifiedFreefallImpact =
+            classified.first == DistressType.FALL_IMPACT && features.hasFreefallPrecedingImpact
+        if (consecutiveCandidateType == classified.first) {
+            consecutiveCandidateCount++
+        } else {
+            consecutiveCandidateType = classified.first
+            consecutiveCandidateCount = 1
+        }
+        val requiredSamples = if (hasVerifiedFreefallImpact) 1 else config.minConsecutiveAnomalySamples.coerceAtLeast(1)
+        if (consecutiveCandidateCount < requiredSamples) {
             return
         }
 
         lastAnomalyTimestampMs = now
+        consecutiveCandidateType = null
+        consecutiveCandidateCount = 0
 
         val sanitizedConfidence = sanitizeConfidence(classified.second)
 
@@ -222,25 +249,27 @@ class MotionAnomalyDetectorImpl(
     }
 
     /**
-     * Anomaly classification rules evaluating fall impact, struggle, and snatch patterns.
+     * Anomaly classification rules evaluating conservative fall impact, struggle, and snatch patterns.
      * Incorporates graceful accelerometer-only fallback when gyroscope is missing.
      */
     private fun detectAnomaly(features: MotionFeatures): Pair<DistressType, Float>? {
         val effImpact = config.effectiveImpactThreshold()
+        val effStandaloneImpact = config.effectiveStandaloneImpactThreshold()
         val effVariance = config.effectiveShakeVarianceThreshold()
         val effAngular = config.effectiveAngularSpeedThreshold()
         val effSnatchJerk = config.effectiveSnatchJerkThreshold()
+        val effSnatchMag = config.effectiveSnatchMagnitudeThreshold()
         val hasGyro = sensorSource.hasGyroscope()
 
         // 1. Fall Detection: Freefall valley followed by sharp impact spike
         if (features.currentMagnitude >= effImpact && features.hasFreefallPrecedingImpact) {
-            val confidence = ((features.currentMagnitude - effImpact) / 20.0f + 0.80f).coerceIn(0.80f, 0.98f)
+            val confidence = ((features.currentMagnitude - effImpact) / 22.0f + 0.78f).coerceIn(0.75f, 0.96f)
             return Pair(DistressType.FALL_IMPACT, confidence)
         }
 
-        // Severe standalone impact without explicit freefall
-        if (features.currentMagnitude >= effImpact * 1.25f) {
-            val confidence = ((features.currentMagnitude - effImpact) / 25.0f + 0.75f).coerceIn(0.75f, 0.95f)
+        // Severe standalone impact without explicit freefall (requires sustained severe impact + agitation)
+        if (features.currentMagnitude >= effStandaloneImpact && features.varianceMagnitude >= effVariance * 0.7f) {
+            val confidence = ((features.currentMagnitude - effStandaloneImpact) / 25.0f + 0.72f).coerceIn(0.72f, 0.92f)
             return Pair(DistressType.FALL_IMPACT, confidence)
         }
 
@@ -250,22 +279,24 @@ class MotionAnomalyDetectorImpl(
                     features.directionReversals >= config.violentShakeReversalThreshold &&
                     features.peakAngularSpeed >= effAngular
         } else {
-            // Accelerometer fallback when gyroscope hardware is absent
-            features.varianceMagnitude >= effVariance * 1.25f &&
+            // Accelerometer fallback when gyroscope hardware is absent (still requires >= 7 reversals + variance)
+            features.varianceMagnitude >= effVariance * 1.15f &&
                     features.directionReversals >= (config.violentShakeReversalThreshold + 1)
         }
 
         if (isViolentShake) {
-            val confidence = ((features.varianceMagnitude - effVariance) / 20.0f + 0.78f).coerceIn(0.78f, 0.94f)
+            val confidence = ((features.varianceMagnitude - effVariance) / 25.0f + 0.74f).coerceIn(0.74f, 0.92f)
             return Pair(DistressType.MOTION_ANOMALY, confidence)
         }
 
-        // 3. Device Snatch: Extreme sudden jerk + high acceleration magnitude
+        // 3. Device Snatch: Extreme sudden jerk + high sustained magnitude + rotation/reversals
         val isSnatch = features.peakJerk >= effSnatchJerk &&
-                features.currentMagnitude >= config.snatchMagnitudeThreshold
+                features.currentMagnitude >= effSnatchMag &&
+                features.varianceMagnitude >= (effVariance * 0.65f) &&
+                (!hasGyro || features.peakAngularSpeed >= effAngular * 0.75f)
 
         if (isSnatch) {
-            val confidence = ((features.peakJerk - effSnatchJerk) / 80.0f + 0.72f).coerceIn(0.72f, 0.90f)
+            val confidence = ((features.peakJerk - effSnatchJerk) / 100.0f + 0.70f).coerceIn(0.70f, 0.88f)
             return Pair(DistressType.MOTION_ANOMALY, confidence)
         }
 

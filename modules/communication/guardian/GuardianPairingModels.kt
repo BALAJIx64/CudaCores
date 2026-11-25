@@ -44,7 +44,7 @@ data class PairedGuardianDevice(
 )
 
 /**
- * Received WAV clip (pre-trigger 10s, real-time 2s post-trigger chunk, or full 20s recording) on a Guardian device.
+ * Received WAV clip (pre-trigger 10s, sequential 10s post-trigger chunk, or partial final chunk) on a Guardian device.
  */
 data class ReceivedGuardianAudioClip(
     val clipId: String,
@@ -80,10 +80,13 @@ data class ReceivedGuardianAlert(
 )
 
 /**
- * Signed login-free pairing invitation encoded as a QR / deep-link URI.
+ * Signed single-use login-free pairing invitation encoded as a QR / deep-link URI.
+ * Permanent device secrets are NEVER embedded in QR URIs; v2 carries only an ephemeral single-use
+ * invitation ID and one-time claim token that expires and is consumed upon first acceptance.
  */
 data class PairingInvitation(
-    val version: Int = 1,
+    val version: Int = 2,
+    val inviteId: String = "",
     val deviceId: String,
     val deviceName: String,
     val sharedSecretHex: String,
@@ -118,23 +121,25 @@ object GuardianCryptoCodec {
 
     fun signInvitationUriPayload(
         identity: DeviceIdentity,
-        sharedSecretHex: String,
+        oneTimeTokenHex: String,
         relayEndpointUrl: String?,
-        expiresAtEpochMs: Long
+        expiresAtEpochMs: Long,
+        inviteId: String = "inv-${randomHex(8)}"
     ): String {
-        val canonical = buildCanonicalPairingString(
-            version = 1,
+        val canonical = buildCanonicalPairingStringV2(
+            version = 2,
+            inviteId = inviteId,
             deviceId = identity.deviceId,
             deviceName = identity.deviceName,
-            sharedSecretHex = sharedSecretHex,
+            oneTimeTokenHex = oneTimeTokenHex,
             relayEndpointUrl = relayEndpointUrl,
             expiresAtEpochMs = expiresAtEpochMs
         )
-        // Signed using both local secret and shared invitation token so invitation integrity can be verified offline
-        val signature = hmacSha256Hex(sharedSecretHex, canonical).take(32)
+        // Integrity MAC keyed by ephemeral single-use claim token (permanent hmacSecretHex is NEVER exposed in QR)
+        val signature = hmacSha256Hex(oneTimeTokenHex, canonical).take(32)
         val encName = URLEncoder.encode(identity.deviceName, "UTF-8")
         val encRelay = URLEncoder.encode(relayEndpointUrl ?: "", "UTF-8")
-        return "guardiangrid://pair?v=1&id=${identity.deviceId}&name=$encName&secret=$sharedSecretHex&relay=$encRelay&exp=$expiresAtEpochMs&sig=$signature"
+        return "guardiangrid://pair?v=2&invite=$inviteId&id=${identity.deviceId}&name=$encName&tok=$oneTimeTokenHex&relay=$encRelay&exp=$expiresAtEpochMs&sig=$signature"
     }
 
     fun parseAndVerifyInvitation(rawUri: String, nowEpochMs: Long = System.currentTimeMillis()): Result<PairingInvitation> {
@@ -157,16 +162,31 @@ object GuardianCryptoCodec {
             val deviceId = params["id"]?.takeIf { it.length >= 8 }
                 ?: return Result.failure(IllegalArgumentException("Invalid host device ID"))
             val deviceName = params["name"]?.ifBlank { "GuardianGrid Device" } ?: "GuardianGrid Device"
-            val secret = params["secret"]?.takeIf { it.length >= 32 }
-                ?: return Result.failure(IllegalArgumentException("Invalid pairing secret"))
             val relay = params["relay"]?.ifBlank { null }
             val expires = params["exp"]?.toLongOrNull()
                 ?: return Result.failure(IllegalArgumentException("Invalid expiration timestamp"))
             val sig = params["sig"]?.takeIf { it.length >= 16 }
                 ?: return Result.failure(IllegalArgumentException("Missing invitation signature"))
 
-            val canonical = buildCanonicalPairingString(version, deviceId, deviceName, secret, relay, expires)
-            val expectedSig = hmacSha256Hex(secret, canonical).take(32)
+            val tokenOrSecret: String
+            val inviteId: String
+            val expectedSig: String
+
+            if (version >= 2) {
+                inviteId = params["invite"]?.takeIf { it.length >= 8 }
+                    ?: return Result.failure(IllegalArgumentException("Missing single-use invitation ID"))
+                tokenOrSecret = params["tok"]?.takeIf { it.length >= 16 }
+                    ?: return Result.failure(IllegalArgumentException("Missing one-time pairing token"))
+                val canonical = buildCanonicalPairingStringV2(version, inviteId, deviceId, deviceName, tokenOrSecret, relay, expires)
+                expectedSig = hmacSha256Hex(tokenOrSecret, canonical).take(32)
+            } else {
+                inviteId = params["invite"]?.ifBlank { null } ?: sha256Hex("$deviceId|$expires|$sig").take(16)
+                tokenOrSecret = params["secret"]?.takeIf { it.length >= 32 }
+                    ?: return Result.failure(IllegalArgumentException("Invalid pairing secret"))
+                val canonical = buildCanonicalPairingStringV1(version, deviceId, deviceName, tokenOrSecret, relay, expires)
+                expectedSig = hmacSha256Hex(tokenOrSecret, canonical).take(32)
+            }
+
             if (!MessageDigest.isEqual(expectedSig.toByteArray(), sig.toByteArray())) {
                 return Result.failure(SecurityException("Pairing invitation signature mismatch"))
             }
@@ -177,9 +197,10 @@ object GuardianCryptoCodec {
             Result.success(
                 PairingInvitation(
                     version = version,
+                    inviteId = inviteId,
                     deviceId = deviceId,
                     deviceName = deviceName,
-                    sharedSecretHex = secret,
+                    sharedSecretHex = tokenOrSecret,
                     relayEndpointUrl = relay,
                     expiresAtEpochMs = expires,
                     signatureHex = sig
@@ -190,7 +211,7 @@ object GuardianCryptoCodec {
         }
     }
 
-    private fun buildCanonicalPairingString(
+    private fun buildCanonicalPairingStringV1(
         version: Int,
         deviceId: String,
         deviceName: String,
@@ -199,5 +220,17 @@ object GuardianCryptoCodec {
         expiresAtEpochMs: Long
     ): String {
         return "$version|$deviceId|${deviceName.trim()}|$sharedSecretHex|${relayEndpointUrl?.trim().orEmpty()}|$expiresAtEpochMs"
+    }
+
+    private fun buildCanonicalPairingStringV2(
+        version: Int,
+        inviteId: String,
+        deviceId: String,
+        deviceName: String,
+        oneTimeTokenHex: String,
+        relayEndpointUrl: String?,
+        expiresAtEpochMs: Long
+    ): String {
+        return "$version|$inviteId|$deviceId|${deviceName.trim()}|$oneTimeTokenHex|${relayEndpointUrl?.trim().orEmpty()}|$expiresAtEpochMs"
     }
 }

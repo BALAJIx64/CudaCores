@@ -267,6 +267,9 @@ fun GuardianGridMainScreen(
                                         },
                                         onNavigateToOfflineQueue = {
                                             currentDestination = MainNavDestination.OFFLINE_QUEUE
+                                        },
+                                        onNavigateToGuardianPairing = {
+                                            currentDestination = MainNavDestination.GUARDIAN_PAIRING
                                         }
                                     )
                                 }

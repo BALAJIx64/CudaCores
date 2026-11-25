@@ -27,11 +27,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.ContentCopy
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.GraphicEq
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.QrCode2
@@ -53,6 +55,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
@@ -72,6 +75,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.guardiangrid.GuardianGridApp
 import com.guardiangrid.modules.communication.guardian.PairingRole
+import com.guardiangrid.modules.communication.supabase.SupabaseConfigManager
 import com.guardiangrid.ui.theme.BrandMagenta
 import com.guardiangrid.ui.theme.BrandPurple
 import com.guardiangrid.ui.theme.CyberTeal
@@ -89,6 +93,7 @@ import com.guardiangrid.ui.theme.TextSecondary
 import com.guardiangrid.ui.theme.TextTertiary
 import com.guardiangrid.ui.theme.WarningAmber
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.text.SimpleDateFormat
@@ -107,6 +112,7 @@ fun GuardianPairingScreen(
     val container = (context.applicationContext as? GuardianGridApp)?.container
     val connectivityManager = container?.guardianConnectivityManager
     val relayClient = container?.guardianRelayClient
+    val supabaseClient = container?.supabaseBackendClient
 
     val guardianState = connectivityManager?.state?.collectAsState()?.value
     val scrollState = rememberScrollState()
@@ -128,9 +134,63 @@ fun GuardianPairingScreen(
         mutableStateOf(guardianState?.relayServerUrl ?: "")
     }
     var inviteInput by remember { mutableStateOf("") }
-    var targetRoleIsGuardian by remember { mutableStateOf(false) } // false = pair scanned HOST, true = approve GUARDIAN
     var statusNotice by remember { mutableStateOf<String?>(null) }
     var isSyncing by remember { mutableStateOf(false) }
+    var isPairingInProgress by remember { mutableStateOf(false) }
+    var nowClockMs by remember { mutableStateOf(System.currentTimeMillis()) }
+
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000L)
+            nowClockMs = System.currentTimeMillis()
+        }
+    }
+
+    // Automatically register device/invite & sync confirmed pairings when Supabase backend is active
+    LaunchedEffect(selectedTab, guardianState?.activeInvitationId) {
+        if (supabaseClient != null && supabaseClient.isConfigured() && connectivityManager != null) {
+            withContext(Dispatchers.IO) {
+                if (selectedTab == 0) {
+                    if (guardianState?.isActiveInvitationRegisteredWithBackend == false) {
+                        supabaseClient.createPairingInvitation(connectivityManager.getActiveInvitationModel())
+                    }
+                    supabaseClient.fetchConfirmedPairings()
+                } else {
+                    relayClient?.pollIncomingAlerts()
+                }
+            }
+        }
+    }
+
+    // Camera QR capture launcher (zero external app dependency)
+    val cameraQrLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicturePreview()
+    ) { bitmap ->
+        if (bitmap != null) {
+            val decoded = QrCodeDecoder.decodeFromBitmap(bitmap)
+            if (decoded.isSuccess) {
+                inviteInput = decoded.getOrThrow()
+                statusNotice = "QR captured & decoded. Tap 'Verify & Pair' to authenticate with backend."
+            } else {
+                statusNotice = decoded.exceptionOrNull()?.message ?: "Could not detect a QR code in camera photo."
+            }
+        }
+    }
+
+    // Image/Screenshot QR picker launcher
+    val imageQrLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.GetContent()
+    ) { uri ->
+        if (uri != null) {
+            val decoded = QrCodeDecoder.decodeFromUri(context, uri)
+            if (decoded.isSuccess) {
+                inviteInput = decoded.getOrThrow()
+                statusNotice = "QR decoded from image. Tap 'Verify & Pair' to authenticate with backend."
+            } else {
+                statusNotice = decoded.exceptionOrNull()?.message ?: "No readable QR code found in selected image."
+            }
+        }
+    }
 
     // Optional external QR scanner activity integration if installed on device
     val qrScannerLauncher = rememberLauncherForActivityResult(
@@ -311,6 +371,12 @@ fun GuardianPairingScreen(
             }
 
             // --- Host QR Code Invitation Card ---
+            val remainingMs = (guardianState.activeInvitationExpiresAtMs - nowClockMs).coerceAtLeast(0L)
+            val isInviteExpired = remainingMs <= 0L
+            val expMin = (remainingMs / 60_000L)
+            val expSec = (remainingMs % 60_000L) / 1000L
+            val isBackendActive = supabaseClient?.isConfigured() == true
+
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = DarkSurface),
@@ -322,18 +388,35 @@ fun GuardianPairingScreen(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.spacedBy(10.dp)
                 ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "SHARE PAIRING INVITATION / QR",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black,
+                            color = BrandMagenta,
+                            letterSpacing = 1.sp
+                        )
+                        Text(
+                            text = if (isInviteExpired) "EXPIRED" else "EXP ${expMin}:${"%02d".format(expSec)}",
+                            fontSize = 10.sp,
+                            fontWeight = FontWeight.Black,
+                            color = if (isInviteExpired) EmergencyRed else CyberTeal
+                        )
+                    }
                     Text(
-                        text = "SHARE PAIRING INVITATION / QR",
+                        text = if (guardianState.isActiveInvitationRegisteredWithBackend) {
+                            "Single-use, secret-free invitation registered on backend. Have your trusted Guardian scan or import this QR before expiry."
+                        } else if (isBackendActive) {
+                            "Registering single-use invite with backend... Tap Rotate to issue a fresh expiring QR."
+                        } else {
+                            "Configure Supabase backend (Settings > Channels) to enable server-authenticated QR pairing."
+                        },
                         fontSize = 11.sp,
-                        fontWeight = FontWeight.Black,
-                        color = BrandMagenta,
-                        letterSpacing = 1.sp,
-                        modifier = Modifier.align(Alignment.Start)
-                    )
-                    Text(
-                        text = "Have your trusted Guardian scan this QR code or open the signed pairing link to authenticate without an account.",
-                        fontSize = 11.sp,
-                        color = TextSecondary
+                        color = if (guardianState.isActiveInvitationRegisteredWithBackend) TextSecondary else WarningAmber
                     )
 
                     QrCodeImage(
@@ -350,7 +433,7 @@ fun GuardianPairingScreen(
                                 clipboardManager?.setPrimaryClip(
                                     ClipData.newPlainText("GuardianGrid Pairing Invite", guardianState.activeInvitationUri)
                                 )
-                                statusNotice = "Signed pairing invitation URI copied to clipboard."
+                                statusNotice = "Single-use pairing invitation URI copied to clipboard."
                             },
                             modifier = Modifier.weight(1f)
                         ) {
@@ -378,7 +461,20 @@ fun GuardianPairingScreen(
                         OutlinedButton(
                             onClick = {
                                 connectivityManager.regeneratePairingInvitation()
-                                statusNotice = "Generated fresh cryptographic pairing secret & QR."
+                                if (supabaseClient != null && supabaseClient.isConfigured()) {
+                                    scope.launch {
+                                        val res = withContext(Dispatchers.IO) {
+                                            supabaseClient.createPairingInvitation(connectivityManager.getActiveInvitationModel())
+                                        }
+                                        statusNotice = if (res.isSuccess) {
+                                            "Issued fresh expiring single-use QR invitation on backend."
+                                        } else {
+                                            "Rotated QR locally; backend registration failed: ${res.exceptionOrNull()?.message}"
+                                        }
+                                    }
+                                } else {
+                                    statusNotice = "Rotated single-use QR locally (backend offline/unconfigured)."
+                                }
                             },
                             modifier = Modifier.weight(1f)
                         ) {
@@ -399,48 +495,23 @@ fun GuardianPairingScreen(
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Text(
-                        text = "PAIR WITH ANOTHER DEVICE",
+                        text = "SCAN & PAIR AS GUARDIAN RECEIVER",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Black,
                         color = TextTertiary,
                         letterSpacing = 1.sp
                     )
 
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        OutlinedButton(
-                            onClick = { targetRoleIsGuardian = false },
-                            modifier = Modifier.weight(1f),
-                            border = androidx.compose.foundation.BorderStroke(
-                                1.dp,
-                                if (!targetRoleIsGuardian) CyberTeal else DarkBorder
-                            )
-                        ) {
-                            Text(
-                                "I am Guardian (Watch Host)",
-                                fontSize = 10.sp,
-                                color = if (!targetRoleIsGuardian) CyberTeal else TextSecondary
-                            )
-                        }
-                        OutlinedButton(
-                            onClick = { targetRoleIsGuardian = true },
-                            modifier = Modifier.weight(1f),
-                            border = androidx.compose.foundation.BorderStroke(
-                                1.dp,
-                                if (targetRoleIsGuardian) BrandMagenta else DarkBorder
-                            )
-                        ) {
-                            Text(
-                                "Add as My Guardian",
-                                fontSize = 10.sp,
-                                color = if (targetRoleIsGuardian) BrandMagenta else TextSecondary
-                            )
-                        }
-                    }
+                    Text(
+                        text = "Scan the Sender's QR invitation using camera/image or paste the invitation URI. Pairing is confirmed only after backend mutual authentication.",
+                        fontSize = 11.sp,
+                        color = TextSecondary
+                    )
 
                     OutlinedTextField(
                         value = inviteInput,
                         onValueChange = { inviteInput = it },
-                        label = { Text("Paste guardiangrid://pair?... URI") },
+                        label = { Text("Pairing URI (guardiangrid://pair?...)") },
                         singleLine = false,
                         maxLines = 3,
                         modifier = Modifier.fillMaxWidth(),
@@ -457,6 +528,22 @@ fun GuardianPairingScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         OutlinedButton(
+                            onClick = { cameraQrLauncher.launch(null) },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(15.dp), tint = CyberTeal)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Camera", fontSize = 11.sp, color = TextPrimary)
+                        }
+                        OutlinedButton(
+                            onClick = { imageQrLauncher.launch("image/*") },
+                            modifier = Modifier.weight(1f)
+                        ) {
+                            Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(15.dp), tint = InfoBlue)
+                            Spacer(Modifier.width(4.dp))
+                            Text("Image", fontSize = 11.sp, color = TextPrimary)
+                        }
+                        OutlinedButton(
                             onClick = {
                                 val scanIntent = Intent("com.google.zxing.client.android.SCAN")
                                 try {
@@ -465,36 +552,59 @@ fun GuardianPairingScreen(
                                     val clip = clipboardManager?.primaryClip?.getItemAt(0)?.text?.toString()
                                     if (!clip.isNullOrBlank()) {
                                         inviteInput = clip
-                                        statusNotice = "No external QR app installed; pasted URI from clipboard."
+                                        statusNotice = "Pasted pairing URI from clipboard."
                                     } else {
-                                        statusNotice = "Paste a guardiangrid://pair?... URI from your Host/Guardian device."
+                                        statusNotice = "Use Camera, Image, or paste a guardiangrid://pair?... URI."
                                     }
                                 }
                             },
                             modifier = Modifier.weight(1f)
                         ) {
-                            Icon(Icons.Default.QrCode2, contentDescription = null, modifier = Modifier.size(16.dp))
-                            Spacer(Modifier.width(6.dp))
-                            Text("Scan / Paste", fontSize = 11.sp, color = TextPrimary)
+                            Icon(Icons.Default.QrCode2, contentDescription = null, modifier = Modifier.size(15.dp))
+                            Spacer(Modifier.width(4.dp))
+                            Text("Paste", fontSize = 11.sp, color = TextPrimary)
                         }
+                    }
 
-                        Button(
-                            onClick = {
-                                val role = if (targetRoleIsGuardian) PairingRole.GUARDIAN else PairingRole.HOST
-                                val res = connectivityManager.acceptPairingInvitation(inviteInput, role)
-                                if (res.isSuccess) {
-                                    val peer = res.getOrThrow()
-                                    statusNotice = "Paired ${peer.displayName} (${peer.deviceId}) as ${peer.role.name}."
-                                    inviteInput = ""
-                                } else {
-                                    statusNotice = "Pairing rejected: ${res.exceptionOrNull()?.message}"
+                    Button(
+                        onClick = {
+                            if (isPairingInProgress) return@Button
+                            val validation = connectivityManager.validateInvitationForBackend(inviteInput)
+                            if (validation.isFailure) {
+                                statusNotice = "Invitation rejected: ${validation.exceptionOrNull()?.message}"
+                                return@Button
+                            }
+                            val invite = validation.getOrThrow()
+                            if (supabaseClient != null && supabaseClient.isConfigured()) {
+                                isPairingInProgress = true
+                                statusNotice = "Authenticating both devices & verifying invitation with backend..."
+                                scope.launch {
+                                    val res = withContext(Dispatchers.IO) {
+                                        supabaseClient.acceptPairingInvitationRemote(invite)
+                                    }
+                                    isPairingInProgress = false
+                                    if (res.isSuccess) {
+                                        val confirmed = res.getOrThrow()
+                                        statusNotice = "Backend confirmed pairing with ${confirmed.hostDeviceName} (${confirmed.hostDeviceId})."
+                                        inviteInput = ""
+                                    } else {
+                                        statusNotice = res.exceptionOrNull()?.message ?: "Backend pairing verification failed."
+                                    }
                                 }
-                            },
-                            enabled = inviteInput.isNotBlank(),
-                            modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = BrandPurple)
-                        ) {
-                            Text("Pair Device", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                            } else {
+                                statusNotice = "Cannot confirm pairing: configure Supabase Project URL & Anon Key in Settings > Channels first."
+                            }
+                        },
+                        enabled = inviteInput.isNotBlank() && !isPairingInProgress,
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = ButtonDefaults.buttonColors(containerColor = BrandPurple)
+                    ) {
+                        if (isPairingInProgress) {
+                            CircularProgressIndicator(modifier = Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
+                            Spacer(Modifier.width(8.dp))
+                            Text("Authenticating Pairing...", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        } else {
+                            Text("Verify & Confirm Pairing", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                         }
                     }
                 }
@@ -508,13 +618,40 @@ fun GuardianPairingScreen(
                 border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(DarkBorder))
             ) {
                 Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    Text(
-                        text = "PAIRED DEVICES (${guardianState.pairedDevices.size})",
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Black,
-                        color = TextTertiary,
-                        letterSpacing = 1.sp
-                    )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(
+                            text = "CONFIRMED PAIRED DEVICES (${guardianState.pairedDevices.size})",
+                            fontSize = 11.sp,
+                            fontWeight = FontWeight.Black,
+                            color = TextTertiary,
+                            letterSpacing = 1.sp
+                        )
+                        if (supabaseClient != null && supabaseClient.isConfigured()) {
+                            TextButton(
+                                onClick = {
+                                    scope.launch {
+                                        val syncRes = withContext(Dispatchers.IO) {
+                                            supabaseClient.fetchConfirmedPairings()
+                                        }
+                                        statusNotice = if (syncRes.isSuccess) {
+                                            val s = syncRes.getOrThrow()
+                                            "Synced ${s.guardians.size} guardian(s) & ${s.hosts.size} host(s) from backend."
+                                        } else {
+                                            syncRes.exceptionOrNull()?.message ?: "Pairing sync failed"
+                                        }
+                                    }
+                                }
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp), tint = CyberTeal)
+                                Spacer(Modifier.width(4.dp))
+                                Text("Sync Paired", fontSize = 11.sp, color = CyberTeal)
+                            }
+                        }
+                    }
                     if (guardianState.pairedDevices.isEmpty()) {
                         Text(
                             text = "No paired devices yet. Scan or paste a device's pairing invitation above.",
@@ -711,7 +848,7 @@ fun GuardianPairingScreen(
                         Icon(Icons.Default.GraphicEq, contentDescription = null, tint = TextTertiary, modifier = Modifier.size(40.dp))
                         Text("No Incoming Alerts", fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
                         Text(
-                            text = "When a paired Host triggers SOS, scream, or motion emergency, their GPS location, 10s pre-trigger WAV, live 2s audio chunks, and 20s recording arrive here.",
+                            text = "When a paired Host triggers SOS, scream, or motion emergency, their GPS location, 10s pre-trigger WAV, and 6 x 10s sequential post-trigger WAV chunks (70s full evidence) arrive here.",
                             fontSize = 11.sp,
                             color = TextSecondary
                         )
@@ -795,9 +932,8 @@ fun GuardianPairingScreen(
                                     val isPlaying = playingClipId == clip.clipId
                                     val label = when {
                                         clip.isPreTrigger -> "Pre-Trigger 10s Audio"
-                                        clip.isFinal -> "Live Audio Chunk #${clip.chunkIndex} (Final)"
-                                        clip.chunkIndex == 99 -> "Complete 20s Incident WAV"
-                                        else -> "Live Audio Chunk #${clip.chunkIndex}"
+                                        clip.isFinal -> "Post-Trigger Chunk #${clip.chunkIndex} (Final)"
+                                        else -> "Post-Trigger Chunk #${clip.chunkIndex}"
                                     }
                                     Row(
                                         modifier = Modifier

@@ -4,6 +4,10 @@ import com.guardiangrid.core.models.AlertPayload
 import com.guardiangrid.core.models.DeliveryChannel
 import com.guardiangrid.modules.communication.guardian.GuardianConnectivityManager
 import com.guardiangrid.modules.communication.guardian.GuardianCryptoCodec
+import com.guardiangrid.modules.communication.guardian.PairingInvitation
+import com.guardiangrid.modules.communication.guardian.PairingRole
+import com.guardiangrid.modules.communication.guardian.ReceivedGuardianAlert
+import com.guardiangrid.modules.communication.guardian.ReceivedGuardianAudioClip
 import com.guardiangrid.modules.communication.models.CommunicationAuditRecord
 import com.guardiangrid.modules.communication.models.EmergencyDeliveryState
 import com.guardiangrid.modules.communication.network.DefaultHttpTransport
@@ -95,6 +99,23 @@ data class SupabaseRelayResult(
     val auditRecord: CommunicationAuditRecord
 )
 
+data class ConfirmedPairingResult(
+    val inviteId: String,
+    val hostDeviceId: String,
+    val hostDeviceName: String,
+    val guardianDeviceId: String
+)
+
+data class RemotePairedPeer(
+    val deviceId: String,
+    val deviceName: String
+)
+
+data class SyncedPairingsResult(
+    val guardians: List<RemotePairedPeer>,
+    val hosts: List<RemotePairedPeer>
+)
+
 /**
  * Authenticated Android -> Supabase Edge Function client.
  * - Registers the device's per-install HMAC key via `/register-device` (never exposes shared/service secrets in APK).
@@ -143,13 +164,166 @@ class SupabaseEmergencyBackendClient(
         val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
         if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
 
-        ensureDeviceRegistered()
+        if (!ensureDeviceRegistered()) {
+            return Result.failure(IllegalStateException("Device registration with backend failed"))
+        }
         val headers = buildAuthenticatedHeaders(cfg, "pair|$hostDeviceId|$guardianDeviceId")
         val json = """{"hostDeviceId":"${jsonEscape(hostDeviceId)}","guardianDeviceId":"${jsonEscape(guardianDeviceId)}"}"""
         return try {
             val resp = transport.postJson("${cfg.functionsBaseUrl()}/pair", json, headers)
             if (resp.isSuccessful) Result.success(Unit)
             else Result.failure(IllegalStateException("Pairing sync HTTP ${resp.statusCode}: ${resp.body.take(120)}"))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Registers a single-use, expiring QR pairing invitation on the backend.
+     * Permanent device secrets stay off the QR code.
+     */
+    fun createPairingInvitation(invite: PairingInvitation): Result<Unit> {
+        val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
+        if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
+        if (!ensureDeviceRegistered()) {
+            return Result.failure(IllegalStateException("Device registration with backend failed"))
+        }
+
+        val headers = buildAuthenticatedHeaders(cfg, "invite|${invite.inviteId}")
+        val json = """{"inviteId":"${jsonEscape(invite.inviteId)}","hostDeviceId":"${jsonEscape(invite.deviceId)}","hostDeviceName":"${jsonEscape(invite.deviceName)}","inviteToken":"${jsonEscape(invite.sharedSecretHex)}","expiresAtEpochMs":${invite.expiresAtEpochMs}}"""
+        return try {
+            val resp = transport.postJson("${cfg.functionsBaseUrl()}/pairing/invite", json, headers)
+            if (resp.isSuccessful) {
+                connectivityManager.markActiveInvitationRegistered(true, "Single-use QR invite active on backend")
+                Result.success(Unit)
+            } else {
+                connectivityManager.markActiveInvitationRegistered(false, "Backend invite error HTTP ${resp.statusCode}")
+                Result.failure(IllegalStateException("Invite registration HTTP ${resp.statusCode}: ${resp.body.take(120)}"))
+            }
+        } catch (e: Exception) {
+            connectivityManager.markActiveInvitationRegistered(false, "Offline: ${e.message}")
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Authenticates the scanning Receiver device, verifies & consumes the single-use invitation
+     * on Supabase, and commits the confirmed pairing locally ONLY AFTER HTTP 200 confirmation.
+     */
+    fun acceptPairingInvitationRemote(invite: PairingInvitation): Result<ConfirmedPairingResult> {
+        val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
+        if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
+        if (!ensureDeviceRegistered()) {
+            return Result.failure(IllegalStateException("Receiver device authentication with backend failed"))
+        }
+
+        val headers = buildAuthenticatedHeaders(cfg, "accept|${invite.inviteId}")
+        val json = """{"inviteId":"${jsonEscape(invite.inviteId)}","hostDeviceId":"${jsonEscape(invite.deviceId)}","inviteToken":"${jsonEscape(invite.sharedSecretHex)}"}"""
+        return try {
+            val resp = transport.postJson("${cfg.functionsBaseUrl()}/pairing/accept", json, headers)
+            if (!resp.isSuccessful) {
+                val err = extractJsonString(resp.body, "error") ?: "HTTP ${resp.statusCode}"
+                return Result.failure(IllegalStateException("Backend pairing rejected: $err"))
+            }
+            val confirmed = resp.body.contains(""""pairingConfirmed"\s*:\s*true""".toRegex())
+            if (!confirmed) {
+                return Result.failure(IllegalStateException("Backend did not confirm pairing"))
+            }
+            val hostId = extractJsonString(resp.body, "hostDeviceId") ?: invite.deviceId
+            val hostName = extractJsonString(resp.body, "hostDeviceName") ?: invite.deviceName
+            val guardianId = extractJsonString(resp.body, "guardianDeviceId") ?: connectivityManager.getIdentity().deviceId
+
+            connectivityManager.commitBackendConfirmedPairing(
+                peerDeviceId = hostId,
+                peerDisplayName = hostName,
+                roleOfPeer = PairingRole.HOST,
+                consumedInviteId = invite.inviteId,
+                relayEndpointUrl = cfg.functionsBaseUrl()
+            )
+            Result.success(ConfirmedPairingResult(invite.inviteId, hostId, hostName, guardianId))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Fetches backend-confirmed Guardians and Hosts for this device and reconciles local state.
+     */
+    fun fetchConfirmedPairings(): Result<SyncedPairingsResult> {
+        val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
+        if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
+        if (!ensureDeviceRegistered()) {
+            return Result.failure(IllegalStateException("Device registration required to sync pairings"))
+        }
+
+        val myId = connectivityManager.getIdentity().deviceId
+        val headers = buildAuthenticatedHeaders(cfg, "pairings|$myId")
+        return try {
+            val resp = transport.getJson("${cfg.functionsBaseUrl()}/pairings?deviceId=$myId", headers)
+            if (!resp.isSuccessful) {
+                return Result.failure(IllegalStateException("Pairing sync HTTP ${resp.statusCode}"))
+            }
+            val guardiansBlock = extractJsonArrayContent(resp.body, "guardians")
+            val hostsBlock = extractJsonArrayContent(resp.body, "hosts")
+            val guardians = parsePeerArray(guardiansBlock)
+            val hosts = parsePeerArray(hostsBlock)
+            connectivityManager.reconcileBackendPairings(
+                confirmedGuardians = guardians.map { it.deviceId to it.deviceName },
+                confirmedHosts = hosts.map { it.deviceId to it.deviceName },
+                relayUrl = cfg.functionsBaseUrl()
+            )
+            Result.success(SyncedPairingsResult(guardians, hosts))
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Polls `/inbox` for paired-host alerts and downloads WAV evidence chunks in sequence order.
+     */
+    fun pollGuardianInbox(): Result<List<ReceivedGuardianAlert>> {
+        val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
+        if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
+        if (!ensureDeviceRegistered()) {
+            return Result.failure(IllegalStateException("Guardian device authentication required to poll inbox"))
+        }
+
+        val headers = buildAuthenticatedHeaders(cfg, "inbox|all")
+        return try {
+            val resp = transport.getJson("${cfg.functionsBaseUrl()}/inbox", headers)
+            if (!resp.isSuccessful) {
+                return Result.failure(IllegalStateException("Inbox sync HTTP ${resp.statusCode}: ${resp.body.take(120)}"))
+            }
+            val alerts = parseSupabaseInboxAlerts(resp.body)
+            alerts.forEach { alert -> connectivityManager.recordReceivedAlert(alert) }
+            Result.success(alerts)
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Sends authenticated Guardian receipt acknowledgment to Supabase `/ack`.
+     */
+    fun acknowledgeIncident(incidentId: String): Result<Unit> {
+        val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
+        if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
+        if (!ensureDeviceRegistered()) {
+            return Result.failure(IllegalStateException("Device authentication required to acknowledge alert"))
+        }
+
+        val identity = connectivityManager.getIdentity()
+        val headers = buildAuthenticatedHeaders(cfg, "ack|$incidentId")
+        val json = """{"incidentId":"${jsonEscape(incidentId)}","guardianName":"${jsonEscape(identity.deviceName)}"}"""
+        return try {
+            val resp = transport.postJson("${cfg.functionsBaseUrl()}/ack", json, headers)
+            if (resp.isSuccessful) {
+                connectivityManager.markReceivedAlertAcknowledged(incidentId)
+                Result.success(Unit)
+            } else {
+                val err = extractJsonString(resp.body, "error") ?: "HTTP ${resp.statusCode}"
+                Result.failure(IllegalStateException("Ack rejected: $err"))
+            }
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -429,10 +603,169 @@ class SupabaseEmergencyBackendClient(
         }
     }
 
-    private fun ensureDeviceRegistered() {
-        if (!deviceRegistered.get()) {
-            registerDevice()
+    private fun ensureDeviceRegistered(): Boolean {
+        if (deviceRegistered.get()) return true
+        return registerDevice().isSuccess
+    }
+
+    private fun parseSupabaseInboxAlerts(body: String): List<ReceivedGuardianAlert> {
+        val existingByIncident = connectivityManager.state.value.receivedAlerts.associateBy { it.incidentId }
+        val alertsArray = extractJsonArrayContent(body, "alerts")
+        if (alertsArray.isBlank()) return emptyList()
+
+        val objects = splitTopLevelJsonObjects(alertsArray)
+        val results = mutableListOf<ReceivedGuardianAlert>()
+        for (obj in objects) {
+            val incidentId = extractJsonString(obj, "incidentId") ?: continue
+            val hostId = extractJsonString(obj, "hostDeviceId") ?: "unknown-host"
+            val hostName = extractJsonString(obj, "hostDeviceName") ?: "Protected Device"
+            val distressType = extractJsonString(obj, "distressType") ?: "EMERGENCY"
+            val conf = extractJsonNumber(obj, "confidence")?.toFloat() ?: 1.0f
+            val msg = extractJsonString(obj, "emergencyMessage") ?: "Emergency Alert"
+            val lat = extractJsonNumber(obj, "latitude")
+            val lon = extractJsonNumber(obj, "longitude")
+            val acc = extractJsonNumber(obj, "accuracyMeters")?.toFloat()
+            val acked = obj.contains(""""isAcknowledged"\s*:\s*true""".toRegex())
+
+            val existingClips = existingByIncident[incidentId]?.audioClips?.associateBy { it.chunkIndex }.orEmpty()
+            val chunksArray = extractJsonArrayContent(obj, "chunks")
+            val chunkObjs = if (chunksArray.isBlank()) emptyList() else splitTopLevelJsonObjects(chunksArray)
+            val clips = mutableListOf<ReceivedGuardianAudioClip>()
+
+            for (ch in chunkObjs) {
+                val seq = extractJsonNumber(ch, "chunkSequence")?.toInt() ?: 0
+                val isPre = ch.contains(""""isPreTrigger"\s*:\s*true""".toRegex())
+                val isFinal = ch.contains(""""isFinal"\s*:\s*true""".toRegex())
+                val fileName = extractJsonString(ch, "fileName") ?: "${incidentId}_chunk_${seq}.wav"
+                val signedUrl = extractJsonString(ch, "signedAudioUrl")
+
+                val cached = existingClips[seq]?.takeIf {
+                    !it.localFilePath.isNullOrBlank() && File(it.localFilePath).exists() && File(it.localFilePath).length() > 44L
+                }
+                if (cached != null) {
+                    clips.add(cached.copy(isFinal = isFinal || cached.isFinal))
+                } else if (!signedUrl.isNullOrBlank()) {
+                    val bin = runCatching { transport.getBinary(signedUrl) }.getOrNull()
+                    if (bin != null && bin.isSuccessful && bin.bytes.isNotEmpty()) {
+                        val saved = connectivityManager.attachReceivedAudioClip(
+                            incidentId = incidentId,
+                            hostDeviceId = hostId,
+                            hostDeviceName = hostName,
+                            chunkIndex = seq,
+                            isPreTrigger = isPre,
+                            isFinal = isFinal,
+                            fileName = fileName,
+                            wavBytes = bin.bytes
+                        )
+                        clips.add(saved)
+                    }
+                }
+            }
+
+            results.add(
+                ReceivedGuardianAlert(
+                    alertId = existingByIncident[incidentId]?.alertId ?: "rx-$incidentId",
+                    incidentId = incidentId,
+                    hostDeviceId = hostId,
+                    hostDeviceName = hostName,
+                    distressType = distressType,
+                    confidence = conf,
+                    emergencyMessage = msg,
+                    latitude = lat,
+                    longitude = lon,
+                    accuracyMeters = acc,
+                    isAcknowledged = acked,
+                    audioClips = clips.sortedBy { if (it.isPreTrigger) 0 else it.chunkIndex }
+                )
+            )
         }
+        return results
+    }
+
+    private fun extractJsonArrayContent(json: String, key: String): String {
+        val keyIdx = json.indexOf("\"$key\"")
+        if (keyIdx < 0) return ""
+        val bracketStart = json.indexOf('[', keyIdx)
+        if (bracketStart < 0) return ""
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for (i in bracketStart until json.length) {
+            val c = json[i]
+            if (escaped) {
+                escaped = false
+                continue
+            }
+            if (c == '\\') {
+                escaped = true
+                continue
+            }
+            if (c == '"') {
+                inString = !inString
+                continue
+            }
+            if (!inString) {
+                if (c == '[') depth++
+                else if (c == ']') {
+                    depth--
+                    if (depth == 0) return json.substring(bracketStart + 1, i)
+                }
+            }
+        }
+        return ""
+    }
+
+    private fun splitTopLevelJsonObjects(arrayContent: String): List<String> {
+        val objects = mutableListOf<String>()
+        var depth = 0
+        var start = -1
+        var inString = false
+        var escaped = false
+        for (i in arrayContent.indices) {
+            val c = arrayContent[i]
+            if (escaped) {
+                escaped = false
+                continue
+            }
+            if (c == '\\') {
+                escaped = true
+                continue
+            }
+            if (c == '"') {
+                inString = !inString
+                continue
+            }
+            if (!inString) {
+                if (c == '{') {
+                    if (depth == 0) start = i
+                    depth++
+                } else if (c == '}') {
+                    depth--
+                    if (depth == 0 && start >= 0) {
+                        objects.add(arrayContent.substring(start, i + 1))
+                        start = -1
+                    }
+                }
+            }
+        }
+        return objects
+    }
+
+    private fun parsePeerArray(arrayContent: String): List<RemotePairedPeer> {
+        if (arrayContent.isBlank()) return emptyList()
+        return splitTopLevelJsonObjects(arrayContent).mapNotNull { obj ->
+            val id = extractJsonString(obj, "deviceId") ?: return@mapNotNull null
+            val name = extractJsonString(obj, "deviceName") ?: "GuardianGrid Device"
+            RemotePairedPeer(id, name)
+        }
+    }
+
+    private fun extractJsonString(json: String, key: String): String? {
+        return """"$key"\s*:\s*"([^"]*)"""".toRegex().find(json)?.groupValues?.get(1)
+    }
+
+    private fun extractJsonNumber(json: String, key: String): Double? {
+        return """"$key"\s*:\s*(-?\d+(?:\.\d+)?)""".toRegex().find(json)?.groupValues?.get(1)?.toDoubleOrNull()
     }
 
     internal fun buildAuthenticatedHeaders(

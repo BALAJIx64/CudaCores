@@ -12,7 +12,9 @@ import kotlin.math.sqrt
  */
 class MotionFeatureExtractor(
     private val windowCapacityMs: Long = 1000L,
-    private val baselineCalibrator: MotionBaselineCalibrator = MotionBaselineCalibrator()
+    private val baselineCalibrator: MotionBaselineCalibrator = MotionBaselineCalibrator(),
+    private val freefallMaxMagnitude: Float = 2.8f,
+    private val freefallMinDurationMs: Long = 140L
 ) {
     private val window = LinkedList<MotionSample>()
     private var lastSample: MotionSample? = null
@@ -61,8 +63,8 @@ class MotionFeatureExtractor(
             0f
         }
 
-        // Freefall tracking (< 3.0 m/s^2)
-        val isFreefallNow = currentMag in 0.0f..3.0f
+        // Freefall tracking (< freefallMaxMagnitude)
+        val isFreefallNow = currentMag in 0.0f..freefallMaxMagnitude
         if (isFreefallNow) {
             if (freefallStartTimeMs == null) {
                 freefallStartTimeMs = sample.timestampEpochMs
@@ -70,7 +72,7 @@ class MotionFeatureExtractor(
         } else {
             if (freefallStartTimeMs != null) {
                 val duration = sample.timestampEpochMs - freefallStartTimeMs!!
-                if (duration in 80L..2000L) { // Freefall between 80ms and 2s
+                if (duration in freefallMinDurationMs..2000L) {
                     lastFreefallEventMs = sample.timestampEpochMs
                 }
                 freefallStartTimeMs = null
@@ -170,7 +172,7 @@ class MotionFeatureExtractor(
             peakJerk = if (peakJerk.isNaN()) currentJerk else peakJerk,
             directionReversals = reversals,
             freefallDurationMs = freefallDuration,
-            hasFreefallPrecedingImpact = hasFreefallPreceding || (freefallDuration >= 80L),
+            hasFreefallPrecedingImpact = hasFreefallPreceding || (freefallDuration >= freefallMinDurationMs),
             dynamicAcceleration = if (dynamicAcc.isNaN()) 0f else dynamicAcc
         )
     }

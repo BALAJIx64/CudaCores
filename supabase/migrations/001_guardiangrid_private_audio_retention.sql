@@ -35,6 +35,18 @@ CREATE TABLE IF NOT EXISTS public.guardian_pairings (
     PRIMARY KEY (host_device_id, guardian_device_id)
 );
 
+-- 3b. Single-Use, Expiring QR Pairing Invitations (prevents reuse & keeps permanent secrets off QR codes)
+CREATE TABLE IF NOT EXISTS public.guardian_pairing_invitations (
+    invite_id TEXT PRIMARY KEY,
+    host_device_id TEXT NOT NULL REFERENCES public.guardian_devices(device_id) ON DELETE CASCADE,
+    host_device_name TEXT NOT NULL,
+    token_hash TEXT NOT NULL,
+    expires_at TIMESTAMPTZ NOT NULL,
+    consumed_at TIMESTAMPTZ,
+    consumed_by_device_id TEXT REFERENCES public.guardian_devices(device_id) ON DELETE SET NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
 -- 4. Emergency Incidents Table
 CREATE TABLE IF NOT EXISTS public.emergency_incidents (
     incident_id TEXT PRIMARY KEY,
@@ -46,6 +58,9 @@ CREATE TABLE IF NOT EXISTS public.emergency_incidents (
     longitude DOUBLE PRECISION,
     accuracy_meters REAL,
     status TEXT NOT NULL DEFAULT 'ACTIVE', -- ACTIVE | COMPLETED | ACKNOWLEDGED
+    acknowledged_at TIMESTAMPTZ,
+    acknowledged_by_device_id TEXT,
+    acknowledged_by_name TEXT,
     total_chunks INT NOT NULL DEFAULT 0,
     total_duration_ms BIGINT NOT NULL DEFAULT 0,
     created_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
@@ -82,6 +97,7 @@ CREATE TABLE IF NOT EXISTS public.guardian_request_nonces (
 -- 7. Enable Strict Row-Level Security (RLS) across all tables
 ALTER TABLE public.guardian_devices ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.guardian_pairings ENABLE ROW LEVEL SECURITY;
+ALTER TABLE public.guardian_pairing_invitations ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.emergency_incidents ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.emergency_audio_chunks ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.guardian_request_nonces ENABLE ROW LEVEL SECURITY;
@@ -93,6 +109,9 @@ CREATE POLICY "deny_anon_devices" ON public.guardian_devices FOR ALL TO anon, au
 
 DROP POLICY IF EXISTS "deny_anon_pairings" ON public.guardian_pairings;
 CREATE POLICY "deny_anon_pairings" ON public.guardian_pairings FOR ALL TO anon, authenticated USING (FALSE) WITH CHECK (FALSE);
+
+DROP POLICY IF EXISTS "deny_anon_invitations" ON public.guardian_pairing_invitations;
+CREATE POLICY "deny_anon_invitations" ON public.guardian_pairing_invitations FOR ALL TO anon, authenticated USING (FALSE) WITH CHECK (FALSE);
 
 DROP POLICY IF EXISTS "deny_anon_incidents" ON public.emergency_incidents;
 CREATE POLICY "deny_anon_incidents" ON public.emergency_incidents FOR ALL TO anon, authenticated USING (FALSE) WITH CHECK (FALSE);
@@ -124,6 +143,9 @@ DECLARE
 BEGIN
     DELETE FROM public.guardian_request_nonces
     WHERE expires_at < NOW();
+
+    DELETE FROM public.guardian_pairing_invitations
+    WHERE expires_at < NOW() - INTERVAL '1 day';
 
     DELETE FROM storage.objects
     WHERE bucket_id = 'guardian-audio-evidence'

@@ -141,7 +141,7 @@ fun SettingsScreen(
     val scrollState = rememberScrollState()
 
     var screamSensitivity by remember {
-        mutableFloatStateOf(container?.settingsRepository?.getSettings()?.screamSensitivity ?: 0.80f)
+        mutableFloatStateOf(container?.settingsRepository?.getSettings()?.screamSensitivity ?: 0.55f)
     }
     var motionSensitivity by remember {
         mutableFloatStateOf(container?.settingsRepository?.getSettings()?.motionSensitivity ?: 1.0f)
@@ -653,7 +653,7 @@ fun SettingsScreen(
                         audioModule.setSensitivity(it)
                         container?.settingsRepository?.setScreamSensitivity(it)
                     },
-                    valueRange = 0.50f..1.0f,
+                    valueRange = 0.25f..1.0f,
                     colors = SliderDefaults.colors(
                         thumbColor = BrandMagenta,
                         activeTrackColor = BrandMagenta,
