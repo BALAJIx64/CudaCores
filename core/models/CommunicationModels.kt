@@ -32,7 +32,10 @@ data class AlertPayload(
     val location: LocationData? = null,
     val emergencyMessage: String = "GuardianGrid Emergency Alert",
     val audioSegmentPath: String? = null,
-    val recipientContacts: List<EmergencyContact> = emptyList()
+    val recipientContacts: List<EmergencyContact> = emptyList(),
+    val isAudioRelay: Boolean = false,
+    val audioChunkIndex: Int? = null,
+    val isFinalAudioChunk: Boolean = false
 )
 
 /**

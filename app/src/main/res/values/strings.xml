@@ -1,6 +1,6 @@
 <resources>
     <string name="app_name">GuardianGrid</string>
-    <string name="app_tagline">Multimodal Distress Detection &amp; Resilient Emergency Communication</string>
+    <string name="app_tagline">Your Safety. Always Guarded.</string>
     <string name="status_monitoring_active">Protection Active</string>
     <string name="status_monitoring_idle">Standby Mode</string>
     <string name="status_emergency">EMERGENCY ESCALATED</string>

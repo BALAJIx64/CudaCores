@@ -4,10 +4,17 @@
     android:height="108dp"
     android:viewportWidth="108"
     android:viewportHeight="108">
+    <!-- Uniform deep obsidian canvas (no hard inner box clipped by OEM masks) -->
     <path
         android:fillColor="#0D0E11"
         android:pathData="M0,0h108v108h-108z" />
+    <!-- Subtle circular safety halo centered at (54,54) -->
     <path
-        android:fillColor="#16181D"
-        android:pathData="M14,14h80v80h-80z" />
+        android:fillColor="#181A22"
+        android:pathData="M54,18 A36,36 0 1,0 54,90 A36,36 0 1,0 54,18 Z" />
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M54,21 A33,33 0 1,0 54,87 A33,33 0 1,0 54,21 Z"
+        android:strokeWidth="1.2"
+        android:strokeColor="#3DE0115F" />
 </vector>

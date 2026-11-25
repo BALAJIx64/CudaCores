@@ -27,6 +27,7 @@ import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -44,6 +45,9 @@ import com.guardiangrid.core.state.EmergencyStateHolder
 import com.guardiangrid.location.GuardianLocationManager
 import com.guardiangrid.modules.audio.AudioModuleStub
 import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
+import com.guardiangrid.ui.brand.GuardianGridSplashScreen
+import com.guardiangrid.ui.guardian.GuardianPairingScreen
+import kotlinx.coroutines.delay
 import com.guardiangrid.ui.theme.BrandMagenta
 import com.guardiangrid.ui.theme.DarkBackground
 import com.guardiangrid.ui.theme.DarkBorder
@@ -61,7 +65,8 @@ enum class MainNavDestination {
     EMERGENCY_CONTACTS,
     COMMUNICATION_CONFIG,
     DELIVERY_STATUS,
-    OFFLINE_QUEUE
+    OFFLINE_QUEUE,
+    GUARDIAN_PAIRING
 }
 
 /**
@@ -84,6 +89,12 @@ fun GuardianGridMainScreen(
 ) {
     val state by EmergencyStateHolder.state.collectAsState()
     var currentDestination by remember { mutableStateOf(MainNavDestination.DASHBOARD) }
+    var showSplash by remember { mutableStateOf(true) }
+
+    LaunchedEffect(Unit) {
+        delay(1150L)
+        showSplash = false
+    }
 
     // Intercept back button if on a secondary tab
     BackHandler(enabled = currentDestination != MainNavDestination.DASHBOARD && state.emergencyLevel != EmergencyLevel.CONFIRMED_EMERGENCY && state.emergencyLevel != EmergencyLevel.VERIFYING) {
@@ -91,7 +102,8 @@ fun GuardianGridMainScreen(
             MainNavDestination.EMERGENCY_CONTACTS,
             MainNavDestination.COMMUNICATION_CONFIG,
             MainNavDestination.DELIVERY_STATUS,
-            MainNavDestination.OFFLINE_QUEUE -> MainNavDestination.SETTINGS
+            MainNavDestination.OFFLINE_QUEUE,
+            MainNavDestination.GUARDIAN_PAIRING -> MainNavDestination.SETTINGS
             else -> MainNavDestination.DASHBOARD
         }
     }
@@ -100,7 +112,7 @@ fun GuardianGridMainScreen(
         modifier = Modifier.fillMaxSize(),
         color = MaterialTheme.colorScheme.background
     ) {
-        // High-priority emergency state navigation overrides normal view hierarchy
+        // High-priority emergency state navigation overrides splash and normal view hierarchy
         when {
             state.emergencyLevel == EmergencyLevel.CONFIRMED_EMERGENCY -> {
                 EmergencyAlertScreen(
@@ -120,6 +132,9 @@ fun GuardianGridMainScreen(
                         // Automatically transitions via state change
                     }
                 )
+            }
+            showSplash -> {
+                GuardianGridSplashScreen()
             }
             else -> {
                 Scaffold(
@@ -191,7 +206,8 @@ fun GuardianGridMainScreen(
                                         currentDestination == MainNavDestination.EMERGENCY_CONTACTS ||
                                         currentDestination == MainNavDestination.COMMUNICATION_CONFIG ||
                                         currentDestination == MainNavDestination.DELIVERY_STATUS ||
-                                        currentDestination == MainNavDestination.OFFLINE_QUEUE,
+                                        currentDestination == MainNavDestination.OFFLINE_QUEUE ||
+                                        currentDestination == MainNavDestination.GUARDIAN_PAIRING,
                                 onClick = { currentDestination = MainNavDestination.SETTINGS },
                                 icon = {
                                     Icon(
@@ -281,6 +297,16 @@ fun GuardianGridMainScreen(
                                         },
                                         onNavigateToOfflineQueue = {
                                             currentDestination = MainNavDestination.OFFLINE_QUEUE
+                                        },
+                                        onNavigateToGuardianPairing = {
+                                            currentDestination = MainNavDestination.GUARDIAN_PAIRING
+                                        }
+                                    )
+                                }
+                                MainNavDestination.GUARDIAN_PAIRING -> {
+                                    GuardianPairingScreen(
+                                        onNavigateBack = {
+                                            currentDestination = MainNavDestination.SETTINGS
                                         }
                                     )
                                 }

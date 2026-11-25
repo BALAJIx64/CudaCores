@@ -12,6 +12,13 @@ data class HttpResponse(
     val isSuccessful: Boolean = statusCode in 200..299
 )
 
+data class BinaryHttpResponse(
+    val statusCode: Int,
+    val bytes: ByteArray,
+    val isSuccessful: Boolean = statusCode in 200..299,
+    val errorMessage: String? = null
+)
+
 /**
  * Abstraction for making outbound HTTP calls.
  * Decouples network I/O from Android platform or testing environments.
@@ -36,4 +43,34 @@ interface HttpTransport {
         url: String,
         headers: Map<String, String> = emptyMap()
     ): HttpResponse
+
+    /**
+     * Executes an HTTP POST using multipart/form-data to upload a binary file (e.g. WAV audio).
+     */
+    @Throws(IOException::class)
+    fun postMultipartFile(
+        url: String,
+        fieldName: String,
+        fileName: String,
+        mimeType: String,
+        fileBytes: ByteArray,
+        formFields: Map<String, String> = emptyMap(),
+        headers: Map<String, String> = emptyMap()
+    ): HttpResponse = HttpResponse(
+        statusCode = 501,
+        body = """{"ok":false,"description":"Multipart upload not supported by this transport"}"""
+    )
+
+    /**
+     * Executes an HTTP GET returning raw binary bytes (e.g. WAV audio clip).
+     */
+    @Throws(IOException::class)
+    fun getBinary(
+        url: String,
+        headers: Map<String, String> = emptyMap()
+    ): BinaryHttpResponse = BinaryHttpResponse(
+        statusCode = 501,
+        bytes = ByteArray(0),
+        errorMessage = "Binary fetch not supported by this transport"
+    )
 }

@@ -24,8 +24,8 @@ class AudioModuleStub(
     modelDirectory: File? = null
 ) : AudioDistressDetector, AudioEvidenceRecorder {
 
-    // Core Subsystem Components
-    val circularBuffer: CircularAudioBuffer = CircularAudioBuffer(durationMs = 5000L, sampleRate = 16000)
+    // Core Subsystem Components (10-second volatile RAM rolling buffer)
+    val circularBuffer: CircularAudioBuffer = CircularAudioBuffer(durationMs = 10_000L, sampleRate = 16000)
     val captureManager: AudioCaptureManager = AudioCaptureManager(sampleRate = 16000, circularBuffer = circularBuffer)
     val screamClassifier: ScreamDistressClassifier = ScreamDistressClassifier(modelDirectory, circularBuffer)
     val evidenceRecorder: TwoStageAudioEvidenceRecorder = TwoStageAudioEvidenceRecorder(circularBuffer, captureManager, cacheDirectory)
@@ -73,6 +73,35 @@ class AudioModuleStub(
     override fun stopRecording() {
         evidenceRecorder.stopRecording()
     }
+
+    /**
+     * Initiates a continuous emergency incident audio relay session:
+     * - Immediately snapshots the previous 10 seconds from [circularBuffer] as one unsplit WAV file
+     * - Continuously captures subsequent 10-second (160,000 sample @ 16 kHz) chunks without restarting mic capture
+     * - Maintains a complete chronological incident WAV file on disk until stopped or max duration reached.
+     */
+    fun startIncidentAudioRelay(
+        incidentId: String,
+        preTriggerDurationMs: Long = 10_000L,
+        chunkDurationMs: Long = 10_000L,
+        maxRecordingDurationMs: Long = 300_000L
+    ): IncidentAudioRelaySession {
+        return evidenceRecorder.startIncidentRelaySession(
+            incidentId = incidentId,
+            preTriggerDurationMs = preTriggerDurationMs,
+            chunkDurationMs = chunkDurationMs,
+            maxRecordingDurationMs = maxRecordingDurationMs
+        )
+    }
+
+    /**
+     * Cleans up satisfied source chunks only when BOTH delivered and past retention window.
+     */
+    fun cleanupSatisfiedEvidenceChunks(
+        deliveredFilePaths: Set<String>,
+        retentionWindowMs: Long = TwoStageAudioEvidenceRecorder.DEFAULT_CHUNK_RETENTION_MS,
+        nowEpochMs: Long = System.currentTimeMillis()
+    ): Int = evidenceRecorder.cleanupSatisfiedChunks(deliveredFilePaths, retentionWindowMs, nowEpochMs)
 
     // --- Simulation & Testing Bridge ---
 

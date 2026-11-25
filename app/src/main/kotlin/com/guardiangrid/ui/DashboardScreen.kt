@@ -184,7 +184,7 @@ fun DashboardScreen(
             ) {
                 GuardianGridWordmark(
                     emblemSize = 36.dp,
-                    subtitle = "AUTONOMOUS SAFETY NET"
+                    subtitle = "YOUR SAFETY. ALWAYS GUARDED."
                 )
 
                 Row(

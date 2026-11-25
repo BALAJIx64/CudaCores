@@ -15,6 +15,9 @@ import com.guardiangrid.core.models.DistressType
 import com.guardiangrid.core.models.EmergencyIncident
 import com.guardiangrid.core.models.EmergencyLevel
 import com.guardiangrid.core.models.LocationData
+import com.guardiangrid.modules.audio.AudioModuleStub
+import com.guardiangrid.modules.communication.EmergencyCommunicatorImpl
+import com.guardiangrid.modules.communication.telegram.TelegramEmergencyDispatcher
 import com.guardiangrid.modules.motion.fusion.MultimodalFusionEngineImpl
 import com.guardiangrid.modules.motion.state.EmergencyStateMachine
 import com.guardiangrid.modules.motion.state.MotionEmergencyState
@@ -22,13 +25,16 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import java.io.File
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
 
 /**
  * Production implementation of EmergencyCoordinator.
@@ -62,12 +68,26 @@ class EmergencyCoordinatorImpl(
     private var audioMonitoringJob: Job? = null
     private var motionMonitoringJob: Job? = null
     private var verificationCountdownJob: Job? = null
+    private var audioRelayJob: Job? = null
 
     @Volatile
     private var activeIncidentDispatched = false
 
     @Volatile
     private var verificationTimeoutOverrideMs: Long = stateMachine.verificationTimeoutMs
+
+    @Volatile
+    private var audioChunkDurationMs: Long = 10_000L
+
+    @Volatile
+    private var maxAudioRecordingDurationMs: Long = 300_000L
+
+    private val captureStartedByEmergencySession = AtomicBoolean(false)
+
+    fun setAudioRecordingConfig(chunkDurationMs: Long = 10_000L, maxRecordingDurationMs: Long = 300_000L) {
+        this.audioChunkDurationMs = chunkDurationMs.coerceAtLeast(100L)
+        this.maxAudioRecordingDurationMs = maxRecordingDurationMs.coerceAtLeast(this.audioChunkDurationMs)
+    }
 
     fun setVerificationTimeoutMs(timeoutMs: Long) {
         verificationTimeoutOverrideMs = timeoutMs.coerceIn(3000L, 30000L)
@@ -129,6 +149,10 @@ class EmergencyCoordinatorImpl(
 
     override fun cancelEmergency(reason: String) {
         cancelVerificationCountdown()
+        stopActiveAudioRelay()
+        stopAudioMonitoring()
+        stopMotionMonitoring()
+        EmergencyStateHolder.setSubsystemStatus(audioRunning = false, motionRunning = false)
         stateMachine.cancelEmergency(reason)
         EmergencyStateHolder.setDiscreetModeEnabled(false)
 
@@ -151,6 +175,10 @@ class EmergencyCoordinatorImpl(
 
     override fun resolveEmergency(reason: String) {
         cancelVerificationCountdown()
+        stopActiveAudioRelay()
+        stopAudioMonitoring()
+        stopMotionMonitoring()
+        EmergencyStateHolder.setSubsystemStatus(audioRunning = false, motionRunning = false)
         stateMachine.resolveEmergency(reason)
         EmergencyStateHolder.setDiscreetModeEnabled(false)
 
@@ -169,6 +197,16 @@ class EmergencyCoordinatorImpl(
         EmergencyStateHolder.setProtectionActive(false, ProtectionMode.STANDBY)
         EmergencyStateHolder.updateVerificationCountdown(0L)
         activeIncidentDispatched = false
+    }
+
+    private fun stopActiveAudioRelay() {
+        if (audioDetector is AudioEvidenceRecorder) {
+            // Signals recorder to flush remaining tail samples cleanly into final partial chunk
+            audioDetector.stopRecording()
+        }
+        if (captureStartedByEmergencySession.getAndSet(false) && audioDetector is AudioModuleStub) {
+            audioDetector.captureManager.stopCapture()
+        }
     }
 
     fun forceDispatchNow() {
@@ -226,6 +264,16 @@ class EmergencyCoordinatorImpl(
     fun resumeMonitoringAfterUserClearance() {
         stateMachine.resetToNormal()
         activeIncidentDispatched = false
+        val hasAudioPermission = EmergencyStateHolder.state.value.isAudioPermissionGranted
+        if (hasAudioPermission && audioDetector != null && !audioDetector.isMonitoring()) {
+            startAudioMonitoring()
+        }
+        if (motionDetector != null && !motionDetector.isMonitoring()) {
+            startMotionMonitoring()
+        }
+        val audioRunning = if (audioDetector != null) (hasAudioPermission && audioDetector.isMonitoring()) else true
+        val motionRunning = if (motionDetector != null) motionDetector.isMonitoring() else true
+        EmergencyStateHolder.setSubsystemStatus(audioRunning = audioRunning, motionRunning = motionRunning)
         val discreet = EmergencyStateHolder.state.value.isDiscreetModeEnabled
         val mode = if (discreet) ProtectionMode.DISCREET_MONITORING else ProtectionMode.ACTIVE_MONITORING
         EmergencyStateHolder.setProtectionActive(true, mode)
@@ -235,6 +283,9 @@ class EmergencyCoordinatorImpl(
         EmergencyStateHolder.setProtectionActive(false, ProtectionMode.STANDBY)
         EmergencyStateHolder.setSubsystemStatus(audioRunning = false, motionRunning = false)
         cancelVerificationCountdown()
+        stopActiveAudioRelay()
+        audioRelayJob?.cancel()
+        audioRelayJob = null
         stopAudioMonitoring()
         stopMotionMonitoring()
         stateMachine.resetToNormal()
@@ -472,11 +523,47 @@ class EmergencyCoordinatorImpl(
             deliveryStatus = "IN_FLIGHT"
         )
 
-        // Capture rolling pre-incident audio buffer as forensic evidence
-        if (audioDetector is AudioEvidenceRecorder) {
+        // If mic capture is not already running (e.g. Manual SOS without prior protection activation),
+        // start continuous capture cleanly without restarting between chunks.
+        if (audioDetector is AudioModuleStub && !audioDetector.captureManager.isCapturing && EmergencyStateHolder.state.value.isAudioPermissionGranted) {
+            if (audioDetector.captureManager.startCapture(hasRecordAudioPermission = true).isSuccess) {
+                captureStartedByEmergencySession.set(true)
+            }
+        }
+
+        // Initiate continuous 10s pre-trigger + continuous 10s post-trigger chunked audio relay synchronously
+        val relaySession = if (audioDetector is AudioModuleStub) {
+            try {
+                audioDetector.startIncidentAudioRelay(
+                    incidentId = updatedOrCreatedIncidentId(incident),
+                    preTriggerDurationMs = 10_000L,
+                    chunkDurationMs = audioChunkDurationMs,
+                    maxRecordingDurationMs = maxAudioRecordingDurationMs
+                )
+            } catch (e: Exception) {
+                Log.w("EmergencyCoordinator", "Incident audio relay init note: ${e.message}")
+                null
+            }
+        } else null
+
+        val incidentWithPreAudio = if (relaySession != null) {
+            val incUpdated = incident.copy(
+                audioSegments = incident.audioSegments + relaySession.preTriggerSegment,
+                lastUpdatedEpochMs = System.currentTimeMillis()
+            )
+            _activeIncident.value = incUpdated
+            EmergencyStateHolder.setEmergencyIncident(incUpdated)
+            persistDurableIncident(incUpdated, audioEvidencePath = relaySession.preTriggerSegment.filePath)
+            incUpdated
+        } else {
+            incident
+        }
+
+        // Fallback pre-trigger capture when an external AudioEvidenceRecorder (non-AudioModuleStub) is injected
+        if (relaySession == null && audioDetector is AudioEvidenceRecorder) {
             coroutineScope.launch {
                 try {
-                    val result = audioDetector.captureStageOneBuffer(5000L)
+                    val result = audioDetector.captureStageOneBuffer(10_000L)
                     result.getOrNull()?.let { segment ->
                         _activeIncident.value?.let { inc ->
                             val updated = inc.copy(
@@ -494,34 +581,176 @@ class EmergencyCoordinatorImpl(
             }
         }
 
-        // Dispatch alert once per incident
+        // Dispatch alert + sequential 10s audio relay pipeline once per incident
         if (!activeIncidentDispatched) {
             activeIncidentDispatched = true
             communicator?.let { comm ->
                 val payload = AlertPayload(
-                    incidentId = incident.incidentId,
-                    timestampEpochMs = incident.startTimeEpochMs,
+                    incidentId = incidentWithPreAudio.incidentId,
+                    timestampEpochMs = incidentWithPreAudio.startTimeEpochMs,
                     distressType = type,
                     confidence = triggeringSignal?.confidence ?: 1.0f,
                     location = loc,
                     emergencyMessage = if (isSilent) "DISCREET SOS: Silent distress alert triggered." else "EMERGENCY ALERT: $notes",
+                    audioSegmentPath = relaySession?.preTriggerSegment?.filePath,
                     recipientContacts = EmergencyStateHolder.state.value.trustedContacts
                 )
                 coroutineScope.launch {
                     try {
-                        val receipts = comm.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
+                        val hasPairedGuardians = (comm as? EmergencyCommunicatorImpl)
+                            ?.guardianConnectivityManager
+                            ?.getActiveGuardians()
+                            ?.isNotEmpty() == true
+                        val hasSupabase = (comm as? EmergencyCommunicatorImpl)
+                            ?.supabaseBackendClient
+                            ?.isConfigured() == true
+                        val channels = buildList {
+                            add(DeliveryChannel.TELEGRAM)
+                            add(DeliveryChannel.SMS)
+                            if (hasPairedGuardians || hasSupabase) {
+                                add(DeliveryChannel.INTERNET_API)
+                            }
+                        }
+                        val receipts = comm.dispatchAlert(payload, channels)
                         receipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
                         val anyDelivered = receipts.any { it.status == DeliveryStatus.DELIVERED }
                         val deliveryStatus = if (anyDelivered) "DELIVERED" else "FAILED_RETRYING"
-                        persistDurableIncident(incident, deliveryStatus = deliveryStatus, deliveryAttempts = 1)
+                        persistDurableIncident(incidentWithPreAudio, deliveryStatus = deliveryStatus, deliveryAttempts = 1)
                     } catch (e: Exception) {
                         Log.e("EmergencyCoordinator", "Alert dispatch failed: ${e.message}")
-                        persistDurableIncident(incident, deliveryStatus = "FAILED_RETRYING", deliveryAttempts = 1)
+                        persistDurableIncident(incidentWithPreAudio, deliveryStatus = "FAILED_RETRYING", deliveryAttempts = 1)
+                    }
+                }
+
+                // Dedicated strictly sequential audio relay pipeline:
+                // 1) Pre-trigger 10s WAV -> 2) Subsequent 10s chunks (#1..N) -> 3) Incident-completed notification
+                if (relaySession != null && comm is EmergencyCommunicatorImpl) {
+                    audioRelayJob?.cancel()
+                    audioRelayJob = coroutineScope.launch {
+                        val uploadQueue = Channel<suspend () -> Unit>(Channel.UNLIMITED)
+                        val senderJob = launch {
+                            for (task in uploadQueue) {
+                                try {
+                                    task()
+                                } catch (ce: kotlinx.coroutines.CancellationException) {
+                                    throw ce
+                                } catch (e: Exception) {
+                                    // Never abort recording or remaining chunks if a network upload fails
+                                    Log.w("EmergencyCoordinator", "Sequential audio upload note: ${e.message}")
+                                }
+                            }
+                        }
+
+                        // Enqueue pre-trigger 10s unsplit WAV first
+                        uploadQueue.send {
+                            val preCaption = TelegramEmergencyDispatcher.formatAudioChunkCaption(
+                                incidentId = incidentWithPreAudio.incidentId,
+                                chunkIndex = 0,
+                                isPreTrigger = true,
+                                isFinal = false,
+                                captureTimestampEpochMs = relaySession.preTriggerSegment.timestampEpochMs,
+                                durationMs = relaySession.preTriggerSegment.durationMs
+                            )
+                            val preReceipts = comm.dispatchAudioEvidence(
+                                incidentId = incidentWithPreAudio.incidentId,
+                                distressType = type,
+                                confidence = triggeringSignal?.confidence ?: 1.0f,
+                                audioFilePath = relaySession.preTriggerSegment.filePath,
+                                caption = preCaption,
+                                chunkIndex = 0,
+                                isPreTrigger = true,
+                                isFinal = false,
+                                captureTimestampEpochMs = relaySession.preTriggerSegment.timestampEpochMs,
+                                durationMs = relaySession.preTriggerSegment.durationMs
+                            )
+                            preReceipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
+                        }
+
+                        val collectChunksJob = launch {
+                            relaySession.chunkFlow.collect { chunk ->
+                                _activeIncident.value?.let { inc ->
+                                    val updated = inc.copy(
+                                        audioSegments = inc.audioSegments + chunk.segment,
+                                        lastUpdatedEpochMs = System.currentTimeMillis()
+                                    )
+                                    _activeIncident.value = updated
+                                    EmergencyStateHolder.setEmergencyIncident(updated)
+                                }
+                                uploadQueue.send {
+                                    val chunkCaption = TelegramEmergencyDispatcher.formatAudioChunkCaption(
+                                        incidentId = incidentWithPreAudio.incidentId,
+                                        chunkIndex = chunk.chunkIndex,
+                                        isPreTrigger = false,
+                                        isFinal = chunk.isFinal,
+                                        captureTimestampEpochMs = chunk.captureTimestampEpochMs,
+                                        durationMs = chunk.durationMs
+                                    )
+                                    val chunkReceipts = comm.dispatchAudioEvidence(
+                                        incidentId = incidentWithPreAudio.incidentId,
+                                        distressType = type,
+                                        confidence = triggeringSignal?.confidence ?: 1.0f,
+                                        audioFilePath = chunk.segment.filePath,
+                                        caption = chunkCaption,
+                                        chunkIndex = chunk.chunkIndex,
+                                        isPreTrigger = false,
+                                        isFinal = chunk.isFinal,
+                                        captureTimestampEpochMs = chunk.captureTimestampEpochMs,
+                                        durationMs = chunk.durationMs
+                                    )
+                                    chunkReceipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
+                                }
+                            }
+                        }
+
+                        try {
+                            val summary = relaySession.completionDeferred.await()
+                            collectChunksJob.cancel()
+
+                            // Stop session-owned capture if max duration reached automatically
+                            if (captureStartedByEmergencySession.getAndSet(false) && audioDetector is AudioModuleStub) {
+                                audioDetector.captureManager.stopCapture()
+                            }
+
+                            val fullSegment = summary.combinedRecordingSegment
+                            _activeIncident.value?.let { inc ->
+                                val updated = inc.copy(
+                                    audioSegments = (listOf(fullSegment) + inc.audioSegments).distinctBy { it.filePath },
+                                    lastUpdatedEpochMs = System.currentTimeMillis()
+                                )
+                                _activeIncident.value = updated
+                                EmergencyStateHolder.setEmergencyIncident(updated)
+                                persistDurableIncident(updated, audioEvidencePath = fullSegment.filePath)
+                            } ?: persistDurableIncident(incidentWithPreAudio, audioEvidencePath = fullSegment.filePath)
+
+                            uploadQueue.send {
+                                val doneReceipts = comm.dispatchIncidentCompletedNotification(
+                                    incidentId = incidentWithPreAudio.incidentId,
+                                    totalPostChunks = summary.totalPostTriggerChunks,
+                                    totalDurationMs = summary.totalDurationMs,
+                                    combinedFileName = File(fullSegment.filePath).name
+                                )
+                                doneReceipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
+                            }
+                            uploadQueue.close()
+                            senderJob.join()
+                        } catch (ce: kotlinx.coroutines.CancellationException) {
+                            collectChunksJob.cancel()
+                            uploadQueue.close()
+                            senderJob.cancel()
+                            throw ce
+                        } catch (e: Exception) {
+                            collectChunksJob.cancel()
+                            uploadQueue.close()
+                            senderJob.join()
+                            Log.w("EmergencyCoordinator", "Audio relay chunk pipeline note: ${e.message}")
+                        }
                     }
                 }
             }
         }
     }
+
+    private fun updatedOrCreatedIncidentId(incident: EmergencyIncident): String = incident.incidentId
 
     private fun persistDurableIncident(
         incident: EmergencyIncident,

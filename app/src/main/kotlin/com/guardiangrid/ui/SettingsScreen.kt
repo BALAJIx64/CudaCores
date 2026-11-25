@@ -1,8 +1,11 @@
 package com.guardiangrid.ui
 
+import android.app.Activity
 import android.content.Intent
 import android.os.Build
 import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -28,6 +31,7 @@ import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
@@ -128,7 +132,8 @@ fun SettingsScreen(
     onNavigateToContacts: () -> Unit = {},
     onNavigateToCommunication: () -> Unit = {},
     onNavigateToDeliveryStatus: () -> Unit = {},
-    onNavigateToOfflineQueue: () -> Unit = {}
+    onNavigateToOfflineQueue: () -> Unit = {},
+    onNavigateToGuardianPairing: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val container = (context.applicationContext as? GuardianGridApp)?.container
@@ -145,8 +150,33 @@ fun SettingsScreen(
         mutableIntStateOf(container?.settingsRepository?.getSettings()?.countdownDurationSeconds ?: 10)
     }
     var motionCalibrationNotice by remember { mutableStateOf("") }
+    var pickedContact by remember { mutableStateOf<PickedPhoneContact?>(null) }
+    var contactPickError by remember { mutableStateOf("") }
     var showAddContactDialog by remember { mutableStateOf(false) }
     var showPurgePersonalDataDialog by remember { mutableStateOf(false) }
+
+    val settingsContactPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val uri = result.data?.data
+            if (uri != null) {
+                val resolved = NativeContactHelper.resolvePickedPhoneContact(context, uri)
+                if (resolved.isSuccess) {
+                    val info = resolved.getOrThrow()
+                    if (info.isPhoneValid) {
+                        contactPickError = ""
+                        pickedContact = info
+                        showAddContactDialog = true
+                    } else {
+                        contactPickError = info.validationError ?: "Picked phone number is invalid."
+                    }
+                } else {
+                    contactPickError = resolved.exceptionOrNull()?.message ?: "Failed to read picked contact."
+                }
+            }
+        }
+    }
 
     // Telegram Bot API Configuration State
     val existingCreds = TelegramConfigManager.getCredentials()
@@ -282,6 +312,18 @@ fun SettingsScreen(
                         onClick = onNavigateToOfflineQueue
                     )
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                val pairedCount = container?.guardianConnectivityManager?.state?.collectAsState()?.value?.pairedDevices?.size ?: 0
+                SettingsNavCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    title = "Guardian Pairing & Audio Receiver",
+                    subtitle = "$pairedCount Paired Device(s) • QR Pairing • Live Audio Stream",
+                    icon = Icons.Default.Devices,
+                    accentColor = BrandMagenta,
+                    onClick = onNavigateToGuardianPairing
+                )
             }
         }
 
@@ -316,15 +358,23 @@ fun SettingsScreen(
                     }
 
                     IconButton(
-                        onClick = { showAddContactDialog = true },
+                        onClick = {
+                            contactPickError = ""
+                            settingsContactPickerLauncher.launch(NativeContactHelper.buildPhonePickerIntent())
+                        },
                         modifier = Modifier.size(32.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Add,
-                            contentDescription = "Add Contact",
+                            contentDescription = "Pick Contact",
                             tint = BrandMagenta
                         )
                     }
+                }
+
+                if (contactPickError.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(text = contactPickError, color = EmergencyLightRed, fontSize = 11.sp)
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -977,6 +1027,21 @@ fun SettingsScreen(
                     icon = Icons.Default.Bluetooth
                 )
 
+                val guardianMgr = container?.guardianConnectivityManager
+                val gState = guardianMgr?.state?.collectAsState()?.value
+                val guardianRelayConfigured = container?.guardianRelayClient?.isRelayEndpointConfigured() == true
+                val pairedGuardiansCount = gState?.pairedGuardians?.size ?: 0
+                ChannelStatusRow(
+                    name = "Guardian Pairing Relay",
+                    status = when {
+                        pairedGuardiansCount > 0 && guardianRelayConfigured -> "$pairedGuardiansCount Guardian(s) Ready"
+                        pairedGuardiansCount > 0 -> "$pairedGuardiansCount Paired (Set Relay URL)"
+                        else -> "No Paired Guardians"
+                    },
+                    isOperational = pairedGuardiansCount > 0 && guardianRelayConfigured,
+                    icon = Icons.Default.Devices
+                )
+
                 Spacer(modifier = Modifier.height(12.dp))
 
                 Text(
@@ -991,42 +1056,52 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(36.dp))
     }
 
-    // --- Add Contact Dialog ---
-    if (showAddContactDialog) {
-        var nameInput by remember { mutableStateOf("") }
-        var phoneInput by remember { mutableStateOf("") }
-        var relationInput by remember { mutableStateOf("") }
+    // --- Picked Contact Confirmation Dialog (Native Picker — no manual phone entry) ---
+    if (showAddContactDialog && pickedContact != null) {
+        val info = pickedContact!!
+        var relationInput by remember(info) { mutableStateOf("Family") }
+        var isPrimaryContact by remember(info) { mutableStateOf(state.trustedContacts.isEmpty()) }
         var inputError by remember { mutableStateOf("") }
 
         AlertDialog(
-            onDismissRequest = { showAddContactDialog = false },
+            onDismissRequest = {
+                showAddContactDialog = false
+                pickedContact = null
+            },
             title = {
-                Text(text = "Add Emergency Contact", fontWeight = FontWeight.Bold, color = TextPrimary)
+                Text(text = "Confirm Picked Responder", fontWeight = FontWeight.Bold, color = TextPrimary)
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = nameInput,
-                        onValueChange = { nameInput = it },
-                        label = { Text("Name") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = phoneInput,
-                        onValueChange = { phoneInput = it },
-                        label = { Text("Phone Number") },
-                        placeholder = { Text("+1234567890") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(DarkSurface)
+                            .padding(10.dp)
+                    ) {
+                        Text(text = info.displayName, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextPrimary)
+                        Text(text = info.normalizedPhoneNumber, fontSize = 12.sp, color = SafeGreen)
+                    }
                     OutlinedTextField(
                         value = relationInput,
                         onValueChange = { relationInput = it },
-                        label = { Text("Relationship (e.g. Spouse, Parent)") },
+                        label = { Text("Relationship (e.g. Parent, Partner)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(text = "Set as Primary Contact", fontSize = 12.sp, color = TextPrimary)
+                        Switch(
+                            checked = isPrimaryContact,
+                            onCheckedChange = { isPrimaryContact = it },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = BrandMagenta)
+                        )
+                    }
                     if (inputError.isNotBlank()) {
                         Text(text = inputError, color = EmergencyLightRed, fontSize = 11.sp)
                     }
@@ -1035,23 +1110,19 @@ fun SettingsScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        val name = nameInput.trim()
-                        val phone = phoneInput.trim()
                         val rel = relationInput.trim()
-                        if (name.isBlank() || phone.isBlank()) {
-                            inputError = "Name and phone number are required."
-                            return@Button
-                        }
                         val newContact = EmergencyContact(
                             id = UUID.randomUUID().toString(),
-                            name = name,
-                            phoneNumber = phone,
+                            name = info.displayName,
+                            phoneNumber = info.normalizedPhoneNumber,
                             telegramChatId = null,
+                            isPrimary = isPrimaryContact,
                             relationship = rel.ifBlank { "Emergency Contact" }
                         )
                         val result = container?.settingsRepository?.addContact(newContact)
                         if (result?.isSuccess == true) {
                             container.settingsRepository.syncToStateHolder()
+                            pickedContact = null
                             showAddContactDialog = false
                         } else {
                             inputError = result?.exceptionOrNull()?.message ?: "Failed to save contact."
@@ -1063,7 +1134,12 @@ fun SettingsScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showAddContactDialog = false }) {
+                TextButton(
+                    onClick = {
+                        showAddContactDialog = false
+                        pickedContact = null
+                    }
+                ) {
                     Text("Cancel", color = TextSecondary)
                 }
             },

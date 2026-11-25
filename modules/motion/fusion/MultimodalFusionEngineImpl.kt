@@ -165,13 +165,14 @@ class MultimodalFusionEngineImpl(
             }
         }
 
-        // 4. Isolated Motion Anomaly Alone (phone drop, random shake, pocket movement)
-        // Must NOT automatically equate a random phone shake or drop to an attack
+        // 4. Isolated Motion Anomaly Alone
+        // Isolated weak motion stays below countdown threshold; strong sustained impacts/struggles
+        // initiate verification countdown so incapacitated users still trigger escalation unless cancelled.
         if (bestMotion != null) {
             val motionConf = sanitize(bestMotion.confidence)
             val cappedConfidence = when (bestMotion.type) {
-                DistressType.FALL_IMPACT -> sanitize(motionConf * 0.75f).coerceIn(0.0f, 0.68f)
-                DistressType.MOTION_ANOMALY -> sanitize(motionConf * 0.65f).coerceIn(0.0f, 0.58f)
+                DistressType.FALL_IMPACT -> sanitize(motionConf * 0.75f).coerceIn(0.0f, 0.72f)
+                DistressType.MOTION_ANOMALY -> sanitize(motionConf * 0.72f).coerceIn(0.0f, 0.68f)
                 else -> 0.40f
             }
 
@@ -179,7 +180,7 @@ class MultimodalFusionEngineImpl(
                 combinedConfidence = cappedConfidence,
                 isEscalationTriggered = false,
                 contributingSignals = listOf(bestMotion),
-                explanation = "Isolated motion anomaly detected (${bestMotion.type} raw confidence %.2f, discounted to %.2f) without acoustic corroboration. Escalation suppressed to prevent false alarm from benign movement or phone drop.".format(
+                explanation = "Isolated motion anomaly detected (${bestMotion.type} raw confidence %.2f, moderated to %.2f) without acoustic corroboration. Escalation suppressed pending verification countdown.".format(
                     motionConf,
                     cappedConfidence
                 )
