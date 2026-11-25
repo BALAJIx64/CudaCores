@@ -1,11 +1,19 @@
 package com.guardiangrid.ui
 
 import android.Manifest
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Animatable
+import androidx.compose.animation.core.FastOutSlowInEasing
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.BorderStroke
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.detectTapGestures
+import androidx.compose.foundation.interaction.MutableInteractionSource
+import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -18,7 +26,9 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.GenericShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsRun
@@ -69,6 +79,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.scale
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.hapticfeedback.HapticFeedbackType
@@ -103,6 +116,7 @@ import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
 import com.guardiangrid.service.GuardianForegroundService
 import com.guardiangrid.ui.brand.GuardianGridWordmark
 import com.guardiangrid.ui.brand.MonitoringStatusBadge
+import com.guardiangrid.ui.brand.rememberIsReducedMotion
 import com.guardiangrid.ui.permissions.PermissionManager
 import com.guardiangrid.ui.permissions.PermissionOnboardingDialog
 import com.guardiangrid.ui.theme.BrandMagenta
@@ -113,6 +127,7 @@ import com.guardiangrid.ui.theme.DarkSurfaceElevated
 import com.guardiangrid.ui.theme.DarkSurfaceHighlight
 import com.guardiangrid.ui.theme.EmergencyLightRed
 import com.guardiangrid.ui.theme.EmergencyRed
+import com.guardiangrid.ui.theme.InfoBlue
 import com.guardiangrid.ui.theme.SafeGreen
 import com.guardiangrid.ui.theme.TextDisabled
 import com.guardiangrid.ui.theme.TextPrimary
@@ -124,6 +139,29 @@ import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.PI
+import kotlin.math.cos
+import kotlin.math.sin
+
+private val ShieldButtonShape = GenericShape { size, _ ->
+    val w = size.width
+    val h = size.height
+    moveTo(w * 0.50f, h * 0.04f)
+    lineTo(w * 0.90f, h * 0.18f)
+    lineTo(w * 0.90f, h * 0.48f)
+    cubicTo(
+        w * 0.90f, h * 0.74f,
+        w * 0.70f, h * 0.89f,
+        w * 0.50f, h * 0.97f
+    )
+    cubicTo(
+        w * 0.30f, h * 0.89f,
+        w * 0.10f, h * 0.74f,
+        w * 0.10f, h * 0.48f
+    )
+    lineTo(w * 0.10f, h * 0.18f)
+    close()
+}
 
 /**
  * Redesigned GuardianGrid Production Dashboard (Main Control Centre).
@@ -155,7 +193,70 @@ fun DashboardScreen(
     val container = (context.applicationContext as? GuardianGridApp)?.container
     val state by EmergencyStateHolder.state.collectAsState()
     val scope = rememberCoroutineScope()
+    val listState = rememberLazyListState()
+    val isReducedMotion = rememberIsReducedMotion()
     var showPermissionDialog by remember { mutableStateOf(false) }
+    var isLiveLocationExpanded by remember { mutableStateOf(false) }
+
+    val liveShareManager = container?.liveLocationShareManager
+    val liveShareState by liveShareManager?.state?.collectAsState()
+        ?: remember { mutableStateOf(LiveLocationShareState()) }
+
+    // Track confirmed success states to trigger brief, faint matching screen glows
+    var activeScreenGlowColor by remember { mutableStateOf<Color?>(null) }
+    val glowAlpha = remember { Animatable(0f) }
+
+    var prevHasIncident by remember { mutableStateOf(state.activeIncident != null) }
+    LaunchedEffect(state.activeIncident) {
+        val hasIncident = state.activeIncident != null
+        if (!prevHasIncident && hasIncident) {
+            activeScreenGlowColor = EmergencyRed
+        }
+        prevHasIncident = hasIncident
+    }
+
+    var prevIsSharing by remember { mutableStateOf(liveShareState.isSharing) }
+    LaunchedEffect(liveShareState.isSharing) {
+        if (!prevIsSharing && liveShareState.isSharing) {
+            activeScreenGlowColor = SafeGreen
+        }
+        prevIsSharing = liveShareState.isSharing
+    }
+
+    var prevMonitoringState by remember { mutableStateOf(state.monitoringServiceState) }
+    LaunchedEffect(state.monitoringServiceState) {
+        if (prevMonitoringState != MonitoringServiceState.ACTIVE &&
+            state.monitoringServiceState == MonitoringServiceState.ACTIVE
+        ) {
+            activeScreenGlowColor = InfoBlue
+        }
+        prevMonitoringState = state.monitoringServiceState
+    }
+
+    LaunchedEffect(activeScreenGlowColor) {
+        if (activeScreenGlowColor != null) {
+            val peakAlpha = if (isReducedMotion) 0.10f else 0.16f
+            val fadeInMs = if (isReducedMotion) 80 else 180
+            val fadeOutMs = if (isReducedMotion) 220 else 720
+            glowAlpha.snapTo(0f)
+            glowAlpha.animateTo(peakAlpha, animationSpec = tween(fadeInMs, easing = FastOutSlowInEasing))
+            glowAlpha.animateTo(0f, animationSpec = tween(fadeOutMs, easing = FastOutSlowInEasing))
+            activeScreenGlowColor = null
+        }
+    }
+
+    // Particle burst triggers (incremented on successful action activation)
+    var sosBurstTrigger by remember { mutableIntStateOf(0) }
+    var locationBurstTrigger by remember { mutableIntStateOf(0) }
+    var protectionBurstTrigger by remember { mutableIntStateOf(0) }
+
+    LaunchedEffect(activeScreenGlowColor) {
+        when (activeScreenGlowColor) {
+            EmergencyRed -> sosBurstTrigger++
+            SafeGreen -> locationBurstTrigger++
+            InfoBlue -> protectionBurstTrigger++
+        }
+    }
 
     // Fetch latest incident from durable repository
     var latestIncident by remember { mutableStateOf<DurableIncident?>(null) }
@@ -184,47 +285,84 @@ fun DashboardScreen(
         )
     }
 
-    LazyColumn(
+    Box(
         modifier = Modifier
             .fillMaxSize()
             .background(DarkBackground)
-            .padding(horizontal = 16.dp, vertical = 12.dp),
-        verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
-        // --- A. Header: Emblem, Wordmark, Real Badge, Settings ---
+    LazyColumn(
+        state = listState,
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 16.dp, vertical = 12.dp),
+        verticalArrangement = Arrangement.spacedBy(14.dp)
+    ) {
+        // --- A. Compact Header + Clear Live Protection Status Line ---
         item {
-            Row(
+            Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(top = 4.dp),
-                horizontalArrangement = Arrangement.SpaceBetween,
-                verticalAlignment = Alignment.CenterVertically
+                    .padding(top = 2.dp),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
-                GuardianGridWordmark(
-                    emblemSize = 36.dp,
-                    subtitle = "YOUR SAFETY. ALWAYS GUARDED."
-                )
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    GuardianGridWordmark(
+                        emblemSize = 30.dp,
+                        subtitle = null
+                    )
+
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        MonitoringStatusBadge(state = state.monitoringServiceState)
+
+                        FilledTonalIconButton(
+                            onClick = onNavigateToSettings,
+                            modifier = Modifier.size(40.dp),
+                            colors = IconButtonDefaults.filledTonalIconButtonColors(
+                                containerColor = MaterialTheme.colorScheme.surfaceContainer,
+                                contentColor = TextSecondary
+                            )
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Settings,
+                                contentDescription = "Settings",
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                    }
+                }
+
+                val (statusLineText, statusLineColor) = when (state.monitoringServiceState) {
+                    MonitoringServiceState.ACTIVE -> "Live Protection is active" to SafeGreen
+                    MonitoringServiceState.STARTING -> "Live Protection is starting..." to WarningAmber
+                    MonitoringServiceState.STOPPING -> "Live Protection is stopping..." to WarningAmber
+                    MonitoringServiceState.PERMISSION_REQUIRED -> "Microphone permission needed for Live Protection" to WarningAmber
+                    MonitoringServiceState.ERROR -> "Live Protection encountered an error" to EmergencyRed
+                    MonitoringServiceState.STOPPED -> "Live Protection is off" to TextSecondary
+                }
 
                 Row(
                     verticalAlignment = Alignment.CenterVertically,
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
-                    MonitoringStatusBadge(state = state.monitoringServiceState)
-
-                    FilledTonalIconButton(
-                        onClick = onNavigateToSettings,
-                        modifier = Modifier.size(44.dp),
-                        colors = IconButtonDefaults.filledTonalIconButtonColors(
-                            containerColor = MaterialTheme.colorScheme.surfaceContainer,
-                            contentColor = TextSecondary
-                        )
-                    ) {
-                        Icon(
-                            imageVector = Icons.Default.Settings,
-                            contentDescription = "Settings",
-                            modifier = Modifier.size(20.dp)
-                        )
-                    }
+                    Box(
+                        modifier = Modifier
+                            .size(8.dp)
+                            .clip(CircleShape)
+                            .background(statusLineColor)
+                    )
+                    Text(
+                        text = statusLineText,
+                        style = MaterialTheme.typography.bodyMedium,
+                        fontWeight = FontWeight.Medium,
+                        color = statusLineColor
+                    )
                 }
             }
         }
@@ -321,173 +459,59 @@ fun DashboardScreen(
             }
         }
 
-        // --- B. Protection Status (Large, immediately understandable ACTIVE/INACTIVE) ---
-        item {
-            val isServiceActive = state.monitoringServiceState == MonitoringServiceState.ACTIVE
-            val isTransitioning = state.monitoringServiceState == MonitoringServiceState.STARTING ||
-                    state.monitoringServiceState == MonitoringServiceState.STOPPING
-
-            val (statusTitle, statusDescription, statusAccent) = when (state.monitoringServiceState) {
-                MonitoringServiceState.ACTIVE -> Triple(
-                    "PROTECTION ACTIVE",
-                    "Acoustic scream & motion anomaly detection running in foreground service.",
-                    SafeGreen
-                )
-                MonitoringServiceState.STARTING -> Triple(
-                    "INITIALIZING SENSORS",
-                    "Connecting hardware listeners and calibrating baseline...",
-                    WarningAmber
-                )
-                MonitoringServiceState.STOPPING -> Triple(
-                    "STOPPING SERVICE",
-                    "Safely unregistering sensor listeners and flushing buffers...",
-                    WarningAmber
-                )
-                MonitoringServiceState.PERMISSION_REQUIRED -> Triple(
-                    "PERMISSION REQUIRED",
-                    "Microphone permission is required to analyze ambient distress sounds.",
-                    WarningAmber
-                )
-                MonitoringServiceState.ERROR -> Triple(
-                    "MONITORING ERROR",
-                    state.statusMessage.ifBlank { "Unable to activate hardware sensors. Check permissions." },
-                    EmergencyRed
-                )
-                MonitoringServiceState.STOPPED -> Triple(
-                    "PROTECTION INACTIVE",
-                    "Continuous safety monitoring is paused. Tap below to activate background guard.",
-                    TextDisabled
-                )
-            }
-
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                shape = RoundedCornerShape(20.dp),
-                border = CardDefaults.outlinedCardBorder().copy(
-                    brush = androidx.compose.ui.graphics.SolidColor(
-                        if (isServiceActive) SafeGreen.copy(alpha = 0.35f) else MaterialTheme.colorScheme.outline
-                    )
-                )
-            ) {
-                Column(
-                    modifier = Modifier.padding(18.dp)
-                ) {
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        Box(
-                            modifier = Modifier
-                                .size(48.dp)
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(statusAccent.copy(alpha = 0.14f))
-                                .border(1.dp, statusAccent.copy(alpha = 0.35f), RoundedCornerShape(14.dp)),
-                            contentAlignment = Alignment.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Security,
-                                contentDescription = null,
-                                tint = statusAccent,
-                                modifier = Modifier.size(24.dp)
-                            )
-                        }
-
-                        Spacer(modifier = Modifier.width(14.dp))
-
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = statusTitle,
-                                style = MaterialTheme.typography.titleMedium,
-                                fontWeight = FontWeight.Black,
-                                color = if (isServiceActive) TextPrimary else TextSecondary
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = statusDescription,
-                                style = MaterialTheme.typography.bodySmall,
-                                color = TextSecondary
-                            )
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(16.dp))
-
-                    // Protection Toggle Button (never fakes state)
-                    Button(
-                        onClick = {
-                            if (isServiceActive) {
-                                GuardianForegroundService.stop(context)
-                            } else {
-                                if (!PermissionManager.isPermissionGranted(context, Manifest.permission.RECORD_AUDIO)) {
-                                    EmergencyStateHolder.setMonitoringServiceState(
-                                        MonitoringServiceState.PERMISSION_REQUIRED,
-                                        "Microphone permission required for audio distress monitoring."
-                                    )
-                                    onRequestPermissions()
-                                } else {
-                                    GuardianForegroundService.start(context)
-                                }
-                            }
-                        },
-                        enabled = !isTransitioning,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp),
-                        colors = ButtonDefaults.buttonColors(
-                            containerColor = if (isServiceActive) DarkSurfaceHighlight else BrandMagenta,
-                            disabledContainerColor = DarkSurfaceHighlight
-                        ),
-                        shape = RoundedCornerShape(14.dp)
-                    ) {
-                        Text(
-                            text = when (state.monitoringServiceState) {
-                                MonitoringServiceState.ACTIVE -> "Stop Active Protection"
-                                MonitoringServiceState.STARTING -> "Starting..."
-                                MonitoringServiceState.STOPPING -> "Stopping..."
-                                MonitoringServiceState.PERMISSION_REQUIRED -> "Grant Microphone Permission"
-                                MonitoringServiceState.ERROR -> "Retry Activation"
-                                MonitoringServiceState.STOPPED -> "Activate Protection"
-                            },
-                            style = MaterialTheme.typography.labelLarge,
-                            color = if (isServiceActive) EmergencyLightRed else Color.White
-                        )
-                    }
-                }
-            }
-        }
-
-        // --- C. SOS Controls: Hold-Protected Manual SOS & Discreet Stealth SOS ---
+        // --- B. Primary Home Actions: 1. SOS (Red Circle), 2. Share Location (Green Circle), 3. Live Protection (Blue Shield) ---
         item {
             var sosHoldProgress by remember { mutableFloatStateOf(0f) }
-            var discreetHoldProgress by remember { mutableFloatStateOf(0f) }
+            var sosPressed by remember { mutableStateOf(false) }
             var holdHintMessage by remember { mutableStateOf("") }
+
+            val isServiceActive = state.monitoringServiceState == MonitoringServiceState.ACTIVE
+            val isTransitioning = state.monitoringServiceState == MonitoringServiceState.STARTING ||
+                state.monitoringServiceState == MonitoringServiceState.STOPPING
+
+            val sosScale by animateFloatAsState(
+                targetValue = if (sosPressed && !isReducedMotion) 0.96f else 1f,
+                animationSpec = tween(durationMillis = 120),
+                label = "sosPressScale"
+            )
+
+            val locationInteraction = remember { MutableInteractionSource() }
+            val locationPressed by locationInteraction.collectIsPressedAsState()
+            val locationScale by animateFloatAsState(
+                targetValue = if (locationPressed && !isReducedMotion) 0.96f else 1f,
+                animationSpec = tween(durationMillis = 120),
+                label = "locationPressScale"
+            )
+
+            val protectionInteraction = remember { MutableInteractionSource() }
+            val protectionPressed by protectionInteraction.collectIsPressedAsState()
+            val protectionScale by animateFloatAsState(
+                targetValue = if (protectionPressed && !isReducedMotion) 0.96f else 1f,
+                animationSpec = tween(durationMillis = 120),
+                label = "protectionPressScale"
+            )
 
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 4.dp),
-                horizontalAlignment = Alignment.CenterHorizontally
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.spacedBy(22.dp)
             ) {
-                // Primary Manual SOS Control (Hold 0.8s prevents accidental pocket/scroll taps)
-                Box(
-                    modifier = Modifier
-                        .size(188.dp)
-                        .clip(CircleShape)
-                        .background(EmergencyRed.copy(alpha = 0.14f))
-                        .border(1.5.dp, EmergencyRed.copy(alpha = 0.30f), CircleShape),
-                    contentAlignment = Alignment.Center
+                // 1. SOS — Red circular button, subtle rim & shadow, steady when idle, hold 0.8s to activate
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Box(
+                    Surface(
                         modifier = Modifier
-                            .size(164.dp)
-                            .clip(CircleShape)
-                            .background(EmergencyRed)
-                            .border(3.dp, EmergencyLightRed.copy(alpha = 0.65f), CircleShape)
+                            .size(148.dp)
+                            .scale(sosScale)
                             .pointerInput(Unit) {
                                 detectTapGestures(
                                     onPress = {
                                         holdHintMessage = ""
+                                        sosPressed = true
                                         var triggered = false
                                         val holdJob = scope.launch {
                                             val steps = 16
@@ -505,396 +529,285 @@ fun DashboardScreen(
                                         try {
                                             awaitRelease()
                                         } finally {
+                                            sosPressed = false
                                             holdJob.cancel()
                                             if (!triggered) {
                                                 sosHoldProgress = 0f
-                                                holdHintMessage = "Hold SOS button briefly (0.8s) to dispatch alert"
+                                                holdHintMessage = "Hold SOS briefly (0.8s) to dispatch alert"
                                             }
                                         }
                                     }
                                 )
                             },
-                        contentAlignment = Alignment.Center
+                        shape = CircleShape,
+                        color = EmergencyRed,
+                        shadowElevation = 6.dp,
+                        border = BorderStroke(2.5.dp, Color(0xFFFCA5A5))
                     ) {
-                        if (sosHoldProgress > 0f) {
-                            CircularProgressIndicator(
-                                progress = { sosHoldProgress },
-                                modifier = Modifier.size(152.dp),
-                                color = Color.White,
-                                strokeWidth = 6.dp,
-                                trackColor = Color.Transparent
-                            )
-                        }
-                        Column(
-                            horizontalAlignment = Alignment.CenterHorizontally,
-                            verticalArrangement = Arrangement.Center
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.Campaign,
-                                contentDescription = "SOS Emergency Trigger",
-                                tint = Color.White,
-                                modifier = Modifier.size(44.dp)
-                            )
-                            Spacer(modifier = Modifier.height(2.dp))
-                            Text(
-                                text = "SOS",
-                                fontSize = 28.sp,
-                                fontWeight = FontWeight.Black,
-                                color = Color.White,
-                                letterSpacing = 1.2.sp
-                            )
-                            Text(
-                                text = if (sosHoldProgress > 0f) "KEEP HOLDING..." else "HOLD FOR HELP",
-                                style = MaterialTheme.typography.labelSmall,
-                                color = Color.White.copy(alpha = 0.92f)
-                            )
+                        Box(contentAlignment = Alignment.Center) {
+                            if (sosHoldProgress > 0f) {
+                                CircularProgressIndicator(
+                                    progress = { sosHoldProgress },
+                                    modifier = Modifier.size(134.dp),
+                                    color = Color.White,
+                                    strokeWidth = 5.dp,
+                                    trackColor = Color.Transparent
+                                )
+                            }
+                            Column(
+                                horizontalAlignment = Alignment.CenterHorizontally,
+                                verticalArrangement = Arrangement.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Campaign,
+                                    contentDescription = "SOS Emergency Trigger",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(44.dp)
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = "SOS",
+                                    fontSize = 26.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = Color.White,
+                                    letterSpacing = 1.2.sp
+                                )
+                            }
                         }
                     }
-                }
 
-                if (holdHintMessage.isNotBlank()) {
                     Spacer(modifier = Modifier.height(8.dp))
+
                     Text(
-                        text = holdHintMessage,
-                        fontSize = 11.sp,
-                        fontWeight = FontWeight.Medium,
-                        color = WarningAmber,
+                        text = "Emergency SOS",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = TextPrimary,
+                        textAlign = TextAlign.Center
+                    )
+                    Text(
+                        text = if (holdHintMessage.isNotBlank()) holdHintMessage else "Hold briefly to alert your emergency contacts",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = if (holdHintMessage.isNotBlank()) WarningAmber else TextSecondary,
                         textAlign = TextAlign.Center
                     )
                 }
 
-                Spacer(modifier = Modifier.height(14.dp))
-
-                // Discreet Stealth SOS Action (Hold 0.6s)
-                Box(
-                    modifier = Modifier
-                        .clip(RoundedCornerShape(20.dp))
-                        .background(DarkSurfaceElevated)
-                        .border(BorderStroke(1.dp, DarkBorder), RoundedCornerShape(20.dp))
-                        .pointerInput(Unit) {
-                            detectTapGestures(
-                                onPress = {
-                                    holdHintMessage = ""
-                                    var triggered = false
-                                    val holdJob = scope.launch {
-                                        val steps = 12
-                                        val totalMs = 600L
-                                        for (i in 1..steps) {
-                                            delay(totalMs / steps)
-                                            discreetHoldProgress = i.toFloat() / steps
-                                        }
-                                        triggered = true
-                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
-                                        val freshLoc = locationManager.acquireFreshLocation(2000L)
-                                        coordinator.triggerDiscreetSos("Stealth_Discreet_Button", freshLoc)
-                                        discreetHoldProgress = 0f
-                                    }
-                                    try {
-                                        awaitRelease()
-                                    } finally {
-                                        holdJob.cancel()
-                                        if (!triggered) {
-                                            discreetHoldProgress = 0f
-                                            holdHintMessage = "Hold Discreet SOS (0.6s) to activate silent mode"
-                                        }
-                                    }
-                                }
-                            )
-                        }
-                        .padding(horizontal = 16.dp, vertical = 10.dp)
+                // 2. Share Location — Green circular button, subtle rim & shadow + label & 1-line explanation below
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth()
                 ) {
-                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
-                        Row(verticalAlignment = Alignment.CenterVertically) {
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.VolumeOff,
-                                contentDescription = "Discreet Stealth SOS",
-                                modifier = Modifier.size(16.dp),
-                                tint = WarningAmber
-                            )
-                            Spacer(modifier = Modifier.width(8.dp))
-                            Text(
-                                text = if (discreetHoldProgress > 0f) "Activating Silent SOS..." else "Hold: Discreet Stealth SOS",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.SemiBold,
-                                color = TextPrimary
-                            )
-                        }
-                        if (discreetHoldProgress > 0f) {
-                            Spacer(modifier = Modifier.height(4.dp))
-                            LinearProgressIndicator(
-                                progress = { discreetHoldProgress },
-                                modifier = Modifier
-                                    .width(160.dp)
-                                    .height(3.dp)
-                                    .clip(RoundedCornerShape(2.dp)),
-                                color = WarningAmber,
-                                trackColor = DarkSurfaceHighlight
-                            )
-                        }
-                    }
-                }
-            }
-        }
-
-        // --- C2. Share Your Location (Optional, Standalone Live Location Sharing below SOS) ---
-        item {
-            ShareLocationSection(
-                liveLocationShareManager = container?.liveLocationShareManager,
-                locationManager = locationManager,
-                currentLocation = state.currentLocation,
-                isLocationPermissionGranted = state.isLocationPermissionGranted,
-                isSmsPermissionGranted = state.isSmsPermissionGranted,
-                isGpsEnabled = state.isGpsEnabled,
-                trustedContacts = state.trustedContacts,
-                onRequestPermissions = { showPermissionDialog = true },
-                onNavigateToContacts = onNavigateToContacts
-            )
-        }
-
-        // --- D. Monitoring Health (Real Subsystem State Grid) ---
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Text(
-                    text = "MONITORING HEALTH",
-                    fontSize = 12.sp,
-                    fontWeight = FontWeight.Black,
-                    color = TextTertiary,
-                    letterSpacing = 1.sp
-                )
-
-                // 2x2 Grid of Subsystems
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    MicrophoneTelemetryCard(
-                        audioModule = audioModule,
-                        isMonitoringRunning = state.isAudioMonitoringRunning,
-                        hasAudioPermission = state.isAudioPermissionGranted,
-                        modifier = Modifier.weight(1f)
-                    )
-
-                    MotionTelemetryCard(
-                        motionDetector = motionDetector,
-                        isMotionRunning = state.isMotionMonitoringRunning,
-                        isAccelAvailable = state.isAccelerometerAvailable,
-                        modifier = Modifier.weight(1f)
-                    )
-                }
-
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp)
-                ) {
-                    val hasGps = state.currentLocation != null
-                    val locationDetail = when {
-                        !state.isLocationPermissionGranted -> "Permission needed"
-                        state.currentLocation != null -> "±${state.currentLocation!!.accuracyMeters.toInt()}m accuracy"
-                        state.isGpsEnabled -> "Searching fix..."
-                        else -> "GPS disabled"
-                    }
-                    HealthIndicatorCard(
-                        title = "Location GPS",
-                        status = when {
-                            !state.isLocationPermissionGranted -> "Denied"
-                            hasGps -> "GPS Locked"
-                            else -> "No Fix"
+                    Surface(
+                        onClick = {
+                            isLiveLocationExpanded = !isLiveLocationExpanded
+                            if (isLiveLocationExpanded) {
+                                scope.launch { listState.animateScrollToItem(3) }
+                            }
                         },
-                        detail = locationDetail,
-                        icon = Icons.Default.LocationOn,
-                        isActive = hasGps,
+                        interactionSource = locationInteraction,
                         modifier = Modifier
-                            .weight(1f)
-                            .clickable {
-                                if (!state.isLocationPermissionGranted) {
-                                    showPermissionDialog = true
-                                } else {
-                                    scope.launch { locationManager.acquireFreshLocation(3000L) }
-                                }
-                            }
-                    )
-
-                    val isTelegramReady = TelegramConfigManager.isConfigured()
-                    val isSmsReady = state.isSmsPermissionGranted
-                    val commReady = isTelegramReady || isSmsReady
-                    val commDetail = when {
-                        pendingQueueCount > 0 -> "$pendingQueueCount Queued"
-                        isTelegramReady && isSmsReady -> "TG + SMS Ready"
-                        isTelegramReady -> "Telegram Ready"
-                        isSmsReady -> "SMS Ready"
-                        else -> "Configure Channels"
-                    }
-                    HealthIndicatorCard(
-                        title = "Emergency Net",
-                        status = if (commReady) "Configured" else "Setup Needed",
-                        detail = commDetail,
-                        icon = Icons.Default.Sensors,
-                        isActive = commReady,
-                        modifier = Modifier
-                            .weight(1f)
-                            .clickable {
-                                if (pendingQueueCount > 0) onNavigateToOfflineQueue() else onNavigateToCommunication()
-                            }
-                    )
-                }
-
-                // Quick-Access Guardian-to-Guardian Pairing & Audio Receiver Bar
-                val pairedGuardiansCount = container?.guardianConnectivityManager?.state?.collectAsState()?.value?.pairedGuardians?.size ?: 0
-                val pairedHostsCount = container?.guardianConnectivityManager?.state?.collectAsState()?.value?.pairedHosts?.size ?: 0
-                val rxAlertsCount = container?.guardianConnectivityManager?.state?.collectAsState()?.value?.receivedAlerts?.size ?: 0
-                Card(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { onNavigateToGuardianPairing() },
-                    colors = CardDefaults.cardColors(containerColor = DarkSurface),
-                    shape = RoundedCornerShape(12.dp),
-                    border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(DarkBorder))
-                ) {
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 12.dp, vertical = 10.dp),
-                        horizontalArrangement = Arrangement.SpaceBetween,
-                        verticalAlignment = Alignment.CenterVertically
+                            .size(148.dp)
+                            .scale(locationScale),
+                        shape = CircleShape,
+                        color = SafeGreen,
+                        shadowElevation = 6.dp,
+                        border = BorderStroke(2.5.dp, Color(0xFF86EFAC))
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Guardian QR Pairing & Audio Receiver",
-                                fontSize = 12.sp,
-                                fontWeight = FontWeight.Bold,
-                                color = TextPrimary
-                            )
-                            Text(
-                                text = "$pairedGuardiansCount Guardian(s) • $pairedHostsCount Host(s) • $rxAlertsCount Alert(s)",
-                                fontSize = 10.sp,
-                                color = if (pairedGuardiansCount > 0 || pairedHostsCount > 0) SafeGreen else TextSecondary
+                        Box(contentAlignment = Alignment.Center) {
+                            Icon(
+                                imageVector = Icons.Default.MyLocation,
+                                contentDescription = "Share Location",
+                                tint = Color.White,
+                                modifier = Modifier.size(48.dp)
                             )
                         }
-                        Icon(
-                            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                            contentDescription = "Open Guardian Pairing",
-                            tint = BrandMagenta
-                        )
                     }
-                }
-            }
-        }
 
-        // --- E. Recent Activity (Latest Real Incident or Empty State) ---
-        item {
-            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                    Spacer(modifier = Modifier.height(8.dp))
+
                     Text(
-                        text = "RECENT ACTIVITY",
-                        fontSize = 12.sp,
-                        fontWeight = FontWeight.Black,
-                        color = TextTertiary,
-                        letterSpacing = 1.sp
+                        text = if (liveShareState.isSharing) "Live Location Active" else "Share Location",
+                        style = MaterialTheme.typography.titleMedium,
+                        color = if (liveShareState.isSharing) SafeGreen else TextPrimary,
+                        textAlign = TextAlign.Center
                     )
-
-                    TextButton(onClick = onNavigateToIncidents) {
-                        Text(
-                            text = "View History",
-                            fontSize = 11.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = BrandMagenta
-                        )
-                    }
+                    Text(
+                        text = if (liveShareState.isSharing) {
+                            "Sharing live updates with ${liveShareState.recipientNames.joinToString(", ")}"
+                        } else {
+                            "Send a private, auto-expiring live map link"
+                        },
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                        textAlign = TextAlign.Center
+                    )
                 }
 
-                if (latestIncident != null) {
-                    val inc = latestIncident!!
-                    val dateFormatted = remember(inc.startTimeEpochMs) {
-                        SimpleDateFormat("MMM dd, HH:mm:ss", Locale.getDefault()).format(Date(inc.startTimeEpochMs))
-                    }
+                // Inline Live-Location Sharing Flow (expanded on tap or when active)
+                AnimatedVisibility(visible = isLiveLocationExpanded || liveShareState.isSharing) {
+                    ShareLocationSection(
+                        liveLocationShareManager = liveShareManager,
+                        locationManager = locationManager,
+                        currentLocation = state.currentLocation,
+                        isLocationPermissionGranted = state.isLocationPermissionGranted,
+                        isSmsPermissionGranted = state.isSmsPermissionGranted,
+                        isGpsEnabled = state.isGpsEnabled,
+                        trustedContacts = state.trustedContacts,
+                        onRequestPermissions = { showPermissionDialog = true },
+                        onNavigateToContacts = onNavigateToContacts
+                    )
+                }
 
-                    Card(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { onNavigateToIncidents() },
-                        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-                        shape = RoundedCornerShape(12.dp),
-                        border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(DarkBorder))
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(14.dp),
-                            verticalAlignment = Alignment.CenterVertically,
-                            horizontalArrangement = Arrangement.SpaceBetween
-                        ) {
-                            Column(modifier = Modifier.weight(1f)) {
-                                Row(verticalAlignment = Alignment.CenterVertically) {
-                                    Text(
-                                        text = inc.triggerType.name.replace("_", " "),
-                                        fontSize = 13.sp,
-                                        fontWeight = FontWeight.Bold,
-                                        color = when (inc.triggerType) {
-                                            DistressType.MANUAL_SOS -> EmergencyLightRed
-                                            DistressType.SCREAM -> WarningAmber
-                                            else -> BrandMagenta
-                                        }
-                                    )
-                                    Spacer(modifier = Modifier.width(8.dp))
-                                    Text(
-                                        text = inc.incidentId,
-                                        fontSize = 11.sp,
-                                        fontFamily = FontFamily.Monospace,
-                                        color = TextSecondary
-                                    )
+                // 3. Live Protection — Blue shield-shaped button, subtle rim & shadow + visible label & explanation below
+                val protectionLabel = when (state.monitoringServiceState) {
+                    MonitoringServiceState.ACTIVE -> "Stop Live Protection"
+                    MonitoringServiceState.STARTING -> "Starting Live Protection..."
+                    MonitoringServiceState.STOPPING -> "Stopping Live Protection..."
+                    MonitoringServiceState.PERMISSION_REQUIRED -> "Grant Microphone Permission"
+                    MonitoringServiceState.ERROR -> "Retry Live Protection"
+                    MonitoringServiceState.STOPPED -> "Activate Live Protection"
+                }
+                val protectionDescription = when (state.monitoringServiceState) {
+                    MonitoringServiceState.ACTIVE -> "Monitoring microphone and motion in background"
+                    MonitoringServiceState.STARTING -> "Initializing audio and motion sensors"
+                    MonitoringServiceState.STOPPING -> "Safely stopping monitoring service"
+                    MonitoringServiceState.PERMISSION_REQUIRED -> "Microphone access needed to detect distress"
+                    MonitoringServiceState.ERROR -> state.statusMessage.ifBlank { "Sensor activation failed — tap to retry" }
+                    MonitoringServiceState.STOPPED -> "Listen for screams and detect sudden falls"
+                }
+
+                Column(
+                    horizontalAlignment = Alignment.CenterHorizontally,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Surface(
+                        onClick = {
+                            if (!isTransitioning) {
+                                if (isServiceActive) {
+                                    GuardianForegroundService.stop(context)
+                                } else {
+                                    if (!PermissionManager.isPermissionGranted(context, Manifest.permission.RECORD_AUDIO)) {
+                                        EmergencyStateHolder.setMonitoringServiceState(
+                                            MonitoringServiceState.PERMISSION_REQUIRED,
+                                            "Microphone permission required for audio distress monitoring."
+                                        )
+                                        onRequestPermissions()
+                                    } else {
+                                        GuardianForegroundService.start(context)
+                                    }
                                 }
-                                Spacer(modifier = Modifier.height(4.dp))
-                                Text(
-                                    text = "$dateFormatted • Delivery: ${inc.deliveryStatus}",
-                                    fontSize = 11.sp,
-                                    color = TextTertiary
+                            }
+                        },
+                        interactionSource = protectionInteraction,
+                        modifier = Modifier
+                            .size(148.dp)
+                            .scale(protectionScale),
+                        shape = ShieldButtonShape,
+                        color = InfoBlue,
+                        shadowElevation = 6.dp,
+                        border = BorderStroke(2.5.dp, Color(0xFF93C5FD))
+                    ) {
+                        Box(contentAlignment = Alignment.Center) {
+                            if (isTransitioning) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(36.dp),
+                                    strokeWidth = 3.dp,
+                                    color = Color.White
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Security,
+                                    contentDescription = protectionLabel,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(48.dp)
                                 )
                             }
+                        }
+                    }
 
-                            Icon(
-                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
-                                contentDescription = "View Incident History",
-                                tint = TextSecondary
-                            )
-                        }
-                    }
-                } else {
-                    Card(
-                        modifier = Modifier.fillMaxWidth(),
-                        colors = CardDefaults.cardColors(containerColor = DarkSurface),
-                        shape = RoundedCornerShape(12.dp),
-                        border = CardDefaults.outlinedCardBorder().copy(brush = androidx.compose.ui.graphics.SolidColor(DarkBorder))
-                    ) {
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(14.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Default.CheckCircle,
-                                contentDescription = null,
-                                tint = SafeGreen,
-                                modifier = Modifier.size(20.dp)
-                            )
-                            Spacer(modifier = Modifier.width(10.dp))
-                            Text(
-                                text = "No recent incidents. All safety systems standing by.",
-                                fontSize = 12.sp,
-                                color = TextSecondary
-                            )
-                        }
-                    }
+                    Spacer(modifier = Modifier.height(8.dp))
+
+                    Text(
+                        text = protectionLabel,
+                        style = MaterialTheme.typography.titleMedium,
+                        color = if (isServiceActive) InfoBlue else TextPrimary,
+                        textAlign = TextAlign.Center
+                    )
+                    Text(
+                        text = protectionDescription,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = TextSecondary,
+                        textAlign = TextAlign.Center
+                    )
                 }
             }
         }
 
         item {
             Spacer(modifier = Modifier.height(24.dp))
+        }
+    }
+
+    // Faint matching screen glow overlay ONLY after confirmed action success
+    val glowColor = activeScreenGlowColor
+    if (glowColor != null && glowAlpha.value > 0f) {
+        Box(
+            modifier = Modifier
+                .fillMaxSize()
+                .background(
+                    Brush.radialGradient(
+                        colors = listOf(
+                            glowColor.copy(alpha = glowAlpha.value * 0.45f),
+                            glowColor.copy(alpha = glowAlpha.value)
+                        )
+                    )
+                )
+        )
+    }
+    }
+}
+
+/**
+ * Restrained, battery-friendly particle burst along the perimeter of an action button.
+ * Fires once on confirmed activation and respects Android's reduced-motion setting.
+ */
+@Composable
+private fun SubtleParticleBurst(
+    triggerKey: Int,
+    color: Color,
+    isReducedMotion: Boolean,
+    modifier: Modifier = Modifier
+) {
+    if (isReducedMotion || triggerKey <= 0) return
+
+    val progress = remember { Animatable(0f) }
+    LaunchedEffect(triggerKey) {
+        progress.snapTo(0f)
+        progress.animateTo(
+            targetValue = 1f,
+            animationSpec = tween(durationMillis = 550, easing = FastOutSlowInEasing)
+        )
+    }
+
+    val t = progress.value
+    if (t <= 0f || t >= 1f) return
+
+    Canvas(modifier = modifier) {
+        val count = 8
+        val alpha = (1f - t) * 0.42f
+        val maxRadius = size.minDimension * 0.55f
+        val dist = maxRadius * (0.35f + 0.65f * t)
+        val dotRadius = 3.5.dp.toPx() * (1f - 0.35f * t)
+
+        for (i in 0 until count) {
+            val angle = (2.0 * PI * i / count)
+            val cx = center.x + (cos(angle) * (size.width * 0.36f + dist * 0.35f)).toFloat()
+            val cy = center.y + (sin(angle) * (size.height * 0.36f + dist * 0.35f)).toFloat()
+            drawCircle(
+                color = color.copy(alpha = alpha),
+                radius = dotRadius,
+                center = Offset(cx, cy)
+            )
         }
     }
 }

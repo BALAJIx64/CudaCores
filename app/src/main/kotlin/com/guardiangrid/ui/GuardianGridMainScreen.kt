@@ -19,6 +19,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.History
+import androidx.compose.material.icons.filled.Home
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.HorizontalDivider
@@ -66,6 +67,7 @@ import com.guardiangrid.ui.theme.TextSecondary
 enum class MainNavDestination {
     DASHBOARD,
     INCIDENTS,
+    MONITORING,
     SETTINGS,
     EMERGENCY_CONTACTS,
     COMMUNICATION_CONFIG,
@@ -174,7 +176,7 @@ fun GuardianGridMainScreen(
                                     onClick = { currentDestination = MainNavDestination.DASHBOARD },
                                     icon = {
                                         Icon(
-                                            imageVector = Icons.Default.Security,
+                                            imageVector = Icons.Default.Home,
                                             contentDescription = "Home",
                                             modifier = Modifier.size(22.dp)
                                         )
@@ -210,6 +212,32 @@ fun GuardianGridMainScreen(
                                             text = "Incidents",
                                             style = MaterialTheme.typography.labelMedium,
                                             fontWeight = if (currentDestination == MainNavDestination.INCIDENTS) FontWeight.Bold else FontWeight.Medium
+                                        )
+                                    },
+                                    colors = NavigationBarItemDefaults.colors(
+                                        selectedIconColor = BrandMagenta,
+                                        selectedTextColor = BrandMagenta,
+                                        unselectedIconColor = TextSecondary,
+                                        unselectedTextColor = TextSecondary,
+                                        indicatorColor = BrandMagenta.copy(alpha = 0.14f)
+                                    )
+                                )
+
+                                NavigationBarItem(
+                                    selected = currentDestination == MainNavDestination.MONITORING,
+                                    onClick = { currentDestination = MainNavDestination.MONITORING },
+                                    icon = {
+                                        Icon(
+                                            imageVector = Icons.Default.Security,
+                                            contentDescription = "Monitoring",
+                                            modifier = Modifier.size(22.dp)
+                                        )
+                                    },
+                                    label = {
+                                        Text(
+                                            text = "Monitoring",
+                                            style = MaterialTheme.typography.labelMedium,
+                                            fontWeight = if (currentDestination == MainNavDestination.MONITORING) FontWeight.Bold else FontWeight.Medium
                                         )
                                     },
                                     colors = NavigationBarItemDefaults.colors(
@@ -298,6 +326,25 @@ fun GuardianGridMainScreen(
                                     IncidentHistoryScreen(
                                         onNavigateToHome = {
                                             currentDestination = MainNavDestination.DASHBOARD
+                                        }
+                                    )
+                                }
+                                MainNavDestination.MONITORING -> {
+                                    MonitoringScreen(
+                                        coordinator = coordinator,
+                                        locationManager = locationManager,
+                                        audioModule = audioModule,
+                                        motionDetector = motionDetector,
+                                        communicator = communicator,
+                                        onRequestPermissions = onRequestPermissions,
+                                        onNavigateToCommunication = {
+                                            currentDestination = MainNavDestination.COMMUNICATION_CONFIG
+                                        },
+                                        onNavigateToOfflineQueue = {
+                                            currentDestination = MainNavDestination.OFFLINE_QUEUE
+                                        },
+                                        onNavigateToGuardianPairing = {
+                                            currentDestination = MainNavDestination.GUARDIAN_PAIRING
                                         }
                                     )
                                 }

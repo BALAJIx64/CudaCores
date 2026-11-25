@@ -434,25 +434,13 @@ fun GuardianGridSplashScreen(
 }
 
 @Preview(
-    name = "Splash Dark",
-    showBackground = true,
-    uiMode = Configuration.UI_MODE_NIGHT_YES
-)
-@Composable
-private fun GuardianGridSplashDarkPreview() {
-    GuardianGridTheme(darkTheme = true) {
-        GuardianGridSplashScreen()
-    }
-}
-
-@Preview(
     name = "Splash Light",
     showBackground = true,
     uiMode = Configuration.UI_MODE_NIGHT_NO
 )
 @Composable
 private fun GuardianGridSplashLightPreview() {
-    GuardianGridTheme(darkTheme = false) {
+    GuardianGridTheme {
         GuardianGridSplashScreen()
     }
 }
@@ -460,11 +448,11 @@ private fun GuardianGridSplashLightPreview() {
 @Preview(
     name = "Splash Reduced Motion",
     showBackground = true,
-    uiMode = Configuration.UI_MODE_NIGHT_YES
+    uiMode = Configuration.UI_MODE_NIGHT_NO
 )
 @Composable
 private fun GuardianGridSplashReducedMotionPreview() {
-    GuardianGridTheme(darkTheme = true) {
+    GuardianGridTheme {
         GuardianGridSplashScreen(reducedMotionOverride = true)
     }
 }

@@ -1,12 +1,10 @@
 package com.guardiangrid.ui.theme
 
-import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Shapes
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
-import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.TextStyle
@@ -14,60 +12,38 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
+/**
+ * Single consistent GuardianGrid Material 3 ColorScheme matching the provided palette:
+ * Midnight Navy Background (#182430), Slate Card (#202D3A), Muted (#21252B),
+ * Border (#3C5165), Primary Gold (#FBE39E), Secondary Blush (#EE9FB0),
+ * Accent Mauve (#C97390), and Vibrant Rose (#EC539B).
+ */
 private val GuardianGridColorScheme = darkColorScheme(
-    primary = BrandMagenta,
-    onPrimary = TextPrimary,
-    primaryContainer = BrandMagentaDark,
+    primary = BrandPrimaryGold,
+    onPrimary = DarkBackground,
+    primaryContainer = BrandAccentMauve,
     onPrimaryContainer = TextPrimary,
-    secondary = InfoBlue,
-    onSecondary = TextPrimary,
+    secondary = BrandSecondaryBlush,
+    onSecondary = DarkBackground,
     secondaryContainer = DarkSurfaceHighlight,
     onSecondaryContainer = TextPrimary,
-    tertiary = SafeGreen,
-    onTertiary = TextPrimary,
+    tertiary = BrandAccentMauve,
+    onTertiary = Color.White,
     background = DarkBackground,
     onBackground = TextPrimary,
     surface = DarkSurface,
     onSurface = TextPrimary,
     surfaceVariant = DarkSurfaceElevated,
     onSurfaceVariant = TextSecondary,
-    surfaceContainerLow = DarkSurface,
+    surfaceContainerLow = DarkBackground,
     surfaceContainer = DarkSurfaceElevated,
     surfaceContainerHigh = DarkSurfaceHighlight,
     outline = DarkBorder,
     outlineVariant = DarkBorderSubtle,
-    error = EmergencyRed,
-    onError = TextPrimary,
+    error = BrandMagenta,
+    onError = Color.White,
     errorContainer = EmergencyDarkRed,
     onErrorContainer = TextPrimary
-)
-
-private val GuardianGridLightColorScheme = lightColorScheme(
-    primary = BrandMagenta,
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFFFD9E2),
-    onPrimaryContainer = Color(0xFF3E001D),
-    secondary = InfoBlue,
-    onSecondary = Color.White,
-    secondaryContainer = Color(0xFFDBEAFE),
-    onSecondaryContainer = Color(0xFF0F172A),
-    tertiary = SafeGreen,
-    onTertiary = Color.White,
-    background = Color(0xFFF9FAFB),
-    onBackground = Color(0xFF111827),
-    surface = Color.White,
-    onSurface = Color(0xFF111827),
-    surfaceVariant = Color(0xFFF3F4F6),
-    onSurfaceVariant = Color(0xFF4B5563),
-    surfaceContainerLow = Color(0xFFF9FAFB),
-    surfaceContainer = Color(0xFFF3F4F6),
-    surfaceContainerHigh = Color(0xFFE5E7EB),
-    outline = Color(0xFFD1D5DB),
-    outlineVariant = Color(0xFFE5E7EB),
-    error = EmergencyRed,
-    onError = Color.White,
-    errorContainer = Color(0xFFFEE2E2),
-    onErrorContainer = Color(0xFF7F1D1D)
 )
 
 val GuardianGridTypography = Typography(
@@ -134,12 +110,10 @@ val GuardianGridShapes = Shapes(
 
 @Composable
 fun GuardianGridTheme(
-    darkTheme: Boolean = true,
     content: @Composable () -> Unit
 ) {
-    val colorScheme = if (darkTheme) GuardianGridColorScheme else GuardianGridLightColorScheme
     MaterialTheme(
-        colorScheme = colorScheme,
+        colorScheme = GuardianGridColorScheme,
         typography = GuardianGridTypography,
         shapes = GuardianGridShapes,
         content = content
