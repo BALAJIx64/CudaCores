@@ -33,7 +33,7 @@ class AudioModuleStub(
     val liveMetrics: StateFlow<LiveAudioMetrics>
         get() = captureManager.liveMetrics
 
-    // --- AudioDistressDetector Implementation ---
+    // --- AudioDistressDetector Implementation (Vocal Distress: Screaming, Yelling, Crying) ---
 
     /**
      * Start continuous audio classification for vocal distress (screams, shouts, and crying).

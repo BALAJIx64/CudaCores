@@ -60,7 +60,6 @@ class AudioModuleTest {
 
     @Test
     fun testOrdinarySpeechNonDistress() {
-        // Synthesizes conversational speech-like vowel transitions (formants at 500 Hz and 1100 Hz, low centroid)
         val speech = ShortArray(12000) { i ->
             val formant = if (i < 4000) 500.0 else if (i < 8000) 900.0 else 600.0
             val env = if (i % 2000 < 1500) 0.7 else 0.1 // Inter-syllable envelope
@@ -91,8 +90,6 @@ class AudioModuleTest {
 
     @Test
     fun testImpulseNoiseRejection() {
-        // Synthesizes a sharp 2 ms transient impulse click (e.g. mouse click, dropped pen, keypress: 24 samples)
-        // followed by silence. Total buffer = 8000 samples (500 ms).
         val click = ShortArray(8000) { i ->
             if (i in 1000..1024) {
                 (sin(2.0 * PI * 3200.0 * i / 16000.0) * 18000).toInt().toShort()
@@ -114,7 +111,6 @@ class AudioModuleTest {
 
         try {
             val recorderBuffer = CircularAudioBuffer(durationMs = 5000L, sampleRate = 16000)
-            // Pre-fill circular buffer with 3 seconds of audio tone
             val testTone = ShortArray(48000) { i -> (sin(2.0 * PI * 440.0 * i / 16000.0) * 8000).toInt().toShort() }
             recorderBuffer.write(testTone)
 

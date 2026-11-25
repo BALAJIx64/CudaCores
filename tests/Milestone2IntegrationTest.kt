@@ -68,7 +68,7 @@ class Milestone2IntegrationTest {
     // --- Scenario 1: Concurrent Audio Streams Running ---
 
     @Test
-    fun testConcurrentAudioStreamsRunning() {
+    fun testAudioMonitoringLifecycle() {
         val audioStub = AudioModuleStub()
         assertFalse(audioStub.isMonitoring())
         assertFalse(audioStub.screamClassifier.isMonitoring())
@@ -89,7 +89,7 @@ class Milestone2IntegrationTest {
     // --- Scenario 2: Single Supported Vocal Distress Produces Signal ---
 
     @Test
-    fun testSingleSupportedKeywordProducesSignal() = runBlocking {
+    fun testSingleSupportedVocalDistressProducesSignal() = runBlocking {
         val audioStub = AudioModuleStub()
         val flow = audioStub.startMonitoring()
 

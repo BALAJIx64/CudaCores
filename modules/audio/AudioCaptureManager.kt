@@ -51,12 +51,14 @@ data class LiveAudioMetrics(
  * - Format: Linear PCM, 16-bit signed little-endian
  * - Channel: Mono (1 channel)
  * - Sample Rate: 16,000 Hz (Standard across edge speech & sound classification models)
- * - Chunk Buffer Size: 1024 samples (64 ms)
+ * - Chunk Buffer Size: 1024–2048 samples (~64–128 ms)
  *
- * Hardware Resilience:
- * - Dynamic fallback: attempts MediaRecorder.AudioSource.MIC first; falls back to VOICE_RECOGNITION.
- * - Thread-safe live telemetry StateFlow updates without memory thrashing or UI thread blocking.
- * - Graceful degradation to synthetic mock capture during JVM testing or when hardware is unavailable.
+ * Resilience & Portability:
+ * - Operates transparently on Android devices with physical microphone hardware via `AudioRecord`.
+ * - Automatically degrades gracefully to mock/simulation mode during JVM unit testing or when
+ *   hardware permissions are denied, preventing fatal application crashes.
+ *
+ * Owned by Member 1 (modules/audio).
  */
 class AudioCaptureManager(
     val sampleRate: Int = 16000,
@@ -84,6 +86,16 @@ class AudioCaptureManager(
 
     // Android reflection / dynamic references to avoid compile-time failure on non-Android JVM environments
     private var nativeAudioRecord: Any? = null
+    private var lastChunkLogTime = 0L
+
+    private fun logAudio(msg: String, isError: Boolean = false) {
+        try {
+            if (isError) android.util.Log.e("GuardianAudio", msg)
+            else android.util.Log.i("GuardianAudio", msg)
+        } catch (_: Throwable) {
+            println("[GuardianAudio] $msg")
+        }
+    }
 
     /**
      * Starts continuous microphone audio capture.
@@ -91,11 +103,13 @@ class AudioCaptureManager(
      */
     fun startCapture(hasRecordAudioPermission: Boolean = true): Result<Flow<ShortArray>> {
         if (isCapturing) {
+            logAudio("startCapture called while already capturing.")
             return Result.success(pcmChunkFlow.asSharedFlow())
         }
 
         if (!hasRecordAudioPermission) {
             lastErrorMessage = "Microphone permission (android.permission.RECORD_AUDIO) not granted"
+            logAudio(lastErrorMessage ?: "", isError = true)
             _liveMetrics.value = LiveAudioMetrics(
                 status = AudioCaptureStatus.PERMISSION_DENIED,
                 errorMessage = lastErrorMessage
@@ -120,8 +134,10 @@ class AudioCaptureManager(
 
         captureJob = captureScope.launch {
             if (initialized) {
+                logAudio("Physical AudioRecord capture loop started on hardware source: $activeAudioSourceName")
                 runPhysicalAudioRecordLoop()
             } else {
+                logAudio("Fallback synthetic silence capture loop started (isUsingMockCapture=true)")
                 runSyntheticCaptureLoop()
             }
         }
@@ -133,6 +149,7 @@ class AudioCaptureManager(
      * Stops microphone capture and releases hardware resources.
      */
     fun stopCapture() {
+        logAudio("stopCapture called. Releasing hardware microphone resources.")
         isCapturing = false
         captureJob?.cancel()
         captureJob = null
@@ -153,32 +170,32 @@ class AudioCaptureManager(
         circularBuffer?.write(samples)
         pcmChunkFlow.emit(samples)
 
-        // Calculate and reflect metrics even for synthetic samples in tests
-        var maxAmp = 0
-        var sumSquares = 0.0
-        for (s in samples) {
-            val a = abs(s.toInt())
-            if (a > maxAmp) maxAmp = a
-            sumSquares += a * a
+        // Update live metrics from injected chunk
+        if (samples.isNotEmpty()) {
+            var maxAmp = 0
+            var sumSquares = 0.0
+            for (s in samples) {
+                val a = abs(s.toInt())
+                if (a > maxAmp) maxAmp = a
+                sumSquares += a * a
+            }
+            val peak = (maxAmp / 32768.0f).coerceIn(0f, 1f)
+            val rms = sqrt(sumSquares / samples.size).toFloat() / 32768.0f
+            val dbfs = if (rms > 1e-5f) (20f * log10(rms)).coerceIn(-100f, 0f) else -100f
+            _liveMetrics.value = LiveAudioMetrics(
+                status = AudioCaptureStatus.RECORDING,
+                peak = peak,
+                rms = rms,
+                dbfs = dbfs,
+                sampleRate = sampleRate,
+                isPhysicalRecord = false,
+                isUsingMockCapture = true,
+                activeSource = "INJECTED_TEST_STREAM"
+            )
         }
-        val count = samples.size.coerceAtLeast(1)
-        val peak = (maxAmp / 32768.0f).coerceIn(0f, 1f)
-        val rms = (sqrt(sumSquares / count).toFloat() / 32768.0f).coerceIn(0f, 1f)
-        val dbfs = if (rms > 1e-5f) (20f * log10(rms)).coerceIn(-100f, 0f) else -100f
-
-        _liveMetrics.value = LiveAudioMetrics(
-            status = AudioCaptureStatus.RECORDING,
-            peak = peak,
-            rms = rms,
-            dbfs = dbfs,
-            sampleRate = sampleRate,
-            isPhysicalRecord = false,
-            isUsingMockCapture = true,
-            activeSource = "SYNTHETIC"
-        )
     }
 
-    // --- Physical Android AudioRecord via Reflection with Hardware Fallback ---
+    // --- Physical Android AudioRecord via Reflection ---
 
     private fun initializeAndroidAudioRecord(): Boolean {
         return try {
@@ -186,13 +203,12 @@ class AudioCaptureManager(
             val mediaRecorderSourceClass = Class.forName("android.media.MediaRecorder\$AudioSource")
             val audioFormatClass = Class.forName("android.media.AudioFormat")
 
-            val micSource = try {
-                mediaRecorderSourceClass.getField("MIC").getInt(null)
-            } catch (_: Throwable) { 1 }
-
             val voiceRecSource = try {
                 mediaRecorderSourceClass.getField("VOICE_RECOGNITION").getInt(null)
             } catch (_: Throwable) { 6 }
+            val micSource = try {
+                mediaRecorderSourceClass.getField("MIC").getInt(null)
+            } catch (_: Throwable) { 1 }
 
             val channelMono = audioFormatClass.getField("CHANNEL_IN_MONO").getInt(null)
             val encodingPcm16 = audioFormatClass.getField("ENCODING_PCM_16BIT").getInt(null)
@@ -206,6 +222,7 @@ class AudioCaptureManager(
             val minBuf = getMinBufferSizeMethod.invoke(null, sampleRate, channelMono, encodingPcm16) as Int
             if (minBuf <= 0) {
                 lastErrorMessage = "AudioRecord.getMinBufferSize returned invalid buffer size: $minBuf"
+                logAudio(lastErrorMessage ?: "", isError = true)
                 return false
             }
 
@@ -219,43 +236,37 @@ class AudioCaptureManager(
                 Int::class.javaPrimitiveType
             )
 
-            val getStateMethod = audioRecordClass.getMethod("getState")
-            val stateInitialized = audioRecordClass.getField("STATE_INITIALIZED").getInt(null)
-            val releaseMethod = audioRecordClass.getMethod("release")
-
-            // Candidate hardware recording sources to try in priority order:
-            // 1. MIC (standard hardware microphone)
-            // 2. VOICE_RECOGNITION (speech-optimized audio source)
-            val candidateSources = listOf(
-                "MIC" to micSource,
-                "VOICE_RECOGNITION" to voiceRecSource
+            // Try VOICE_RECOGNITION first (avoids aggressive noise gate/suppression), then MIC
+            val sourcesToTry = listOf(
+                "VOICE_RECOGNITION" to voiceRecSource,
+                "MIC" to micSource
             )
 
             var createdRecord: Any? = null
             var selectedSourceName = "NONE"
 
-            for ((sourceName, sourceVal) in candidateSources) {
+            for ((sourceName, sourceVal) in sourcesToTry) {
                 try {
                     val record = constructor.newInstance(sourceVal, sampleRate, channelMono, encodingPcm16, bufferSize)
+                    val getStateMethod = audioRecordClass.getMethod("getState")
                     val state = getStateMethod.invoke(record) as Int
+                    val stateInitialized = audioRecordClass.getField("STATE_INITIALIZED").getInt(null)
                     if (state == stateInitialized) {
                         createdRecord = record
                         selectedSourceName = sourceName
                         break
                     } else {
+                        val releaseMethod = audioRecordClass.getMethod("release")
                         releaseMethod.invoke(record)
                     }
-                } catch (_: Exception) {
-                    // Try next fallback source
+                } catch (e: Exception) {
+                    logAudio("Failed AudioRecord init on source $sourceName: ${e.message}")
                 }
             }
 
             if (createdRecord == null) {
-                lastErrorMessage = "AudioRecord initialization failed on all candidate audio sources."
-                _liveMetrics.value = LiveAudioMetrics(
-                    status = AudioCaptureStatus.CAPTURE_ERROR,
-                    errorMessage = lastErrorMessage
-                )
+                lastErrorMessage = "AudioRecord could not be initialized into STATE_INITIALIZED on any audio source."
+                logAudio(lastErrorMessage ?: "", isError = true)
                 return false
             }
 
@@ -263,9 +274,11 @@ class AudioCaptureManager(
             startRecordingMethod.invoke(createdRecord)
             nativeAudioRecord = createdRecord
             activeAudioSourceName = selectedSourceName
+            logAudio("Physical AudioRecord initialized successfully (Source: $selectedSourceName, SR: $sampleRate, BufSize: $bufferSize)")
             true
         } catch (t: Throwable) {
             lastErrorMessage = "AudioRecord initialization exception: ${t.javaClass.simpleName}: ${t.message}"
+            logAudio(lastErrorMessage ?: "", isError = true)
             nativeAudioRecord = null
             activeAudioSourceName = "NONE"
             false
@@ -294,7 +307,7 @@ class AudioCaptureManager(
                     circularBuffer?.write(chunk)
                     pcmChunkFlow.emit(chunk)
 
-                    // Compute live volume metrics from actual PCM samples consumed by classifier
+                    // Compute live volume metrics from the exact PCM samples consumed by classifier
                     var maxAmp = 0
                     var sumSquares = 0.0
                     for (i in 0 until readCount) {
@@ -303,7 +316,7 @@ class AudioCaptureManager(
                         sumSquares += a * a
                     }
                     val peak = (maxAmp / 32768.0f).coerceIn(0f, 1f)
-                    val rms = (sqrt(sumSquares / readCount).toFloat() / 32768.0f).coerceIn(0f, 1f)
+                    val rms = sqrt(sumSquares / readCount).toFloat() / 32768.0f
                     val dbfs = if (rms > 1e-5f) (20f * log10(rms)).coerceIn(-100f, 0f) else -100f
 
                     _liveMetrics.value = LiveAudioMetrics(
@@ -315,11 +328,19 @@ class AudioCaptureManager(
                         isPhysicalRecord = true,
                         activeSource = activeAudioSourceName
                     )
+
+                    val now = System.currentTimeMillis()
+                    if (now - lastChunkLogTime > 3000L || peak > 0.15f) {
+                        lastChunkLogTime = now
+                        logAudio("Physical PCM read: $readCount samples | peak=%.3f, rms=%.4f, dbfs=%.1f dBFS (Source: $activeAudioSourceName)".format(peak, rms, dbfs))
+                    }
                 } else if (readCount < 0) {
+                    logAudio("AudioRecord.read returned error code: $readCount", isError = true)
                     delay(20) // Hardware buffer underrun or temporary stall
                 }
             } catch (e: Exception) {
                 lastErrorMessage = "AudioRecord read error: ${e.message}"
+                logAudio(lastErrorMessage ?: "", isError = true)
                 _liveMetrics.value = LiveAudioMetrics(
                     status = AudioCaptureStatus.CAPTURE_ERROR,
                     errorMessage = lastErrorMessage
