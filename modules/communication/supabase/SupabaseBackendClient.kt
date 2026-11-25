@@ -159,7 +159,7 @@ class SupabaseEmergencyBackendClient(
                 deviceRegistered.set(true)
                 Result.success(identity.deviceId)
             } else {
-                Result.failure(IllegalStateException("Device registration failed (HTTP ${resp.statusCode}): ${resp.body.take(120)}"))
+                Result.failure(IllegalStateException(formatHttpFailure("Device registration failed", resp.statusCode, resp.body)))
             }
         } catch (e: Exception) {
             Result.failure(e)
@@ -174,15 +174,15 @@ class SupabaseEmergencyBackendClient(
         val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
         if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
 
-        if (!ensureDeviceRegistered()) {
-            return Result.failure(IllegalStateException("Device registration with backend failed"))
-        }
+        val reg = ensureDeviceRegisteredResult()
+        if (reg.isFailure) return reg
+
         val headers = buildAuthenticatedHeaders(cfg, "pair|$hostDeviceId|$guardianDeviceId")
         val json = """{"hostDeviceId":"${jsonEscape(hostDeviceId)}","guardianDeviceId":"${jsonEscape(guardianDeviceId)}"}"""
         return try {
             val resp = transport.postJson("${cfg.functionsBaseUrl()}/pair", json, headers)
             if (resp.isSuccessful) Result.success(Unit)
-            else Result.failure(IllegalStateException("Pairing sync HTTP ${resp.statusCode}: ${resp.body.take(120)}"))
+            else Result.failure(IllegalStateException(formatHttpFailure("Pairing sync failed", resp.statusCode, resp.body)))
         } catch (e: Exception) {
             Result.failure(e)
         }
@@ -195,8 +195,11 @@ class SupabaseEmergencyBackendClient(
     fun createPairingInvitation(invite: PairingInvitation): Result<Unit> {
         val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
         if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
-        if (!ensureDeviceRegistered()) {
-            return Result.failure(IllegalStateException("Device registration with backend failed"))
+        val reg = ensureDeviceRegisteredResult()
+        if (reg.isFailure) {
+            val msg = reg.exceptionOrNull()?.message ?: "Device registration with backend failed"
+            connectivityManager.markActiveInvitationRegistered(false, msg)
+            return reg
         }
 
         val headers = buildAuthenticatedHeaders(cfg, "invite|${invite.inviteId}")
@@ -207,11 +210,13 @@ class SupabaseEmergencyBackendClient(
                 connectivityManager.markActiveInvitationRegistered(true, "Single-use QR invite active on backend")
                 Result.success(Unit)
             } else {
-                connectivityManager.markActiveInvitationRegistered(false, "Backend invite error HTTP ${resp.statusCode}")
-                Result.failure(IllegalStateException("Invite registration HTTP ${resp.statusCode}: ${resp.body.take(120)}"))
+                val msg = formatHttpFailure("Invite registration failed", resp.statusCode, resp.body)
+                connectivityManager.markActiveInvitationRegistered(false, msg)
+                Result.failure(IllegalStateException(msg))
             }
         } catch (e: Exception) {
-            connectivityManager.markActiveInvitationRegistered(false, "Offline: ${e.message}")
+            val msg = "Network error registering invite: ${e.message ?: "Connection failed"}"
+            connectivityManager.markActiveInvitationRegistered(false, msg)
             Result.failure(e)
         }
     }
@@ -223,8 +228,9 @@ class SupabaseEmergencyBackendClient(
     fun acceptPairingInvitationRemote(invite: PairingInvitation): Result<ConfirmedPairingResult> {
         val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
         if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
-        if (!ensureDeviceRegistered()) {
-            return Result.failure(IllegalStateException("Receiver device authentication with backend failed"))
+        val reg = ensureDeviceRegisteredResult()
+        if (reg.isFailure) {
+            return Result.failure(IllegalStateException(reg.exceptionOrNull()?.message ?: "Receiver device authentication with backend failed"))
         }
 
         val headers = buildAuthenticatedHeaders(cfg, "accept|${invite.inviteId}")
@@ -232,8 +238,7 @@ class SupabaseEmergencyBackendClient(
         return try {
             val resp = transport.postJson("${cfg.functionsBaseUrl()}/pairing/accept", json, headers)
             if (!resp.isSuccessful) {
-                val err = extractJsonString(resp.body, "error") ?: "HTTP ${resp.statusCode}"
-                return Result.failure(IllegalStateException("Backend pairing rejected: $err"))
+                return Result.failure(IllegalStateException(formatHttpFailure("Backend pairing rejected", resp.statusCode, resp.body)))
             }
             val confirmed = resp.body.contains(""""pairingConfirmed"\s*:\s*true""".toRegex())
             if (!confirmed) {
@@ -262,8 +267,9 @@ class SupabaseEmergencyBackendClient(
     fun fetchConfirmedPairings(): Result<SyncedPairingsResult> {
         val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
         if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
-        if (!ensureDeviceRegistered()) {
-            return Result.failure(IllegalStateException("Device registration required to sync pairings"))
+        val reg = ensureDeviceRegisteredResult()
+        if (reg.isFailure) {
+            return Result.failure(IllegalStateException(reg.exceptionOrNull()?.message ?: "Device registration required to sync pairings"))
         }
 
         val myId = connectivityManager.getIdentity().deviceId
@@ -271,7 +277,7 @@ class SupabaseEmergencyBackendClient(
         return try {
             val resp = transport.getJson("${cfg.functionsBaseUrl()}/pairings?deviceId=$myId", headers)
             if (!resp.isSuccessful) {
-                return Result.failure(IllegalStateException("Pairing sync HTTP ${resp.statusCode}"))
+                return Result.failure(IllegalStateException(formatHttpFailure("Pairing sync failed", resp.statusCode, resp.body)))
             }
             val guardiansBlock = extractJsonArrayContent(resp.body, "guardians")
             val hostsBlock = extractJsonArrayContent(resp.body, "hosts")
@@ -695,9 +701,24 @@ class SupabaseEmergencyBackendClient(
         }
     }
 
-    private fun ensureDeviceRegistered(): Boolean {
-        if (deviceRegistered.get()) return true
-        return registerDevice().isSuccess
+    private fun ensureDeviceRegistered(): Boolean = ensureDeviceRegisteredResult().isSuccess
+
+    private fun ensureDeviceRegisteredResult(): Result<Unit> {
+        if (deviceRegistered.get()) return Result.success(Unit)
+        val reg = registerDevice()
+        return if (reg.isSuccess) Result.success(Unit)
+        else Result.failure(reg.exceptionOrNull() ?: IllegalStateException("Device registration with backend failed"))
+    }
+
+    private fun formatHttpFailure(prefix: String, statusCode: Int, body: String): String {
+        val safeDetail = extractJsonString(body, "error")
+            ?: extractJsonString(body, "message")
+            ?: body.trim().take(100).ifBlank { "Unexpected backend response" }
+        return if (statusCode == 404) {
+            "$prefix (HTTP 404): Edge Function 'emergency-relay' not found or not deployed ($safeDetail)"
+        } else {
+            "$prefix (HTTP $statusCode): $safeDetail"
+        }
     }
 
     private fun parseSupabaseInboxAlerts(body: String): List<ReceivedGuardianAlert> {

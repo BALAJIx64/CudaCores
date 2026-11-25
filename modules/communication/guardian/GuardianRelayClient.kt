@@ -69,6 +69,24 @@ class HttpGuardianRelayClient(
     }
 
     override fun sendAlertEnvelope(payload: AlertPayload): GuardianRelayDispatchResult {
+        val sb = supabaseBackendClient
+        if (sb != null && sb.isConfigured()) {
+            val sbRes = sb.dispatchAlert(payload)
+            return GuardianRelayDispatchResult(
+                state = sbRes.state,
+                messageId = sbRes.messageId,
+                deliveredDeviceIds = if (sbRes.state == EmergencyDeliveryState.DELIVERED) {
+                    connectivityManager.getActiveGuardians().map { it.deviceId }
+                } else emptyList(),
+                failedDeviceIds = if (sbRes.state == EmergencyDeliveryState.DELIVERED) {
+                    emptyList()
+                } else connectivityManager.getActiveGuardians().map { it.deviceId },
+                latencyMs = sbRes.auditRecord.latencyMs,
+                errorMessage = sbRes.errorMessage,
+                auditRecords = listOf(sbRes.auditRecord)
+            )
+        }
+
         val startMs = System.currentTimeMillis()
         val guardians = connectivityManager.getActiveGuardians()
         if (guardians.isEmpty()) {
@@ -106,6 +124,25 @@ class HttpGuardianRelayClient(
             val eventId = "gg-${UUID.randomUUID()}"
             if (baseUrl.isBlank()) {
                 val err = "GuardianGrid Relay Server URL is not configured (set HTTPS relay URL in Guardian Connectivity)"
+                failed.add(guardian.deviceId)
+                lastErr = err
+                audits.add(
+                    CommunicationAuditRecord(
+                        recordId = UUID.randomUUID().toString(),
+                        incidentId = payload.incidentId,
+                        eventId = eventId,
+                        channel = DeliveryChannel.INTERNET_API,
+                        state = EmergencyDeliveryState.FAILED,
+                        attemptCount = 1,
+                        recipient = guardian.deviceId,
+                        errorMessage = err,
+                        latencyMs = System.currentTimeMillis() - startMs
+                    )
+                )
+                continue
+            }
+            if (guardian.sharedSecretHex.isBlank()) {
+                val err = "Legacy /v1 relay requires a shared secret; configure Supabase backend instead"
                 failed.add(guardian.deviceId)
                 lastErr = err
                 audits.add(
@@ -213,6 +250,40 @@ class HttpGuardianRelayClient(
         fileName: String,
         wavBytes: ByteArray
     ): GuardianRelayDispatchResult {
+        val sb = supabaseBackendClient
+        if (sb != null && sb.isConfigured()) {
+            val tempFile = File.createTempFile("gg_relay_", ".wav")
+            return try {
+                tempFile.writeBytes(wavBytes)
+                val durationEstMs = (((wavBytes.size - 44L).coerceAtLeast(0L) / 2L) * 1000L) / 16000L
+                val sbRes = sb.uploadAudioChunk(
+                    incidentId = incidentId,
+                    chunkSequence = chunkIndex,
+                    isPreTrigger = isPreTrigger,
+                    isFinal = isFinal,
+                    durationMs = durationEstMs,
+                    capturedAtEpochMs = System.currentTimeMillis(),
+                    caption = "Incident $incidentId Audio",
+                    wavFile = tempFile
+                )
+                GuardianRelayDispatchResult(
+                    state = sbRes.state,
+                    messageId = sbRes.messageId,
+                    deliveredDeviceIds = if (sbRes.state == EmergencyDeliveryState.DELIVERED) {
+                        connectivityManager.getActiveGuardians().map { it.deviceId }
+                    } else emptyList(),
+                    failedDeviceIds = if (sbRes.state == EmergencyDeliveryState.DELIVERED) {
+                        emptyList()
+                    } else connectivityManager.getActiveGuardians().map { it.deviceId },
+                    latencyMs = sbRes.auditRecord.latencyMs,
+                    errorMessage = sbRes.errorMessage,
+                    auditRecords = listOf(sbRes.auditRecord)
+                )
+            } finally {
+                tempFile.delete()
+            }
+        }
+
         val startMs = System.currentTimeMillis()
         val guardians = connectivityManager.getActiveGuardians()
         if (guardians.isEmpty()) {
@@ -246,6 +317,24 @@ class HttpGuardianRelayClient(
             val eventId = "gg-aud-${UUID.randomUUID()}"
             if (baseUrl.isBlank()) {
                 val err = "GuardianGrid Relay Server URL is not configured for audio streaming"
+                lastErr = err
+                failed.add(guardian.deviceId)
+                audits.add(
+                    CommunicationAuditRecord(
+                        recordId = UUID.randomUUID().toString(),
+                        incidentId = incidentId,
+                        eventId = eventId,
+                        channel = DeliveryChannel.INTERNET_API,
+                        state = EmergencyDeliveryState.FAILED,
+                        attemptCount = 1,
+                        recipient = guardian.deviceId,
+                        errorMessage = err
+                    )
+                )
+                continue
+            }
+            if (guardian.sharedSecretHex.isBlank()) {
+                val err = "Legacy /v1 audio relay requires a shared secret; configure Supabase backend instead"
                 lastErr = err
                 failed.add(guardian.deviceId)
                 audits.add(

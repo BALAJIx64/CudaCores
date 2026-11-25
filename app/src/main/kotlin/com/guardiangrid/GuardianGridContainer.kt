@@ -22,6 +22,7 @@ import com.guardiangrid.modules.communication.security.SecureCredentialStorage
 import com.guardiangrid.modules.communication.security.SecureTelegramCredentialStore
 import com.guardiangrid.modules.communication.sms.AndroidSmsSender
 import com.guardiangrid.modules.communication.sms.MockSmsSender
+import com.guardiangrid.modules.communication.supabase.SupabaseBackendConfig
 import com.guardiangrid.modules.communication.supabase.SupabaseConfigManager
 import com.guardiangrid.modules.communication.supabase.SupabaseEmergencyBackendClient
 import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
@@ -101,6 +102,15 @@ class DefaultGuardianGridContainer(
     override val guardianConnectivityManager: GuardianConnectivityManager by lazy {
         val baseDir = appContext?.filesDir ?: File(System.getProperty("java.io.tmpdir"), "gg_container_files")
         SupabaseConfigManager.initialize(File(baseDir, "security").apply { mkdirs() })
+        if (!SupabaseConfigManager.isConfigured() && BuildConfig.SUPABASE_ANON_KEY.isNotBlank()) {
+            val defaultCfg = SupabaseBackendConfig(
+                projectUrl = BuildConfig.SUPABASE_PROJECT_URL,
+                anonKey = BuildConfig.SUPABASE_ANON_KEY
+            )
+            if (defaultCfg.isValid()) {
+                SupabaseConfigManager.setConfig(defaultCfg)
+            }
+        }
         val modelName = listOfNotNull(Build.MANUFACTURER, Build.MODEL)
             .joinToString(" ")
             .trim()

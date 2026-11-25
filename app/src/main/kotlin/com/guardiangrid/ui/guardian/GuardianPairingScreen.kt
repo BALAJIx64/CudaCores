@@ -8,6 +8,8 @@ import android.content.Intent
 import android.net.Uri
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
+import androidx.core.content.FileProvider
+import java.io.File
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -135,9 +137,14 @@ fun GuardianPairingScreen(
     }
     var inviteInput by remember { mutableStateOf("") }
     var statusNotice by remember { mutableStateOf<String?>(null) }
+    var isRegisteringInvite by remember { mutableStateOf(false) }
+    var inviteBackendError by remember { mutableStateOf<String?>(null) }
+    var inviteRetryNonce by remember { mutableIntStateOf(0) }
     var isSyncing by remember { mutableStateOf(false) }
     var isPairingInProgress by remember { mutableStateOf(false) }
     var nowClockMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    var pendingCameraPhotoFile by remember { mutableStateOf<File?>(null) }
+    var pendingCameraPhotoUri by remember { mutableStateOf<Uri?>(null) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -147,33 +154,98 @@ fun GuardianPairingScreen(
     }
 
     // Automatically register device/invite & sync confirmed pairings when Supabase backend is active
-    LaunchedEffect(selectedTab, guardianState?.activeInvitationId) {
+    LaunchedEffect(selectedTab, guardianState?.activeInvitationId, inviteRetryNonce) {
         if (supabaseClient != null && supabaseClient.isConfigured() && connectivityManager != null) {
-            withContext(Dispatchers.IO) {
-                if (selectedTab == 0) {
-                    if (guardianState?.isActiveInvitationRegisteredWithBackend == false) {
+            if (selectedTab == 0) {
+                if (guardianState?.isActiveInvitationRegisteredWithBackend == false) {
+                    isRegisteringInvite = true
+                    inviteBackendError = null
+                    val inviteRes = withContext(Dispatchers.IO) {
                         supabaseClient.createPairingInvitation(connectivityManager.getActiveInvitationModel())
                     }
+                    isRegisteringInvite = false
+                    if (inviteRes.isFailure) {
+                        val errMsg = inviteRes.exceptionOrNull()?.message
+                            ?: "Failed to register pairing invitation with backend."
+                        inviteBackendError = errMsg
+                        statusNotice = errMsg
+                    } else {
+                        inviteBackendError = null
+                    }
+                }
+                val syncRes = withContext(Dispatchers.IO) {
                     supabaseClient.fetchConfirmedPairings()
-                } else {
+                }
+                if (syncRes.isFailure && inviteBackendError == null) {
+                    statusNotice = syncRes.exceptionOrNull()?.message ?: "Failed to sync pairings from backend."
+                }
+            } else {
+                withContext(Dispatchers.IO) {
                     relayClient?.pollIncomingAlerts()
                 }
             }
         }
     }
 
-    // Camera QR capture launcher (zero external app dependency)
-    val cameraQrLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.TakePicturePreview()
-    ) { bitmap ->
-        if (bitmap != null) {
-            val decoded = QrCodeDecoder.decodeFromBitmap(bitmap)
-            if (decoded.isSuccess) {
-                inviteInput = decoded.getOrThrow()
-                statusNotice = "QR captured & decoded. Tap 'Verify & Pair' to authenticate with backend."
-            } else {
-                statusNotice = decoded.exceptionOrNull()?.message ?: "Could not detect a QR code in camera photo."
+    // Bounded, cancellable sender refresh while an active invitation QR is displayed
+    LaunchedEffect(
+        selectedTab,
+        guardianState?.isActiveInvitationRegisteredWithBackend,
+        guardianState?.activeInvitationId
+    ) {
+        if (selectedTab == 0 &&
+            supabaseClient != null &&
+            supabaseClient.isConfigured() &&
+            connectivityManager != null &&
+            guardianState?.isActiveInvitationRegisteredWithBackend == true
+        ) {
+            var knownGuardianCount = guardianState.pairedGuardians.size
+            repeat(20) {
+                delay(6_000L)
+                if (System.currentTimeMillis() > guardianState.activeInvitationExpiresAtMs) {
+                    return@LaunchedEffect
+                }
+                val res = withContext(Dispatchers.IO) {
+                    supabaseClient.fetchConfirmedPairings()
+                }
+                if (res.isSuccess) {
+                    val synced = res.getOrThrow()
+                    if (synced.guardians.size > knownGuardianCount) {
+                        knownGuardianCount = synced.guardians.size
+                        statusNotice = "Backend confirmed new Guardian pairing (${synced.guardians.lastOrNull()?.deviceName ?: "Guardian"})."
+                    }
+                }
             }
+        }
+    }
+
+    // Full-resolution camera QR capture launcher via FileProvider
+    val cameraQrLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.TakePicture()
+    ) { success ->
+        val photoUri = pendingCameraPhotoUri
+        val photoFile = pendingCameraPhotoFile
+        try {
+            if (success && photoUri != null) {
+                val decoded = QrCodeDecoder.decodeFromUri(context, photoUri)
+                if (decoded.isSuccess) {
+                    val rawUri = decoded.getOrThrow()
+                    inviteInput = rawUri
+                    val localCheck = connectivityManager?.validateInvitationForBackend(rawUri)
+                    statusNotice = if (localCheck?.isFailure == true) {
+                        "Scanned QR rejected: ${localCheck.exceptionOrNull()?.message}"
+                    } else {
+                        "QR captured & decoded. Tap 'Verify & Confirm Pairing' to authenticate with backend."
+                    }
+                } else {
+                    statusNotice = decoded.exceptionOrNull()?.message
+                        ?: "Could not detect a QR code in camera photo. Try Image or Paste."
+                }
+            }
+        } finally {
+            photoFile?.delete()
+            pendingCameraPhotoFile = null
+            pendingCameraPhotoUri = null
         }
     }
 
@@ -283,15 +355,24 @@ fun GuardianPairingScreen(
         }
 
         if (!statusNotice.isNullOrBlank()) {
+            val msgLower = statusNotice!!.lowercase(Locale.ROOT)
+            val isErrorNotice = listOf("failed", "rejected", "http 4", "http 5", "cannot", "expired", "mismatch", "not found", "error", "not configured")
+                .any { msgLower.contains(it) }
+            val isSuccessNotice = !isErrorNotice && listOf("confirmed", "synced", "issued", "active").any { msgLower.contains(it) }
+            val noticeColor = when {
+                isErrorNotice -> EmergencyRed
+                isSuccessNotice -> SafeGreen
+                else -> CyberTeal
+            }
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = DarkSurfaceElevated),
                 shape = RoundedCornerShape(12.dp),
-                border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(CyberTeal))
+                border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(noticeColor))
             ) {
                 Text(
                     text = statusNotice!!,
-                    color = CyberTeal,
+                    color = noticeColor,
                     fontSize = 11.sp,
                     modifier = Modifier.padding(12.dp)
                 )
@@ -408,26 +489,85 @@ fun GuardianPairingScreen(
                         )
                     }
                     Text(
-                        text = if (guardianState.isActiveInvitationRegisteredWithBackend) {
-                            "Single-use, secret-free invitation registered on backend. Have your trusted Guardian scan or import this QR before expiry."
-                        } else if (isBackendActive) {
-                            "Registering single-use invite with backend... Tap Rotate to issue a fresh expiring QR."
-                        } else {
-                            "Configure Supabase backend (Settings > Channels) to enable server-authenticated QR pairing."
+                        text = when {
+                            !isBackendActive -> "Supabase backend is not configured. Go to Settings > Channels to enter your Project URL and Public Anon Key before generating a pairing QR."
+                            isRegisteringInvite -> "Registering device & creating single-use invitation on backend..."
+                            guardianState.isActiveInvitationRegisteredWithBackend -> "Single-use, secret-free invitation active on backend. Have your trusted Guardian scan or import this QR before expiry."
+                            else -> inviteBackendError ?: guardianState.lastSyncStatus
                         },
                         fontSize = 11.sp,
-                        color = if (guardianState.isActiveInvitationRegisteredWithBackend) TextSecondary else WarningAmber
+                        color = when {
+                            !isBackendActive -> WarningAmber
+                            isRegisteringInvite -> CyberTeal
+                            guardianState.isActiveInvitationRegisteredWithBackend -> TextSecondary
+                            else -> EmergencyRed
+                        }
                     )
 
-                    QrCodeImage(
-                        content = guardianState.activeInvitationUri,
-                        modifier = Modifier.size(210.dp)
-                    )
+                    if (!isBackendActive) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(DarkSurfaceElevated)
+                                .padding(14.dp)
+                        ) {
+                            Text(
+                                text = "QR Pairing Disabled — Configure Supabase Project URL & Public Anon Key in Settings > Channels.",
+                                fontSize = 11.sp,
+                                color = WarningAmber
+                            )
+                        }
+                    } else if (isRegisteringInvite) {
+                        Row(
+                            modifier = Modifier.padding(vertical = 20.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            CircularProgressIndicator(modifier = Modifier.size(18.dp), color = CyberTeal, strokeWidth = 2.dp)
+                            Text("Waiting for backend invite confirmation...", fontSize = 12.sp, color = CyberTeal)
+                        }
+                    } else if (!guardianState.isActiveInvitationRegisteredWithBackend) {
+                        Column(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(12.dp))
+                                .background(DarkSurfaceElevated)
+                                .padding(14.dp),
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            Text(
+                                text = "QR Not Active: Backend invitation registration failed.",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = EmergencyRed
+                            )
+                            Text(
+                                text = inviteBackendError ?: guardianState.lastSyncStatus,
+                                fontSize = 11.sp,
+                                color = TextSecondary
+                            )
+                            OutlinedButton(
+                                onClick = { inviteRetryNonce++ },
+                                modifier = Modifier.fillMaxWidth()
+                            ) {
+                                Icon(Icons.Default.Refresh, contentDescription = null, modifier = Modifier.size(14.dp), tint = CyberTeal)
+                                Spacer(Modifier.width(6.dp))
+                                Text("Retry Backend Registration", fontSize = 11.sp, color = CyberTeal)
+                            }
+                        }
+                    } else {
+                        QrCodeImage(
+                            content = guardianState.activeInvitationUri,
+                            modifier = Modifier.size(210.dp)
+                        )
+                    }
 
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
+                        val canShareQr = isBackendActive && guardianState.isActiveInvitationRegisteredWithBackend && !isInviteExpired
                         OutlinedButton(
                             onClick = {
                                 clipboardManager?.setPrimaryClip(
@@ -435,6 +575,7 @@ fun GuardianPairingScreen(
                                 )
                                 statusNotice = "Single-use pairing invitation URI copied to clipboard."
                             },
+                            enabled = canShareQr,
                             modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Default.ContentCopy, contentDescription = null, modifier = Modifier.size(14.dp), tint = TextPrimary)
@@ -451,6 +592,7 @@ fun GuardianPairingScreen(
                                 }
                                 context.startActivity(Intent.createChooser(sendIntent, "Share GuardianGrid Pairing Invite"))
                             },
+                            enabled = canShareQr,
                             modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Default.Share, contentDescription = null, modifier = Modifier.size(14.dp), tint = InfoBlue)
@@ -460,20 +602,10 @@ fun GuardianPairingScreen(
 
                         OutlinedButton(
                             onClick = {
+                                inviteBackendError = null
                                 connectivityManager.regeneratePairingInvitation()
-                                if (supabaseClient != null && supabaseClient.isConfigured()) {
-                                    scope.launch {
-                                        val res = withContext(Dispatchers.IO) {
-                                            supabaseClient.createPairingInvitation(connectivityManager.getActiveInvitationModel())
-                                        }
-                                        statusNotice = if (res.isSuccess) {
-                                            "Issued fresh expiring single-use QR invitation on backend."
-                                        } else {
-                                            "Rotated QR locally; backend registration failed: ${res.exceptionOrNull()?.message}"
-                                        }
-                                    }
-                                } else {
-                                    statusNotice = "Rotated single-use QR locally (backend offline/unconfigured)."
+                                if (!isBackendActive) {
+                                    statusNotice = "Configure Supabase Project URL & Public Anon Key in Settings > Channels first."
                                 }
                             },
                             modifier = Modifier.weight(1f)
@@ -528,7 +660,18 @@ fun GuardianPairingScreen(
                         horizontalArrangement = Arrangement.spacedBy(8.dp)
                     ) {
                         OutlinedButton(
-                            onClick = { cameraQrLauncher.launch(null) },
+                            onClick = {
+                                val scanDir = File(context.cacheDir, "qr_scan").apply { mkdirs() }
+                                val photoFile = File(scanDir, "qr_${System.currentTimeMillis()}.jpg")
+                                val photoUri = FileProvider.getUriForFile(
+                                    context,
+                                    "${context.packageName}.fileprovider",
+                                    photoFile
+                                )
+                                pendingCameraPhotoFile = photoFile
+                                pendingCameraPhotoUri = photoUri
+                                cameraQrLauncher.launch(photoUri)
+                            },
                             modifier = Modifier.weight(1f)
                         ) {
                             Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(15.dp), tint = CyberTeal)

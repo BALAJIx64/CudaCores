@@ -19,6 +19,15 @@ android {
         vectorDrawables {
             useSupportLibrary = true
         }
+
+        val supabaseUrl = (project.findProperty("GUARDIANGRID_SUPABASE_URL") as String?)
+            ?: System.getenv("GUARDIANGRID_SUPABASE_URL")
+            ?: "https://yhzvpuycztuwdqttpoid.supabase.co"
+        val supabaseAnonKey = (project.findProperty("GUARDIANGRID_SUPABASE_ANON_KEY") as String?)
+            ?: System.getenv("GUARDIANGRID_SUPABASE_ANON_KEY")
+            ?: ""
+        buildConfigField("String", "SUPABASE_PROJECT_URL", "\"${supabaseUrl.replace("\"", "\\\"")}\"")
+        buildConfigField("String", "SUPABASE_ANON_KEY", "\"${supabaseAnonKey.replace("\"", "\\\"")}\"")
     }
 
     buildTypes {
@@ -46,6 +55,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     sourceSets {

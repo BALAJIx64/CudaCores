@@ -240,7 +240,9 @@ class EmergencyCommunicatorImpl(
                         }
                     }
 
-                    if (client != null && guardianConnectivityManager?.getActiveGuardians()?.isNotEmpty() == true) {
+                    val hasCustomRelayGuardians = guardianConnectivityManager?.getActiveGuardians()
+                        ?.any { it.sharedSecretHex.isNotBlank() } == true
+                    if (client != null && ((sb == null || !sb.isConfigured()) && guardianConnectivityManager?.getActiveGuardians()?.isNotEmpty() == true || hasCustomRelayGuardians)) {
                         val res = client.sendAlertEnvelope(sanitizedPayload)
                         res.auditRecords.forEach { recordAudit(it) }
                         if (res.state == EmergencyDeliveryState.DELIVERED) {
@@ -444,7 +446,9 @@ class EmergencyCommunicatorImpl(
                 }
 
                 val client = guardianRelayClient
-                if (client != null && guardianConnectivityManager?.getActiveGuardians()?.isNotEmpty() == true) {
+                val hasCustomRelayGuardians = guardianConnectivityManager?.getActiveGuardians()
+                    ?.any { it.sharedSecretHex.isNotBlank() } == true
+                if (client != null && ((sb == null || !sb.isConfigured()) && guardianConnectivityManager?.getActiveGuardians()?.isNotEmpty() == true || hasCustomRelayGuardians)) {
                     val res = client.sendAudioChunk(
                         incidentId = payload.incidentId,
                         chunkIndex = chunkIdx,
