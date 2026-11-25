@@ -22,7 +22,8 @@ data class CommunicationAuditRecord(
     val recipient: String? = null,
     val errorMessage: String? = null,
     val latencyMs: Long = 0L,
-    val isDuplicateSuppressed: Boolean = false
+    val isDuplicateSuppressed: Boolean = false,
+    val retryAfterSeconds: Int? = null
 ) {
     /**
      * Converts audit record into the core project DeliveryReceipt contract.

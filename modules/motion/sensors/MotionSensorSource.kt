@@ -26,4 +26,9 @@ interface MotionSensorSource {
      * Check whether hardware gyroscope is available.
      */
     fun hasGyroscope(): Boolean
+
+    /**
+     * Check whether hardware accelerometer is available.
+     */
+    fun hasAccelerometer(): Boolean = true
 }

@@ -10,6 +10,7 @@ Thumbs.db
 
 # Build artifacts & Android / Gradle
 .gradle/
+.kotlin/
 build/
 bin/
 out/
@@ -21,6 +22,8 @@ app/build/
 local.properties
 .env
 *.local
+supabase/.temp/
+supabase/.branches/
 
 # Python / ML / Models cache
 __pycache__/

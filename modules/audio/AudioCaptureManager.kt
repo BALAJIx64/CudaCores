@@ -103,8 +103,27 @@ class AudioCaptureManager(
             return Result.failure(SecurityException(lastErrorMessage))
         }
 
-        // Attempt initialization of physical Android AudioRecord
+        // Detect genuine Android ART runtime vs host JVM unit-test stub environment
+        val isAndroidDevice = System.getProperty("java.runtime.name")
+            ?.contains("Android", ignoreCase = true) == true
+
         val initialized = initializeAndroidAudioRecord()
+
+        if (isAndroidDevice && !initialized) {
+            // Never report synthetic fallback as active microphone capture on a physical Android device
+            isCapturing = false
+            isUsingMockCapture = false
+            val err = lastErrorMessage ?: "AudioRecord hardware initialization failed"
+            _liveMetrics.value = LiveAudioMetrics(
+                status = AudioCaptureStatus.CAPTURE_ERROR,
+                sampleRate = sampleRate,
+                isPhysicalRecord = false,
+                isUsingMockCapture = false,
+                activeSource = "NONE",
+                errorMessage = err
+            )
+            return Result.failure(IllegalStateException(err))
+        }
 
         isCapturing = true
         isUsingMockCapture = !initialized
@@ -114,7 +133,7 @@ class AudioCaptureManager(
             sampleRate = sampleRate,
             isPhysicalRecord = initialized,
             isUsingMockCapture = !initialized,
-            activeSource = activeAudioSourceName,
+            activeSource = if (initialized) activeAudioSourceName else "JVM_SYNTHETIC",
             errorMessage = lastErrorMessage
         )
 

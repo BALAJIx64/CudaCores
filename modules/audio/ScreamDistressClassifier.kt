@@ -151,6 +151,8 @@ class ScreamDistressClassifier(
         consecutiveDistressFrames = 0
     }
 
+    fun observeSignalsOnly(): Flow<DistressSignal> = signalFlow.asSharedFlow()
+
     override fun isMonitoring(): Boolean = monitoring
 
     override fun setSensitivity(sensitivity: Float) {
@@ -188,6 +190,7 @@ class ScreamDistressClassifier(
             val outputScores = Array(1) { FloatArray(521) }
             val runMethod = interpreter.javaClass.getMethod("run", Any::class.java, Any::class.java)
             runMethod.invoke(interpreter, inputWindow, outputScores)
+            lastInferenceStatus = "TFLITE_YAMNET_ACTIVE ($activeModelName)"
 
             val screamIndex = 11 // AudioSet Class 11: Screaming
             val screamScore = outputScores[0][screamIndex]
@@ -214,7 +217,8 @@ class ScreamDistressClassifier(
             } else {
                 0.0f
             }
-        } catch (_: Throwable) {
+        } catch (t: Throwable) {
+            lastInferenceStatus = "EDGE_DSP_FALLBACK_RUNTIME (${t.javaClass.simpleName}: ${t.message})"
             null
         }
     }

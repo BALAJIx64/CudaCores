@@ -1,5 +1,8 @@
 package com.guardiangrid.ui
 
+import android.app.Activity
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -19,13 +22,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.Edit
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarBorder
 import androidx.compose.material3.AlertDialog
@@ -103,7 +106,32 @@ fun EmergencyContactsScreen(
 
     var showContactDialog by remember { mutableStateOf(false) }
     var contactToEdit by remember { mutableStateOf<EmergencyContact?>(null) }
+    var pickedContact by remember { mutableStateOf<PickedPhoneContact?>(null) }
+    var pickerError by remember { mutableStateOf<String?>(null) }
     var contactToDelete by remember { mutableStateOf<EmergencyContact?>(null) }
+
+    val contactPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val uri = result.data?.data
+            if (uri != null) {
+                val resolved = NativeContactHelper.resolvePickedPhoneContact(context, uri)
+                if (resolved.isSuccess) {
+                    val info = resolved.getOrThrow()
+                    if (info.isPhoneValid) {
+                        pickerError = null
+                        pickedContact = info
+                        showContactDialog = true
+                    } else {
+                        pickerError = info.validationError ?: "Picked contact phone number is not valid E.164 format."
+                    }
+                } else {
+                    pickerError = resolved.exceptionOrNull()?.message ?: "Unable to read picked contact."
+                }
+            }
+        }
+    }
 
     val contacts = state.trustedContacts
     val primaryContact = contacts.firstOrNull { it.isPrimary } ?: contacts.firstOrNull()
@@ -181,15 +209,25 @@ fun EmergencyContactsScreen(
                     Button(
                         onClick = {
                             contactToEdit = null
-                            showContactDialog = true
+                            pickedContact = null
+                            pickerError = null
+                            contactPickerLauncher.launch(NativeContactHelper.buildPhonePickerIntent())
                         },
                         colors = ButtonDefaults.buttonColors(containerColor = BrandPurple),
                         shape = RoundedCornerShape(10.dp)
                     ) {
                         Icon(imageVector = Icons.Default.Add, contentDescription = null, modifier = Modifier.size(16.dp))
                         Spacer(modifier = Modifier.width(6.dp))
-                        Text(text = "Add Contact", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                        Text(text = "Pick Contact", fontSize = 12.sp, fontWeight = FontWeight.Bold)
                     }
+                }
+                if (!pickerError.isNullOrBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = pickerError!!,
+                        fontSize = 11.sp,
+                        color = EmergencyRed
+                    )
                 }
             }
         }
@@ -242,6 +280,7 @@ fun EmergencyContactsScreen(
                         },
                         onEdit = {
                             contactToEdit = contact
+                            pickedContact = null
                             showContactDialog = true
                         },
                         onDelete = {
@@ -253,11 +292,18 @@ fun EmergencyContactsScreen(
         }
     }
 
-    // --- Add/Edit Contact Dialog ---
+    // --- Add/Edit Contact Dialog (Backed by Native Contact Picker — no manual phone entry) ---
     if (showContactDialog) {
         ContactEditDialog(
             contactToEdit = contactToEdit,
-            onDismiss = { showContactDialog = false },
+            pickedContact = pickedContact,
+            onRepickFromContacts = {
+                contactPickerLauncher.launch(NativeContactHelper.buildPhonePickerIntent())
+            },
+            onDismiss = {
+                showContactDialog = false
+                pickedContact = null
+            },
             onSave = { name, phone, chatId, isPrimary, relationship ->
                 val newContact = EmergencyContact(
                     id = contactToEdit?.id ?: UUID.randomUUID().toString(),
@@ -268,13 +314,18 @@ fun EmergencyContactsScreen(
                     relationship = relationship
                 )
 
-                if (contactToEdit == null) {
+                val res = if (contactToEdit == null) {
                     repo?.addContact(newContact)
                 } else {
                     repo?.updateContact(newContact)
                 }
-                repo?.syncToStateHolder()
-                showContactDialog = false
+                if (res?.isFailure == true) {
+                    pickerError = res.exceptionOrNull()?.message ?: "Could not save contact"
+                } else {
+                    repo?.syncToStateHolder()
+                    pickedContact = null
+                    showContactDialog = false
+                }
             }
         )
     }
@@ -449,7 +500,7 @@ private fun ContactCard(
 
                 if (!contact.telegramChatId.isNullOrBlank()) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
-                        Icon(imageVector = Icons.Default.Send, contentDescription = null, tint = CyberTeal, modifier = Modifier.size(14.dp))
+                        Icon(imageVector = Icons.AutoMirrored.Filled.Send, contentDescription = null, tint = CyberTeal, modifier = Modifier.size(14.dp))
                         Spacer(modifier = Modifier.width(6.dp))
                         Text(text = "Chat: ${contact.telegramChatId}", fontSize = 11.sp, color = TextSecondary)
                     }
@@ -463,18 +514,20 @@ private fun ContactCard(
 @Composable
 private fun ContactEditDialog(
     contactToEdit: EmergencyContact?,
+    pickedContact: PickedPhoneContact?,
+    onRepickFromContacts: () -> Unit,
     onDismiss: () -> Unit,
     onSave: (name: String, phone: String, chatId: String, isPrimary: Boolean, relationship: String) -> Unit
 ) {
-    var name by remember { mutableStateOf(contactToEdit?.name ?: "") }
-    var phone by remember { mutableStateOf(contactToEdit?.phoneNumber ?: "") }
-    var chatId by remember { mutableStateOf(contactToEdit?.telegramChatId ?: "") }
-    var isPrimary by remember { mutableStateOf(contactToEdit?.isPrimary ?: false) }
-    var relationship by remember { mutableStateOf(contactToEdit?.relationship ?: "Family") }
+    val resolvedName = pickedContact?.displayName ?: contactToEdit?.name ?: ""
+    val resolvedPhone = pickedContact?.normalizedPhoneNumber ?: contactToEdit?.phoneNumber ?: ""
+    var chatId by remember(contactToEdit, pickedContact) { mutableStateOf(contactToEdit?.telegramChatId ?: "") }
+    var isPrimary by remember(contactToEdit) { mutableStateOf(contactToEdit?.isPrimary ?: false) }
+    var relationship by remember(contactToEdit) { mutableStateOf(contactToEdit?.relationship ?: "Family") }
     var relationshipExpanded by remember { mutableStateOf(false) }
 
-    val phoneValidation = remember(phone) { PhoneNumberValidator.validateAndNormalize(phone) }
-    val isFormValid = name.isNotBlank() && phoneValidation.isValid
+    val phoneValidation = remember(resolvedPhone) { PhoneNumberValidator.validateAndNormalize(resolvedPhone) }
+    val isFormValid = resolvedName.isNotBlank() && phoneValidation.isValid
 
     val relationshipOptions = listOf("Family", "Partner", "Parent", "Sibling", "Friend", "Colleague", "Caregiver", "Other")
 
@@ -484,7 +537,7 @@ private fun ContactEditDialog(
         shape = RoundedCornerShape(16.dp),
         title = {
             Text(
-                text = if (contactToEdit == null) "Add Emergency Contact" else "Edit Emergency Contact",
+                text = if (contactToEdit == null) "Confirm Picked Contact" else "Edit Emergency Contact",
                 color = TextPrimary,
                 fontWeight = FontWeight.Bold,
                 fontSize = 16.sp
@@ -492,20 +545,33 @@ private fun ContactEditDialog(
         },
         text = {
             Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                // Name Field
-                OutlinedTextField(
-                    value = name,
-                    onValueChange = { name = it },
-                    label = { Text("Full Name") },
-                    singleLine = true,
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary,
-                        focusedBorderColor = BrandMagenta,
-                        unfocusedBorderColor = DarkBorder
+                // Read-only contact details retrieved safely from Android Contacts Picker
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(10.dp))
+                        .background(DarkSurface)
+                        .border(1.dp, if (isFormValid) SafeGreen.copy(alpha = 0.5f) else DarkBorder, RoundedCornerShape(10.dp))
+                        .padding(12.dp),
+                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    Text(text = "SELECTED FROM DEVICE CONTACTS", fontSize = 9.sp, fontWeight = FontWeight.Black, color = TextTertiary)
+                    Text(text = resolvedName.ifBlank { "No contact picked" }, fontSize = 14.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                    Text(
+                        text = if (phoneValidation.isValid) phoneValidation.normalizedNumber else (phoneValidation.errorMessage ?: "Invalid phone"),
+                        fontSize = 12.sp,
+                        color = if (phoneValidation.isValid) SafeGreen else EmergencyRed
                     )
-                )
+                }
+
+                OutlinedButton(
+                    onClick = onRepickFromContacts,
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Icon(imageVector = Icons.Default.Phone, contentDescription = null, tint = CyberTeal, modifier = Modifier.size(16.dp))
+                    Spacer(modifier = Modifier.width(6.dp))
+                    Text(text = "Choose Different Phone Contact", fontSize = 12.sp, color = CyberTeal)
+                }
 
                 // Relationship Selector
                 ExposedDropdownMenuBox(
@@ -545,32 +611,6 @@ private fun ContactEditDialog(
                     }
                 }
 
-                // Phone Field
-                OutlinedTextField(
-                    value = phone,
-                    onValueChange = { phone = it },
-                    label = { Text("Phone Number (E.164)") },
-                    placeholder = { Text("+14155552671", color = TextDisabled) },
-                    singleLine = true,
-                    isError = phone.isNotBlank() && !phoneValidation.isValid,
-                    supportingText = {
-                        if (phone.isNotBlank() && !phoneValidation.isValid) {
-                            Text(phoneValidation.errorMessage ?: "Invalid format", color = EmergencyRed, fontSize = 11.sp)
-                        } else if (phone.isNotBlank() && phoneValidation.isValid) {
-                            Text("✓ Valid international format (${phoneValidation.normalizedNumber})", color = SafeGreen, fontSize = 11.sp)
-                        } else {
-                            Text("Include country code (e.g. +1, +44, +91)", color = TextTertiary, fontSize = 11.sp)
-                        }
-                    },
-                    modifier = Modifier.fillMaxWidth(),
-                    colors = OutlinedTextFieldDefaults.colors(
-                        focusedTextColor = TextPrimary,
-                        unfocusedTextColor = TextPrimary,
-                        focusedBorderColor = if (phoneValidation.isValid) SafeGreen else BrandMagenta,
-                        unfocusedBorderColor = DarkBorder
-                    )
-                )
-
                 // Telegram Chat ID Field
                 OutlinedTextField(
                     value = chatId,
@@ -597,7 +637,7 @@ private fun ContactEditDialog(
                 ) {
                     Column {
                         Text(text = "Designate as Primary Responder", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                        Text(text = "Alerted first with top delivery priority", fontSize = 10.sp, color = TextSecondary)
+                        Text(text = "Alerted first; other contacts serve as Secondary", fontSize = 10.sp, color = TextSecondary)
                     }
                     Switch(
                         checked = isPrimary,
@@ -609,7 +649,7 @@ private fun ContactEditDialog(
         },
         confirmButton = {
             Button(
-                onClick = { onSave(name, phoneValidation.normalizedNumber, chatId, isPrimary, relationship) },
+                onClick = { onSave(resolvedName, phoneValidation.normalizedNumber, chatId, isPrimary, relationship) },
                 enabled = isFormValid,
                 colors = ButtonDefaults.buttonColors(containerColor = BrandPurple, disabledContainerColor = DarkSurfaceHighlight)
             ) {

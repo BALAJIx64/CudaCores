@@ -45,6 +45,7 @@ data class EmergencyState(
     val incidentHistory: List<EmergencyIncident> = emptyList(),
     val isAudioMonitoringRunning: Boolean = false,
     val isMotionMonitoringRunning: Boolean = false,
+    val isAccelerometerAvailable: Boolean = true,
     val isDiscreetModeEnabled: Boolean = false,
     val isAudioPermissionGranted: Boolean = false,
     val isLocationPermissionGranted: Boolean = false,
@@ -53,5 +54,6 @@ data class EmergencyState(
     val isGpsEnabled: Boolean = false,
     val statusMessage: String = "GuardianGrid Standby",
     val verificationCountdownRemainingMs: Long = 0L,
+    val verificationTotalTimeoutMs: Long = 10000L,
     val lastDetectedSignal: DistressSignal? = null
 )

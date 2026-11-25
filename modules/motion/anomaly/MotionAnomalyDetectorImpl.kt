@@ -14,16 +14,35 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asSharedFlow
+import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 import java.util.UUID
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
+ * Snapshot of live inertial motion telemetry for UI diagnostics and dashboard health indicators.
+ */
+data class LiveMotionMetrics(
+    val magnitude: Float = 9.81f,
+    val peakMagnitude: Float = 9.81f,
+    val angularSpeed: Float = 0f,
+    val dynamicAcceleration: Float = 0f,
+    val hasAccelerometer: Boolean = true,
+    val hasGyroscope: Boolean = false,
+    val isCalibrated: Boolean = false,
+    val lastSampleEpochMs: Long = 0L
+)
+
+/**
  * Production implementation of [MotionAnomalyDetector].
- * Ingests 3-axis accelerometer and gyroscope data, extracts kinematic features,
+ * Ingests 3-axis accelerometer and gyroscope data, extracts kinematic features sequentially,
  * filters benign movements, and emits high-confidence distress signals for falls and struggles.
  */
 class MotionAnomalyDetectorImpl(
@@ -35,9 +54,12 @@ class MotionAnomalyDetectorImpl(
 
     private val isMonitoring = AtomicBoolean(false)
     private var detectorScope: CoroutineScope? = null
+    private var sampleChannel: Channel<MotionSample>? = null
 
     private val signalFlow = MutableSharedFlow<DistressSignal>(extraBufferCapacity = 64)
     private val sampleFlow = MutableSharedFlow<MotionSample>(extraBufferCapacity = 128)
+    private val _liveMetrics = MutableStateFlow(LiveMotionMetrics())
+    val liveMetrics: StateFlow<LiveMotionMetrics> = _liveMetrics.asStateFlow()
 
     private val featureExtractor = MotionFeatureExtractor(
         windowCapacityMs = 1000L,
@@ -62,6 +84,10 @@ class MotionAnomalyDetectorImpl(
         this.config = newConfig
     }
 
+    fun getConfig(): MotionThresholdConfig = config
+
+    fun hasAccelerometer(): Boolean = sensorSource.hasAccelerometer()
+
     override fun startMonitoring(): Flow<DistressSignal> {
         if (!isMonitoring.compareAndSet(false, true)) {
             return signalFlow.asSharedFlow()
@@ -69,14 +95,39 @@ class MotionAnomalyDetectorImpl(
 
         val scope = CoroutineScope(SupervisorJob() + Dispatchers.Default)
         detectorScope = scope
+        val channel = Channel<MotionSample>(capacity = 256, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+        sampleChannel = channel
 
         featureExtractor.reset()
 
-        sensorSource.start { sample ->
-            scope.launch {
+        // Single sequential consumer preserves strict chronological sample order without per-sample coroutine allocation
+        scope.launch {
+            for (sample in channel) {
                 sampleFlow.tryEmit(sample)
                 processSample(sample)
             }
+        }
+
+        sensorSource.start { sample ->
+            channel.trySend(sample)
+        }
+
+        // If hardware accelerometer is missing or failed registration, do not claim monitoring is active
+        if (!sensorSource.isStreaming()) {
+            _liveMetrics.value = _liveMetrics.value.copy(
+                hasAccelerometer = sensorSource.hasAccelerometer(),
+                hasGyroscope = sensorSource.hasGyroscope()
+            )
+            channel.close()
+            sampleChannel = null
+            scope.cancel()
+            detectorScope = null
+            isMonitoring.set(false)
+        } else {
+            _liveMetrics.value = _liveMetrics.value.copy(
+                hasAccelerometer = sensorSource.hasAccelerometer(),
+                hasGyroscope = sensorSource.hasGyroscope()
+            )
         }
 
         return signalFlow.asSharedFlow()
@@ -86,15 +137,23 @@ class MotionAnomalyDetectorImpl(
         if (!isMonitoring.compareAndSet(true, false)) return
 
         sensorSource.stop()
+        sampleChannel?.close()
+        sampleChannel = null
         detectorScope?.cancel()
         detectorScope = null
         featureExtractor.reset()
+        _liveMetrics.value = LiveMotionMetrics(
+            hasAccelerometer = sensorSource.hasAccelerometer(),
+            hasGyroscope = sensorSource.hasGyroscope(),
+            isCalibrated = baselineCalibrator.isCalibrated
+        )
     }
 
     override fun isMonitoring(): Boolean = isMonitoring.get()
 
     override fun calibrateBaseline() {
         baselineCalibrator.computeBaseline()
+        _liveMetrics.value = _liveMetrics.value.copy(isCalibrated = baselineCalibrator.isCalibrated)
     }
 
     override fun observeMotionSamples(): Flow<MotionSample> {
@@ -113,6 +172,17 @@ class MotionAnomalyDetectorImpl(
         }
 
         val features = featureExtractor.processSample(sample)
+        _liveMetrics.value = LiveMotionMetrics(
+            magnitude = features.currentMagnitude,
+            peakMagnitude = features.peakMagnitude,
+            angularSpeed = features.currentAngularSpeed,
+            dynamicAcceleration = features.dynamicAcceleration,
+            hasAccelerometer = sensorSource.hasAccelerometer(),
+            hasGyroscope = sensorSource.hasGyroscope(),
+            isCalibrated = baselineCalibrator.isCalibrated,
+            lastSampleEpochMs = features.timestampEpochMs
+        )
+
         val now = sample.timestampEpochMs
 
         // Avoid spamming duplicate anomalies within cooldown window

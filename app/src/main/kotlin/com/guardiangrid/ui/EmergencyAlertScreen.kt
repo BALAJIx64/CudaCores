@@ -24,13 +24,14 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Emergency
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.LocationOn
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
@@ -38,9 +39,13 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -55,6 +60,7 @@ import com.guardiangrid.core.models.DeliveryChannel
 import com.guardiangrid.core.models.DeliveryStatus
 import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.core.state.EmergencyStateHolder
+import com.guardiangrid.core.state.MonitoringServiceState
 import com.guardiangrid.ui.theme.BrandMagenta
 import com.guardiangrid.ui.theme.DarkBackground
 import com.guardiangrid.ui.theme.DarkBorder
@@ -95,6 +101,7 @@ fun EmergencyAlertScreen(
     val incident = state.activeIncident
     val receipts = state.recentDeliveryReceipts
     val audioSegments = incident?.audioSegments ?: emptyList()
+    var showResolveConfirmDialog by remember { mutableStateOf(false) }
 
     val timeFormatter = SimpleDateFormat("HH:mm:ss", Locale.getDefault())
     val startTimeStr = incident?.let { timeFormatter.format(Date(it.startTimeEpochMs)) } ?: "Just now"
@@ -178,6 +185,30 @@ fun EmergencyAlertScreen(
                         color = Color.White.copy(alpha = 0.8f)
                     )
                 }
+            }
+        }
+
+        // --- Dispatch Stage Stepper ---
+        item {
+            val anyDelivered = receipts.any { it.status == DeliveryStatus.DELIVERED }
+            val anyAttempted = receipts.isNotEmpty()
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(12.dp))
+                    .background(DarkSurface)
+                    .border(1.dp, DarkBorder, RoundedCornerShape(12.dp))
+                    .padding(horizontal = 12.dp, vertical = 10.dp),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AlertStageItem("DETECTED", completed = true)
+                Text("→", color = TextTertiary, fontSize = 11.sp)
+                AlertStageItem("VERIFIED", completed = true)
+                Text("→", color = TextTertiary, fontSize = 11.sp)
+                AlertStageItem("DISPATCHED", completed = anyAttempted)
+                Text("→", color = TextTertiary, fontSize = 11.sp)
+                AlertStageItem("DELIVERED", completed = anyDelivered)
             }
         }
 
@@ -384,7 +415,7 @@ fun EmergencyAlertScreen(
                 val (receiptColor, receiptIcon) = when (receipt.status) {
                     DeliveryStatus.DELIVERED -> SafeGreen to Icons.Default.CheckCircle
                     DeliveryStatus.FAILED_RETRYING -> WarningAmber to Icons.Default.Warning
-                    DeliveryStatus.PENDING, DeliveryStatus.IN_FLIGHT -> InfoBlue to Icons.Default.Send
+                    DeliveryStatus.PENDING, DeliveryStatus.IN_FLIGHT -> InfoBlue to Icons.AutoMirrored.Filled.Send
                     DeliveryStatus.ABANDONED -> EmergencyRed to Icons.Default.Warning
                 }
 
@@ -444,15 +475,12 @@ fun EmergencyAlertScreen(
             }
         }
 
-        // --- Resolve Emergency Action ---
+        // --- Resolve Emergency Action (Confirmation dialog prevents accidental dismissal) ---
         item {
             Spacer(modifier = Modifier.height(8.dp))
 
             Button(
-                onClick = {
-                    coordinator.resolveEmergency("Emergency situation resolved and verified safe by user")
-                    onResolved()
-                },
+                onClick = { showResolveConfirmDialog = true },
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(54.dp),
@@ -461,7 +489,7 @@ fun EmergencyAlertScreen(
             ) {
                 Icon(
                     imageVector = Icons.Default.CheckCircle,
-                    contentDescription = "Resolve",
+                    contentDescription = "Resolve Emergency",
                     tint = Color.White
                 )
                 Spacer(modifier = Modifier.width(8.dp))
@@ -476,4 +504,52 @@ fun EmergencyAlertScreen(
             Spacer(modifier = Modifier.height(24.dp))
         }
     }
+
+    if (showResolveConfirmDialog) {
+        AlertDialog(
+            onDismissRequest = { showResolveConfirmDialog = false },
+            containerColor = DarkSurfaceElevated,
+            title = {
+                Text("Confirm Emergency Resolved?", color = TextPrimary, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Text(
+                    text = "Mark this emergency incident as resolved and confirm you are safe. Incident evidence and delivery audit logs remain saved on-device.",
+                    color = TextSecondary,
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showResolveConfirmDialog = false
+                        val wasServiceRunning = state.monitoringServiceState == MonitoringServiceState.ACTIVE
+                        coordinator.resolveEmergency("Emergency situation resolved and verified safe by user")
+                        if (wasServiceRunning) {
+                            coordinator.resumeMonitoringAfterUserClearance()
+                        }
+                        onResolved()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = SafeGreen)
+                ) {
+                    Text("Yes, I Am Safe", fontWeight = FontWeight.Bold, color = Color.White)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showResolveConfirmDialog = false }) {
+                    Text("Keep Alert Active", color = TextSecondary)
+                }
+            }
+        )
+    }
+}
+
+@Composable
+private fun AlertStageItem(label: String, completed: Boolean) {
+    Text(
+        text = if (completed) "✓ $label" else label,
+        fontSize = 9.sp,
+        fontWeight = if (completed) FontWeight.Black else FontWeight.Medium,
+        color = if (completed) SafeGreen else TextTertiary
+    )
 }

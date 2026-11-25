@@ -9,17 +9,17 @@ import kotlin.math.min
  * Responsibilities:
  * - Continuously ingests 16-bit linear PCM audio samples in RAM.
  * - Enforces zero-disk retention during normal monitoring: old samples are overwritten automatically.
- * - Enables instant extraction of the past 3–5 seconds upon suspicious or distress triggers (Stage 1).
+ * - Enables instant extraction of the past 10 seconds upon distress triggers (Stage 1).
  *
  * Memory footprint:
  * At 16 kHz mono (16-bit):
  * - 1 second = 16,000 shorts = 32,000 bytes (32 KB)
- * - 5 seconds = 80,000 shorts = 160,000 bytes (~156 KB)
+ * - 10 seconds = 160,000 shorts = 320,000 bytes (~312.5 KB)
  *
  * Owned by Member 1 (modules/audio).
  */
 class CircularAudioBuffer(
-    val durationMs: Long = 5000L,
+    val durationMs: Long = 10_000L,
     val sampleRate: Int = 16000
 ) {
     // Total capacity in 16-bit Short samples

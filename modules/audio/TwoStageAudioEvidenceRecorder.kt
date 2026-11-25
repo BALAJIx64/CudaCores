@@ -3,9 +3,11 @@ package com.guardiangrid.modules.audio
 import com.guardiangrid.core.interfaces.AudioEvidenceRecorder
 import com.guardiangrid.core.models.AudioSegment
 import com.guardiangrid.core.models.AudioStage
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.MutableSharedFlow
@@ -15,6 +17,47 @@ import kotlinx.coroutines.launch
 import java.io.File
 import java.io.FileOutputStream
 import java.util.UUID
+import java.util.concurrent.atomic.AtomicBoolean
+
+/**
+ * Playable WAV chunk produced during emergency audio relay.
+ */
+data class AudioRelayChunk(
+    val incidentId: String,
+    val chunkIndex: Int,
+    val isPreTrigger: Boolean,
+    val isFinal: Boolean,
+    val captureTimestampEpochMs: Long,
+    val totalSamples: Int,
+    val durationMs: Long,
+    val segment: AudioSegment,
+    val wavBytes: ByteArray
+)
+
+/**
+ * Completion metadata emitted once continuous emergency recording ends.
+ */
+data class IncidentRecordingSummary(
+    val incidentId: String,
+    val preTriggerSegment: AudioSegment,
+    val combinedRecordingSegment: AudioSegment,
+    val chunkSegments: List<AudioSegment>,
+    val totalPostTriggerChunks: Int,
+    val totalDurationMs: Long,
+    val endedByCancellationOrStop: Boolean
+)
+
+/**
+ * Handle to a continuous emergency incident recording & 10-second chunked relay session.
+ */
+data class IncidentAudioRelaySession(
+    val incidentId: String,
+    val preTriggerSegment: AudioSegment,
+    val preTriggerWavBytes: ByteArray,
+    val combinedRecordingFile: File,
+    val chunkFlow: Flow<AudioRelayChunk>,
+    val completionDeferred: CompletableDeferred<IncidentRecordingSummary>
+)
 
 /**
  * Concrete implementation of the Two-Stage Emergency Audio Recording Protocol.
@@ -44,6 +87,7 @@ class TwoStageAudioEvidenceRecorder(
 ) : AudioEvidenceRecorder {
 
     private var isStageTwoRecording = false
+    private val stopRequested = AtomicBoolean(false)
     private var stageTwoJob: Job? = null
     private var currentOutputFile: File? = null
     private var currentFileOutputStream: FileOutputStream? = null
@@ -177,13 +221,328 @@ class TwoStageAudioEvidenceRecorder(
     }
 
     override fun stopRecording() {
+        stopRequested.set(true)
         if (!isStageTwoRecording) return
         isStageTwoRecording = false
+        // If legacy startStageTwoRecording (no relay session managing finalization) was running, cancel & finalize immediately;
+        // continuous relay session observes stopRequested=true, flushes its final partial chunk, then closes & patches header cleanly.
+        if (activeRelaySessionJob != stageTwoJob) {
+            stageTwoJob?.cancel()
+            stageTwoJob = null
+            finalizeCombinedRelayFile()
+        }
+    }
 
-        stageTwoJob?.cancel()
-        stageTwoJob = null
+    @Volatile
+    private var activeRelaySessionJob: Job? = null
+
+    /**
+     * Initiates a continuous emergency audio capture and chunked relay session:
+     * 1. Immediately snapshots up to [preTriggerDurationMs] (default 10s) from [circularBuffer] as ONE unsplit WAV file.
+     * 2. Seeds the complete chronological incident WAV file with those pre-trigger PCM samples.
+     * 3. Continuously captures post-trigger PCM without restarting microphone capture and without gaps/overlaps:
+     *    - Produces sequential [chunkDurationMs] (default 10s = 160,000 samples @ 16 kHz) WAV chunks until stopped
+     *      or [maxRecordingDurationMs] is reached.
+     *    - On explicit termination/cancellation, flushes any remaining samples as the final partial chunk ([isFinal = true]),
+     *      finalizes the complete chronological incident WAV file, and completes [completionDeferred].
+     */
+    fun startIncidentRelaySession(
+        incidentId: String,
+        preTriggerDurationMs: Long = 10_000L,
+        chunkDurationMs: Long = 10_000L,
+        maxRecordingDurationMs: Long = 300_000L
+    ): IncidentAudioRelaySession {
+        if (isStageTwoRecording) {
+            stopRequested.set(true)
+            stageTwoJob?.cancel()
+            stageTwoJob = null
+            finalizeCombinedRelayFile()
+        }
+
+        stopRequested.set(false)
+        val now = System.currentTimeMillis()
+        val evidenceDir = getEvidenceDirectory()
+        val preTriggerFile = File(evidenceDir, "stage1_pre10s_${incidentId}_$now.wav")
+        val combinedFile = File(evidenceDir, "evidence_${incidentId}_full_$now.wav")
+
+        val sampleRate = circularBuffer.sampleRate
+        val clampedPreMs = preTriggerDurationMs.coerceIn(1000L, circularBuffer.durationMs.coerceAtLeast(10_000L))
+        val rawPreSamples = circularBuffer.snapshot(clampedPreMs)
+        val baselineCircularTotalAtTrigger = circularBuffer.totalSamplesWritten()
+
+        val preTriggerSamples = if (rawPreSamples.isNotEmpty()) {
+            rawPreSamples
+        } else {
+            // Minimal valid playable 1s silent frame if trigger fired milliseconds after start
+            ShortArray(sampleRate)
+        }
+        val preTriggerBytes = WavAudioEncoder.encodeToWavBytes(preTriggerSamples, sampleRate, 1)
+        preTriggerFile.writeBytes(preTriggerBytes)
+
+        val preActualDurationMs = ((preTriggerSamples.size * 1000L) / sampleRate).coerceAtLeast(1000L)
+        val preSegment = AudioSegment(
+            id = "pre-$incidentId",
+            filePath = preTriggerFile.absolutePath,
+            durationMs = preActualDurationMs,
+            sampleRate = sampleRate,
+            stage = AudioStage.STAGE_1_PREVIEW,
+            timestampEpochMs = now,
+            fileSizeBytes = preTriggerFile.length()
+        )
+
+        // Seed complete chronological incident WAV file with exact pre-trigger PCM
+        val prePcmBytes = WavAudioEncoder.shortsToBytes(preTriggerSamples)
+        val combinedFos = FileOutputStream(combinedFile)
+        combinedFos.write(WavAudioEncoder.createWavHeader(prePcmBytes.size.toLong(), sampleRate, 1))
+        combinedFos.write(prePcmBytes)
+        combinedFos.flush()
 
         synchronized(this) {
+            isStageTwoRecording = true
+            currentOutputFile = combinedFile
+            currentFileOutputStream = combinedFos
+        }
+
+        val chunkFlow = MutableSharedFlow<AudioRelayChunk>(replay = 32, extraBufferCapacity = 64)
+        val completionDeferred = CompletableDeferred<IncidentRecordingSummary>()
+
+        val safeChunkDurationMs = chunkDurationMs.coerceAtLeast(100L)
+        val chunkSamplesTarget = ((safeChunkDurationMs * sampleRate) / 1000L).toInt().coerceAtLeast(sampleRate / 10)
+        val maxPostSamples = ((maxRecordingDurationMs.coerceAtLeast(safeChunkDurationMs) * sampleRate) / 1000L)
+
+        val job = recorderScope.launch {
+            val pcmInbox = Channel<ShortArray>(capacity = Channel.UNLIMITED)
+            var collectorJob: Job? = null
+            var circularBaseline = baselineCircularTotalAtTrigger
+
+            // Use continuous shared AudioCaptureManager stream when live capture is running;
+            // never restart captureManager between chunks.
+            val useLiveCaptureFlow = (captureManager != null && captureManager.isCapturing)
+            if (useLiveCaptureFlow) {
+                collectorJob = launch {
+                    captureManager!!.observePcmChunks().collect { chunk ->
+                        if (chunk.isNotEmpty()) {
+                            pcmInbox.trySend(chunk)
+                        }
+                    }
+                }
+            }
+
+            val pendingSamples = ArrayList<Short>(chunkSamplesTarget + sampleRate)
+            val generatedChunks = mutableListOf<AudioSegment>()
+            var chunkSeq = 1
+            var totalPostSamplesCaptured = 0L
+            var chunkStartTimestampEpochMs = System.currentTimeMillis()
+            var maxDurationReached = false
+
+            fun writeAndEmitChunk(samples: ShortArray, isFinalChunk: Boolean, captureTs: Long) {
+                val wavBytes = WavAudioEncoder.encodeToWavBytes(samples, sampleRate, 1)
+                val chunkFile = File(
+                    evidenceDir,
+                    "evidence_${incidentId}_chunk_${chunkSeq}_${captureTs}.wav"
+                )
+                chunkFile.writeBytes(wavBytes)
+
+                val pcmBytes = WavAudioEncoder.shortsToBytes(samples)
+                synchronized(this@TwoStageAudioEvidenceRecorder) {
+                    currentFileOutputStream?.write(pcmBytes)
+                    currentFileOutputStream?.flush()
+                }
+
+                val durationActualMs = (samples.size * 1000L) / sampleRate
+                val chunkSeg = AudioSegment(
+                    id = "chunk-$incidentId-$chunkSeq",
+                    filePath = chunkFile.absolutePath,
+                    durationMs = durationActualMs,
+                    sampleRate = sampleRate,
+                    stage = AudioStage.STAGE_2_EVIDENCE,
+                    timestampEpochMs = captureTs,
+                    fileSizeBytes = chunkFile.length()
+                )
+                generatedChunks.add(chunkSeg)
+                chunkFlow.tryEmit(
+                    AudioRelayChunk(
+                        incidentId = incidentId,
+                        chunkIndex = chunkSeq,
+                        isPreTrigger = false,
+                        isFinal = isFinalChunk,
+                        captureTimestampEpochMs = captureTs,
+                        totalSamples = samples.size,
+                        durationMs = durationActualMs,
+                        segment = chunkSeg,
+                        wavBytes = wavBytes
+                    )
+                )
+                chunkSeq++
+            }
+
+            fun ingestNewSamples(samples: ShortArray) {
+                if (samples.isEmpty() || maxDurationReached) return
+                val remainingCap = (maxPostSamples - totalPostSamplesCaptured).coerceAtLeast(0L).toInt()
+                if (remainingCap <= 0) {
+                    maxDurationReached = true
+                    return
+                }
+                val toCopy = minOf(samples.size, remainingCap)
+                if (pendingSamples.isEmpty()) {
+                    chunkStartTimestampEpochMs = System.currentTimeMillis()
+                }
+                for (i in 0 until toCopy) {
+                    pendingSamples.add(samples[i])
+                }
+                totalPostSamplesCaptured += toCopy
+                if (totalPostSamplesCaptured >= maxPostSamples) {
+                    maxDurationReached = true
+                }
+            }
+
+            try {
+                while (isActive && !stopRequested.get() && !maxDurationReached) {
+                    // Drain from live capture channel or circular buffer cursor (strictly non-overlapping delta)
+                    if (useLiveCaptureFlow) {
+                        var item = pcmInbox.tryReceive().getOrNull()
+                        while (item != null) {
+                            ingestNewSamples(item)
+                            item = pcmInbox.tryReceive().getOrNull()
+                        }
+                    } else {
+                        val currentTotal = circularBuffer.totalSamplesWritten()
+                        val delta = (currentTotal - circularBaseline)
+                            .coerceIn(0L, circularBuffer.capacitySamples.toLong())
+                            .toInt()
+                        if (delta > 0) {
+                            circularBaseline = currentTotal
+                            val deltaMs = ((delta * 1000L) / sampleRate).coerceAtLeast(1L)
+                            val snap = circularBuffer.snapshot(deltaMs + 20L)
+                            val exactTail = if (snap.size > delta) snap.copyOfRange(snap.size - delta, snap.size) else snap
+                            ingestNewSamples(exactTail)
+                        }
+                    }
+
+                    // Emit full 10-second chunks sequentially as soon as exact sample count accumulates
+                    while (pendingSamples.size >= chunkSamplesTarget) {
+                        val fullChunk = ShortArray(chunkSamplesTarget) { idx -> pendingSamples[idx] }
+                        pendingSamples.subList(0, chunkSamplesTarget).clear()
+                        val isFinalChunk = maxDurationReached && pendingSamples.isEmpty()
+                        writeAndEmitChunk(fullChunk, isFinalChunk, chunkStartTimestampEpochMs)
+                        chunkStartTimestampEpochMs = System.currentTimeMillis()
+                    }
+
+                    if (!stopRequested.get() && !maxDurationReached) {
+                        delay(25)
+                    }
+                }
+
+                // Final drain on stop/max-cap (ensure zero samples lost before closing)
+                if (useLiveCaptureFlow) {
+                    var item = pcmInbox.tryReceive().getOrNull()
+                    while (item != null) {
+                        ingestNewSamples(item)
+                        item = pcmInbox.tryReceive().getOrNull()
+                    }
+                } else {
+                    val currentTotal = circularBuffer.totalSamplesWritten()
+                    val delta = (currentTotal - circularBaseline)
+                        .coerceIn(0L, circularBuffer.capacitySamples.toLong())
+                        .toInt()
+                    if (delta > 0) {
+                        circularBaseline = currentTotal
+                        val deltaMs = ((delta * 1000L) / sampleRate).coerceAtLeast(1L)
+                        val snap = circularBuffer.snapshot(deltaMs + 20L)
+                        val exactTail = if (snap.size > delta) snap.copyOfRange(snap.size - delta, snap.size) else snap
+                        ingestNewSamples(exactTail)
+                    }
+                }
+
+                while (pendingSamples.size >= chunkSamplesTarget) {
+                    val fullChunk = ShortArray(chunkSamplesTarget) { idx -> pendingSamples[idx] }
+                    pendingSamples.subList(0, chunkSamplesTarget).clear()
+                    val isFinalChunk = pendingSamples.isEmpty()
+                    writeAndEmitChunk(fullChunk, isFinalChunk, chunkStartTimestampEpochMs)
+                    chunkStartTimestampEpochMs = System.currentTimeMillis()
+                }
+
+                if (pendingSamples.isNotEmpty()) {
+                    val partialChunk = ShortArray(pendingSamples.size) { idx -> pendingSamples[idx] }
+                    pendingSamples.clear()
+                    writeAndEmitChunk(partialChunk, isFinalChunk = true, captureTs = chunkStartTimestampEpochMs)
+                }
+            } finally {
+                collectorJob?.cancel()
+                pcmInbox.close()
+                finalizeCombinedRelayFile()
+                activeRelaySessionJob = null
+                val totalDurationMs = ((preTriggerSamples.size + totalPostSamplesCaptured) * 1000L) / sampleRate
+                val combinedSegment = AudioSegment(
+                    id = "full-$incidentId",
+                    filePath = combinedFile.absolutePath,
+                    durationMs = totalDurationMs,
+                    sampleRate = sampleRate,
+                    stage = AudioStage.STAGE_2_EVIDENCE,
+                    timestampEpochMs = System.currentTimeMillis(),
+                    fileSizeBytes = combinedFile.length()
+                )
+                if (!completionDeferred.isCompleted) {
+                    completionDeferred.complete(
+                        IncidentRecordingSummary(
+                            incidentId = incidentId,
+                            preTriggerSegment = preSegment,
+                            combinedRecordingSegment = combinedSegment,
+                            chunkSegments = generatedChunks.toList(),
+                            totalPostTriggerChunks = generatedChunks.size,
+                            totalDurationMs = totalDurationMs,
+                            endedByCancellationOrStop = stopRequested.get()
+                        )
+                    )
+                }
+            }
+        }
+
+        stageTwoJob = job
+        activeRelaySessionJob = job
+
+        return IncidentAudioRelaySession(
+            incidentId = incidentId,
+            preTriggerSegment = preSegment,
+            preTriggerWavBytes = preTriggerBytes,
+            combinedRecordingFile = combinedFile,
+            chunkFlow = chunkFlow.asSharedFlow(),
+            completionDeferred = completionDeferred
+        )
+    }
+
+    /**
+     * Enforces chunk retention safety: source chunks are NEVER deleted while still awaiting delivery
+     * OR while within [retentionWindowMs]. Combined full recordings and pre-trigger backups follow the same rule.
+     */
+    fun cleanupSatisfiedChunks(
+        deliveredFilePaths: Set<String>,
+        retentionWindowMs: Long = DEFAULT_CHUNK_RETENTION_MS,
+        nowEpochMs: Long = System.currentTimeMillis()
+    ): Int {
+        val baseDir = getEvidenceDirectory()
+        if (!baseDir.exists()) return 0
+        var deleted = 0
+        baseDir.listFiles()?.forEach { file ->
+            if (!file.isFile || !file.name.endsWith(".wav")) return@forEach
+            val isChunk = file.name.contains("_chunk_")
+            if (!isChunk) return@forEach // Retain pre-trigger & complete chronological incident WAV unless explicitly purged
+            val isDelivered = deliveredFilePaths.contains(file.absolutePath)
+            val ageMs = nowEpochMs - file.lastModified()
+            if (isDelivered && ageMs >= retentionWindowMs) {
+                if (file.delete()) deleted++
+            }
+        }
+        return deleted
+    }
+
+    companion object {
+        const val DEFAULT_CHUNK_RETENTION_MS = 7L * 24L * 60L * 60L * 1000L
+    }
+
+    private fun finalizeCombinedRelayFile() {
+        synchronized(this) {
+            isStageTwoRecording = false
             try {
                 currentFileOutputStream?.flush()
                 currentFileOutputStream?.close()
@@ -191,8 +550,6 @@ class TwoStageAudioEvidenceRecorder(
             } finally {
                 currentFileOutputStream = null
             }
-
-            // Patch final WAV header sizes
             currentOutputFile?.let { file ->
                 WavAudioEncoder.finalizeWavHeader(file)
             }
@@ -200,12 +557,17 @@ class TwoStageAudioEvidenceRecorder(
         }
     }
 
-    private fun createStageOneFile(incidentId: String? = null): File {
+    private fun getEvidenceDirectory(): File {
         val baseDir = cacheDirectory?.let { File(it, "evidence") }
             ?: File(System.getProperty("java.io.tmpdir"), "guardiangrid_evidence")
         if (!baseDir.exists()) {
             baseDir.mkdirs()
         }
+        return baseDir
+    }
+
+    private fun createStageOneFile(incidentId: String? = null): File {
+        val baseDir = getEvidenceDirectory()
         val prefix = if (!incidentId.isNullOrBlank()) "evidence_${incidentId}" else "stage1_preview"
         return File(baseDir, "${prefix}_${System.currentTimeMillis()}.wav")
     }

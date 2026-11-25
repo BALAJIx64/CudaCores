@@ -65,7 +65,11 @@ class DeliveryQueueManagerImpl(
         val eligibleEvents = allEvents.filter { event ->
             (event.status == DeliveryStatus.PENDING || event.status == DeliveryStatus.FAILED_RETRYING) &&
                     now >= event.nextRetryEpochMs
-        }
+        }.sortedWith(
+            compareBy<QueuedEmergencyEvent> { it.payload.incidentId }
+                .thenBy { it.payload.audioChunkIndex ?: -1 }
+                .thenBy { it.createdAtEpochMs }
+        )
 
         val receipts = mutableListOf<DeliveryReceipt>()
 
@@ -82,9 +86,9 @@ class DeliveryQueueManagerImpl(
 
             receipts.add(receipt)
 
-            if (receipt.status == DeliveryStatus.DELIVERED) {
-                // Successfully delivered: update event or mark delivered
-                val updated = event.copy(status = DeliveryStatus.DELIVERED)
+            if (receipt.status == DeliveryStatus.DELIVERED || receipt.status == DeliveryStatus.ABANDONED) {
+                val finalStatus = if (receipt.status == DeliveryStatus.DELIVERED) DeliveryStatus.DELIVERED else DeliveryStatus.ABANDONED
+                val updated = event.copy(status = finalStatus)
                 repository.save(updated)
             } else {
                 val newRetryCount = event.retryCount + 1
@@ -95,7 +99,8 @@ class DeliveryQueueManagerImpl(
                     )
                     repository.save(abandoned)
                 } else {
-                    val nextDelay = calculateBackoffDelayMs(newRetryCount)
+                    val retryAfterMs = extractRetryAfterMs(receipt.errorMessage)
+                    val nextDelay = maxOf(calculateBackoffDelayMs(newRetryCount), retryAfterMs)
                     val retrying = event.copy(
                         status = DeliveryStatus.FAILED_RETRYING,
                         retryCount = newRetryCount,
@@ -108,6 +113,27 @@ class DeliveryQueueManagerImpl(
 
         _queueFlow.value = repository.getAll()
         return receipts
+    }
+
+    fun getDeliveredAudioPaths(): Set<String> {
+        return repository.getAll()
+            .filter { it.status == DeliveryStatus.DELIVERED && !it.payload.audioSegmentPath.isNullOrBlank() }
+            .mapNotNull { it.payload.audioSegmentPath }
+            .toSet()
+    }
+
+    fun hasPendingAudioRetries(): Boolean {
+        return repository.getAll().any {
+            it.payload.isAudioRelay &&
+                (it.status == DeliveryStatus.PENDING || it.status == DeliveryStatus.FAILED_RETRYING)
+        }
+    }
+
+    private fun extractRetryAfterMs(errorMessage: String?): Long {
+        if (errorMessage.isNullOrBlank()) return 0L
+        val match = """retry_after=(\d+)""".toRegex().find(errorMessage)
+        val sec = match?.groupValues?.get(1)?.toLongOrNull() ?: return 0L
+        return sec.coerceIn(1L, 300L) * 1000L
     }
 
     override suspend fun clearQueue() = mutex.withLock {

@@ -6,8 +6,10 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -28,39 +30,49 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.Button
-import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
-import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.core.state.EmergencyStateHolder
+import com.guardiangrid.core.state.MonitoringServiceState
 import com.guardiangrid.ui.theme.DarkBackground
 import com.guardiangrid.ui.theme.DarkSurface
 import com.guardiangrid.ui.theme.DarkSurfaceElevated
-import com.guardiangrid.ui.theme.EmergencyDarkRed
+import com.guardiangrid.ui.theme.DarkSurfaceHighlight
 import com.guardiangrid.ui.theme.EmergencyLightRed
 import com.guardiangrid.ui.theme.EmergencyRed
 import com.guardiangrid.ui.theme.SafeGreen
 import com.guardiangrid.ui.theme.TextPrimary
 import com.guardiangrid.ui.theme.TextSecondary
+import com.guardiangrid.ui.theme.TextTertiary
 import com.guardiangrid.ui.theme.WarningAmber
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 /**
  * High-urgency verification countdown screen.
@@ -82,10 +94,12 @@ fun EmergencyVerificationScreen(
 ) {
     val state by EmergencyStateHolder.state.collectAsState()
     val scrollState = rememberScrollState()
+    val scope = rememberCoroutineScope()
+    val haptics = LocalHapticFeedback.current
 
     val remainingMs = state.verificationCountdownRemainingMs
-    val remainingSeconds = (remainingMs / 1000L).coerceAtLeast(0L)
-    val totalTimeoutMs = 10000f
+    val remainingSeconds = ((remainingMs + 999L) / 1000L).coerceAtLeast(0L)
+    val totalTimeoutMs = state.verificationTotalTimeoutMs.toFloat().coerceAtLeast(1000f)
     val progress = (remainingMs / totalTimeoutMs).coerceIn(0f, 1f)
 
     val activeIncident = state.activeIncident
@@ -147,12 +161,31 @@ fun EmergencyVerificationScreen(
             )
 
             Text(
-                text = "Autonomous anomaly detected. Alerting emergency contacts soon.",
+                text = "Autonomous anomaly detected. Confirm safety or alert dispatches automatically.",
                 fontSize = 12.sp,
                 color = TextSecondary,
                 textAlign = TextAlign.Center,
                 modifier = Modifier.padding(horizontal = 16.dp, vertical = 4.dp)
             )
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // 3-Stage Lifecycle Clarification: Detection -> Verification -> Dispatch
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(DarkSurface)
+                    .padding(horizontal = 12.dp, vertical = 8.dp),
+                horizontalArrangement = Arrangement.SpaceEvenly,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                VerificationStageChip(label = "1. DETECTED", isDone = true, isCurrent = false)
+                Text("→", color = TextTertiary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                VerificationStageChip(label = "2. VERIFYING", isDone = false, isCurrent = true)
+                Text("→", color = TextTertiary, fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                VerificationStageChip(label = "3. DISPATCH", isDone = false, isCurrent = false)
+            }
         }
 
         Spacer(modifier = Modifier.height(20.dp))
@@ -273,35 +306,100 @@ fun EmergencyVerificationScreen(
 
         Spacer(modifier = Modifier.height(28.dp))
 
-        // --- Action Buttons ---
+        // --- Action Buttons (Hold-to-Cancel prevents accidental dismissal) ---
+        var cancelHoldProgress by remember { mutableFloatStateOf(0f) }
+        var cancelHint by remember { mutableStateOf("") }
+
         Column(
             modifier = Modifier.fillMaxWidth(),
-            verticalArrangement = Arrangement.spacedBy(12.dp)
+            verticalArrangement = Arrangement.spacedBy(10.dp)
         ) {
-            // Cancel Alert Button (Primary Safe Action)
-            Button(
-                onClick = {
-                    coordinator.cancelEmergency("User verified safety on verification screen")
-                    onCancelled()
-                },
+            if (cancelHint.isNotBlank()) {
+                Text(
+                    text = cancelHint,
+                    fontSize = 11.sp,
+                    color = WarningAmber,
+                    textAlign = TextAlign.Center,
+                    modifier = Modifier.fillMaxWidth()
+                )
+            }
+
+            // Hold-to-Cancel False Alarm (0.8s press prevents accidental pocket/cheek taps)
+            Box(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(56.dp),
-                colors = ButtonDefaults.buttonColors(containerColor = SafeGreen),
-                shape = RoundedCornerShape(14.dp)
+                    .height(58.dp)
+                    .clip(RoundedCornerShape(14.dp))
+                    .background(SafeGreen)
+                    .pointerInput(Unit) {
+                        detectTapGestures(
+                            onPress = {
+                                cancelHint = ""
+                                var cancelled = false
+                                val holdJob = scope.launch {
+                                    val steps = 16
+                                    val totalMs = 800L
+                                    for (i in 1..steps) {
+                                        delay(totalMs / steps)
+                                        cancelHoldProgress = i.toFloat() / steps
+                                    }
+                                    cancelled = true
+                                    haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                    val wasServiceRunning = state.monitoringServiceState == MonitoringServiceState.ACTIVE
+                                    coordinator.cancelEmergency("User confirmed safe on verification screen")
+                                    if (wasServiceRunning) {
+                                        coordinator.resumeMonitoringAfterUserClearance()
+                                    }
+                                    cancelHoldProgress = 0f
+                                    onCancelled()
+                                }
+                                try {
+                                    awaitRelease()
+                                } finally {
+                                    holdJob.cancel()
+                                    if (!cancelled) {
+                                        cancelHoldProgress = 0f
+                                        cancelHint = "Press & hold 'I AM SAFE' for 0.8s to cancel alert"
+                                    }
+                                }
+                            }
+                        )
+                    },
+                contentAlignment = Alignment.Center
             ) {
-                Icon(
-                    imageVector = Icons.Default.CheckCircle,
-                    contentDescription = "Cancel",
-                    tint = Color.White
-                )
-                Spacer(modifier = Modifier.width(8.dp))
-                Text(
-                    text = "I AM SAFE — CANCEL ALERT",
-                    fontSize = 15.sp,
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 16.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = Icons.Default.CheckCircle,
+                            contentDescription = "Hold to Cancel Alert",
+                            tint = Color.White
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (cancelHoldProgress > 0f) "CONFIRMING SAFE..." else "HOLD: I AM SAFE — CANCEL",
+                            fontSize = 15.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = Color.White
+                        )
+                    }
+                    if (cancelHoldProgress > 0f) {
+                        Spacer(modifier = Modifier.height(5.dp))
+                        LinearProgressIndicator(
+                            progress = { cancelHoldProgress },
+                            modifier = Modifier
+                                .fillMaxWidth(0.75f)
+                                .height(4.dp)
+                                .clip(RoundedCornerShape(2.dp)),
+                            color = Color.White,
+                            trackColor = Color.White.copy(alpha = 0.25f)
+                        )
+                    }
+                }
             }
 
             // Dispatch Immediately Button (Accelerate)
@@ -313,10 +411,7 @@ fun EmergencyVerificationScreen(
                 modifier = Modifier
                     .fillMaxWidth()
                     .height(50.dp),
-                colors = ButtonDefaults.outlinedButtonColors(contentColor = EmergencyLightRed),
-                border = ButtonDefaults.outlinedButtonBorder.copy(
-                    brush = androidx.compose.ui.graphics.SolidColor(EmergencyRed)
-                ),
+                border = BorderStroke(1.dp, EmergencyRed),
                 shape = RoundedCornerShape(14.dp)
             ) {
                 Text(
@@ -328,4 +423,19 @@ fun EmergencyVerificationScreen(
             }
         }
     }
+}
+
+@Composable
+private fun VerificationStageChip(label: String, isDone: Boolean, isCurrent: Boolean) {
+    val color = when {
+        isDone -> SafeGreen
+        isCurrent -> WarningAmber
+        else -> TextTertiary
+    }
+    Text(
+        text = label,
+        fontSize = 10.sp,
+        fontWeight = if (isCurrent || isDone) FontWeight.Black else FontWeight.Medium,
+        color = color
+    )
 }

@@ -188,4 +188,34 @@ class ProductionTelegramCommunicationTest {
         assertEquals(EmergencyDeliveryState.FAILED, result.state)
         assertTrue("Error should mention rate limit or 429", result.errorMessage!!.contains("429"))
     }
+
+    @Test
+    fun testExceptionMessageContainingBotUrlIsSanitized() {
+        val secretTransport = object : com.guardiangrid.modules.communication.network.HttpTransport {
+            override fun postJson(url: String, jsonBody: String, headers: Map<String, String>): HttpResponse {
+                throw IOException("FileNotFoundException: $url")
+            }
+
+            override fun getJson(url: String, headers: Map<String, String>): HttpResponse {
+                throw IOException("FileNotFoundException: $url")
+            }
+        }
+
+        val dispatcher = TelegramEmergencyDispatcher(
+            transport = secretTransport,
+            credentialsProvider = { validCredentials }
+        )
+
+        val verifyResult = dispatcher.verifyBotToken(validCredentials.botToken)
+        assertFalse(verifyResult.isSuccess)
+        assertFalse("Exception message must scrub raw bot token", verifyResult.errorMessage!!.contains(validCredentials.botToken))
+        assertTrue(verifyResult.errorMessage!!.contains("bot[REDACTED]"))
+
+        val dispatchResult = dispatcher.dispatch(
+            AlertPayload(incidentId = "INC-SEC-01", distressType = DistressType.SCREAM, confidence = 0.9f)
+        )
+        assertEquals(EmergencyDeliveryState.FAILED, dispatchResult.state)
+        assertFalse("Audit error must scrub raw bot token", dispatchResult.errorMessage!!.contains(validCredentials.botToken))
+        assertTrue(dispatchResult.errorMessage!!.contains("bot[REDACTED]"))
+    }
 }

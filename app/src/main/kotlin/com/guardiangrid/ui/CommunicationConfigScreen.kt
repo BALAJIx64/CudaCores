@@ -19,11 +19,11 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Lock
 import androidx.compose.material.icons.filled.Refresh
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -62,6 +62,8 @@ import com.guardiangrid.core.state.EmergencyStateHolder
 import com.guardiangrid.modules.communication.network.DefaultHttpTransport
 import com.guardiangrid.modules.communication.security.TelegramConfigManager
 import com.guardiangrid.modules.communication.security.TelegramCredentials
+import com.guardiangrid.modules.communication.supabase.SupabaseBackendConfig
+import com.guardiangrid.modules.communication.supabase.SupabaseConfigManager
 import com.guardiangrid.modules.communication.telegram.TelegramEmergencyDispatcher
 import com.guardiangrid.ui.permissions.PermissionManager
 import com.guardiangrid.ui.theme.BrandMagenta
@@ -214,7 +216,7 @@ fun CommunicationConfigScreen(
                                 .background(InfoBlue.copy(alpha = 0.15f)),
                             contentAlignment = Alignment.Center
                         ) {
-                            Icon(imageVector = Icons.Default.Send, contentDescription = null, tint = InfoBlue, modifier = Modifier.size(18.dp))
+                            Icon(imageVector = Icons.AutoMirrored.Filled.Send, contentDescription = null, tint = InfoBlue, modifier = Modifier.size(18.dp))
                         }
                         Spacer(modifier = Modifier.width(10.dp))
                         Column {
@@ -532,6 +534,124 @@ fun CommunicationConfigScreen(
                     color = TextSecondary,
                     lineHeight = 16.sp
                 )
+            }
+        }
+
+        // =====================================================================
+        // SECTION 5: SUPABASE SECURE BACKEND RELAY (SERVER-SIDE TELEGRAM SECRETS)
+        // =====================================================================
+        val appContainer = (context.applicationContext as? GuardianGridApp)?.container
+        val initialSb = SupabaseConfigManager.getConfig()
+        var sbUrlInput by remember { mutableStateOf(initialSb?.projectUrl ?: SupabaseBackendConfig.DEFAULT_PROJECT_URL) }
+        var sbAnonInput by remember { mutableStateOf(initialSb?.anonKey ?: "") }
+        var sbChatInput by remember { mutableStateOf(initialSb?.defaultChatId ?: "") }
+        var sbStatus by remember { mutableStateOf("") }
+        var isRegisteringDevice by remember { mutableStateOf(false) }
+
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = DarkSurface),
+            shape = RoundedCornerShape(16.dp),
+            border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(DarkBorder))
+        ) {
+            Column(modifier = Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(text = "SUPABASE SECURE AUDIO BACKEND", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                        Text(text = "Private WAV Storage • 7-Day Retention • Backend Bot Secrets", fontSize = 10.sp, color = TextSecondary)
+                    }
+                    Text(
+                        text = if (SupabaseConfigManager.isConfigured()) "ACTIVE" else "OPTIONAL",
+                        fontSize = 9.sp,
+                        fontWeight = FontWeight.Black,
+                        color = if (SupabaseConfigManager.isConfigured()) SafeGreen else CyberTeal
+                    )
+                }
+
+                Text(
+                    text = "Keeps Telegram Bot credentials strictly on Supabase Edge Functions (never inside the Android APK). All Android uploads are authenticated with Bearer + device HMAC signatures.",
+                    fontSize = 11.sp,
+                    color = TextSecondary
+                )
+
+                OutlinedTextField(
+                    value = sbUrlInput,
+                    onValueChange = { sbUrlInput = it },
+                    label = { Text("Supabase Project URL") },
+                    placeholder = { Text("https://<project-ref>.supabase.co", color = TextDisabled) },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = sbAnonInput,
+                    onValueChange = { sbAnonInput = it },
+                    label = { Text("Supabase Anon Key") },
+                    singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
+                    modifier = Modifier.fillMaxWidth()
+                )
+                OutlinedTextField(
+                    value = sbChatInput,
+                    onValueChange = { sbChatInput = it },
+                    label = { Text("Responder Chat ID (Optional Override)") },
+                    singleLine = true,
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                if (sbStatus.isNotBlank()) {
+                    Text(text = sbStatus, fontSize = 11.sp, color = CyberTeal)
+                }
+
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    Button(
+                        onClick = {
+                            val cfg = SupabaseBackendConfig(
+                                projectUrl = sbUrlInput.trim(),
+                                anonKey = sbAnonInput.trim(),
+                                defaultChatId = sbChatInput.trim().ifBlank { null }
+                            )
+                            if (cfg.isValid()) {
+                                SupabaseConfigManager.setConfig(cfg)
+                                isRegisteringDevice = true
+                                sbStatus = "Saved configuration. Registering device identity..."
+                                coroutineScope.launch {
+                                    val regResult = withContext(Dispatchers.IO) {
+                                        appContainer?.supabaseBackendClient?.registerDevice()
+                                    }
+                                    isRegisteringDevice = false
+                                    sbStatus = if (regResult?.isSuccess == true) {
+                                        "Supabase configured & device registered (${regResult.getOrNull()})."
+                                    } else {
+                                        "Config saved. Device registration note: ${regResult?.exceptionOrNull()?.message ?: "Pending deployment"}"
+                                    }
+                                }
+                            } else {
+                                sbStatus = "Enter valid https:// project URL and public anon key."
+                            }
+                        },
+                        enabled = !isRegisteringDevice,
+                        modifier = Modifier.weight(1f),
+                        colors = ButtonDefaults.buttonColors(containerColor = BrandPurple)
+                    ) {
+                        Text(if (isRegisteringDevice) "Registering..." else "Save & Register", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                    }
+                    OutlinedButton(
+                        onClick = {
+                            SupabaseConfigManager.clear()
+                            sbUrlInput = SupabaseBackendConfig.DEFAULT_PROJECT_URL
+                            sbAnonInput = ""
+                            sbChatInput = ""
+                            sbStatus = "Supabase backend cleared."
+                        },
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Clear", fontSize = 12.sp, color = TextSecondary)
+                    }
+                }
             }
         }
     }

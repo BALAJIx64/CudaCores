@@ -12,6 +12,7 @@ data class UserSettings(
     val contacts: List<EmergencyContact> = emptyList(),
     val isDiscreetModeEnabled: Boolean = false,
     val screamSensitivity: Float = 0.80f,
+    val motionSensitivity: Float = 1.0f,
     val countdownDurationSeconds: Int = 10,
     val autoStartProtectionOnBoot: Boolean = false,
     val schemaVersion: Int = 1
@@ -31,6 +32,7 @@ interface SettingsRepository {
     fun getSecondaryContacts(): List<EmergencyContact>
     fun setDiscreetMode(enabled: Boolean): Boolean
     fun setScreamSensitivity(sensitivity: Float): Boolean
+    fun setMotionSensitivity(sensitivity: Float): Boolean = true
     fun setCountdownDuration(seconds: Int): Boolean
     fun syncToStateHolder()
 }
@@ -179,6 +181,12 @@ class FileSettingsRepository(
     }
 
     @Synchronized
+    override fun setMotionSensitivity(sensitivity: Float): Boolean {
+        val clamped = sensitivity.coerceIn(0.5f, 1.5f)
+        return saveSettings(cachedSettings.copy(motionSensitivity = clamped))
+    }
+
+    @Synchronized
     override fun setCountdownDuration(seconds: Int): Boolean {
         val clamped = seconds.coerceIn(3, 30)
         return saveSettings(cachedSettings.copy(countdownDurationSeconds = clamped))
@@ -234,6 +242,7 @@ class FileSettingsRepository(
         sb.append("version=${settings.schemaVersion}\n")
         sb.append("discreetMode=${settings.isDiscreetModeEnabled}\n")
         sb.append("screamSensitivity=${settings.screamSensitivity}\n")
+        sb.append("motionSensitivity=${settings.motionSensitivity}\n")
         sb.append("countdownDuration=${settings.countdownDurationSeconds}\n")
         sb.append("autoStart=${settings.autoStartProtectionOnBoot}\n")
         sb.append("contacts_count=${settings.contacts.size}\n")
@@ -247,6 +256,7 @@ class FileSettingsRepository(
         var version = 1
         var discreet = false
         var sensitivity = 0.80f
+        var motionSens = 1.0f
         var countdown = 10
         var autoStart = false
         val contacts = mutableListOf<EmergencyContact>()
@@ -263,6 +273,7 @@ class FileSettingsRepository(
                 "version" -> version = value.toIntOrNull() ?: 1
                 "discreetMode" -> discreet = value.toBoolean()
                 "screamSensitivity" -> sensitivity = value.toFloatOrNull() ?: 0.80f
+                "motionSensitivity" -> motionSens = value.toFloatOrNull() ?: 1.0f
                 "countdownDuration" -> countdown = value.toIntOrNull() ?: 10
                 "autoStart" -> autoStart = value.toBoolean()
                 "contact" -> {
@@ -293,6 +304,7 @@ class FileSettingsRepository(
             contacts = contacts,
             isDiscreetModeEnabled = discreet,
             screamSensitivity = sensitivity,
+            motionSensitivity = motionSens,
             countdownDurationSeconds = countdown,
             autoStartProtectionOnBoot = autoStart,
             schemaVersion = version

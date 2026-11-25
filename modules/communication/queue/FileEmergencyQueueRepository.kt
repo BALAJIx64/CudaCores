@@ -113,7 +113,10 @@ class FileEmergencyQueueRepository(
             escapeDelimiter(p.emergencyMessage),
             p.audioSegmentPath ?: "NONE",
             locStr,
-            contactsStr
+            contactsStr,
+            p.isAudioRelay.toString(),
+            (p.audioChunkIndex?.toString() ?: "NONE"),
+            p.isFinalAudioChunk.toString()
         ).joinToString("\t")
     }
 
@@ -169,6 +172,10 @@ class FileEmergencyQueueRepository(
                 }
             }
 
+            val isAudioRelay = fields.getOrNull(14)?.toBooleanStrictOrNull() ?: false
+            val audioChunkIndex = fields.getOrNull(15)?.takeIf { it != "NONE" }?.toIntOrNull()
+            val isFinalAudioChunk = fields.getOrNull(16)?.toBooleanStrictOrNull() ?: false
+
             val payload = AlertPayload(
                 incidentId = incidentId,
                 timestampEpochMs = timestamp,
@@ -177,7 +184,10 @@ class FileEmergencyQueueRepository(
                 location = location,
                 emergencyMessage = emergencyMessage,
                 audioSegmentPath = audioPath,
-                recipientContacts = contacts
+                recipientContacts = contacts,
+                isAudioRelay = isAudioRelay,
+                audioChunkIndex = audioChunkIndex,
+                isFinalAudioChunk = isFinalAudioChunk
             )
 
             QueuedEmergencyEvent(

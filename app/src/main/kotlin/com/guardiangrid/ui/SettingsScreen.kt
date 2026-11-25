@@ -1,5 +1,11 @@
 package com.guardiangrid.ui
 
+import android.app.Activity
+import android.content.Intent
+import android.os.Build
+import android.provider.Settings
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -19,11 +25,13 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.CleaningServices
 import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Devices
 import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
@@ -34,7 +42,6 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.Warning
@@ -59,6 +66,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -70,14 +78,18 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.guardiangrid.GuardianGridApp
 import com.guardiangrid.core.models.EmergencyContact
+import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.core.state.EmergencyStateHolder
 import com.guardiangrid.modules.audio.AudioModuleStub
 import com.guardiangrid.modules.communication.security.TelegramConfigManager
 import com.guardiangrid.modules.communication.security.TelegramCredentials
+import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
+import com.guardiangrid.modules.motion.anomaly.MotionThresholdConfig
 import com.guardiangrid.ui.theme.BrandMagenta
 import com.guardiangrid.ui.theme.CyberTeal
 import com.guardiangrid.ui.theme.DarkBackground
@@ -113,12 +125,15 @@ import java.util.UUID
 @Composable
 fun SettingsScreen(
     audioModule: AudioModuleStub,
+    motionDetector: MotionAnomalyDetectorImpl? = null,
+    coordinator: EmergencyCoordinatorImpl? = null,
     onRequestPermissions: () -> Unit,
     onNavigateBack: () -> Unit,
     onNavigateToContacts: () -> Unit = {},
     onNavigateToCommunication: () -> Unit = {},
     onNavigateToDeliveryStatus: () -> Unit = {},
-    onNavigateToOfflineQueue: () -> Unit = {}
+    onNavigateToOfflineQueue: () -> Unit = {},
+    onNavigateToGuardianPairing: () -> Unit = {}
 ) {
     val context = LocalContext.current
     val container = (context.applicationContext as? GuardianGridApp)?.container
@@ -126,9 +141,42 @@ fun SettingsScreen(
     val scrollState = rememberScrollState()
 
     var screamSensitivity by remember {
-        mutableFloatStateOf(container?.settingsRepository?.getSettings()?.screamSensitivity ?: 0.90f)
+        mutableFloatStateOf(container?.settingsRepository?.getSettings()?.screamSensitivity ?: 0.80f)
     }
+    var motionSensitivity by remember {
+        mutableFloatStateOf(container?.settingsRepository?.getSettings()?.motionSensitivity ?: 1.0f)
+    }
+    var countdownSeconds by remember {
+        mutableIntStateOf(container?.settingsRepository?.getSettings()?.countdownDurationSeconds ?: 10)
+    }
+    var motionCalibrationNotice by remember { mutableStateOf("") }
+    var pickedContact by remember { mutableStateOf<PickedPhoneContact?>(null) }
+    var contactPickError by remember { mutableStateOf("") }
     var showAddContactDialog by remember { mutableStateOf(false) }
+    var showPurgePersonalDataDialog by remember { mutableStateOf(false) }
+
+    val settingsContactPickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.StartActivityForResult()
+    ) { result ->
+        if (result.resultCode == Activity.RESULT_OK) {
+            val uri = result.data?.data
+            if (uri != null) {
+                val resolved = NativeContactHelper.resolvePickedPhoneContact(context, uri)
+                if (resolved.isSuccess) {
+                    val info = resolved.getOrThrow()
+                    if (info.isPhoneValid) {
+                        contactPickError = ""
+                        pickedContact = info
+                        showAddContactDialog = true
+                    } else {
+                        contactPickError = info.validationError ?: "Picked phone number is invalid."
+                    }
+                } else {
+                    contactPickError = resolved.exceptionOrNull()?.message ?: "Failed to read picked contact."
+                }
+            }
+        }
+    }
 
     // Telegram Bot API Configuration State
     val existingCreds = TelegramConfigManager.getCredentials()
@@ -235,7 +283,7 @@ fun SettingsScreen(
                         modifier = Modifier.weight(1f),
                         title = "Channels",
                         subtitle = "Telegram & SMS",
-                        icon = Icons.Default.Send,
+                        icon = Icons.AutoMirrored.Filled.Send,
                         accentColor = InfoBlue,
                         onClick = onNavigateToCommunication
                     )
@@ -264,6 +312,18 @@ fun SettingsScreen(
                         onClick = onNavigateToOfflineQueue
                     )
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                val pairedCount = container?.guardianConnectivityManager?.state?.collectAsState()?.value?.pairedDevices?.size ?: 0
+                SettingsNavCard(
+                    modifier = Modifier.fillMaxWidth(),
+                    title = "Guardian Pairing & Audio Receiver",
+                    subtitle = "$pairedCount Paired Device(s) • QR Pairing • Live Audio Stream",
+                    icon = Icons.Default.Devices,
+                    accentColor = BrandMagenta,
+                    onClick = onNavigateToGuardianPairing
+                )
             }
         }
 
@@ -298,15 +358,23 @@ fun SettingsScreen(
                     }
 
                     IconButton(
-                        onClick = { showAddContactDialog = true },
+                        onClick = {
+                            contactPickError = ""
+                            settingsContactPickerLauncher.launch(NativeContactHelper.buildPhonePickerIntent())
+                        },
                         modifier = Modifier.size(32.dp)
                     ) {
                         Icon(
                             imageVector = Icons.Default.Add,
-                            contentDescription = "Add Contact",
+                            contentDescription = "Pick Contact",
                             tint = BrandMagenta
                         )
                     }
+                }
+
+                if (contactPickError.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(text = contactPickError, color = EmergencyLightRed, fontSize = 11.sp)
                 }
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -398,7 +466,7 @@ fun SettingsScreen(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = Icons.Default.Send,
+                            imageVector = Icons.AutoMirrored.Filled.Send,
                             contentDescription = "Telegram",
                             tint = InfoBlue,
                             modifier = Modifier.size(18.dp)
@@ -445,6 +513,7 @@ fun SettingsScreen(
                     label = { Text("Bot API Token") },
                     placeholder = { Text("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ12345") },
                     singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = TextPrimary,
@@ -591,6 +660,112 @@ fun SettingsScreen(
                         inactiveTrackColor = DarkSurfaceHighlight
                     )
                 )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Motion Sensitivity Slider
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Motion & Fall Sensitivity",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Scales fall impact, snatch jerk, and shake detection",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    }
+                    Text(
+                        text = "${"%.2f".format(motionSensitivity)}x",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = BrandMagenta
+                    )
+                }
+
+                Slider(
+                    value = motionSensitivity,
+                    onValueChange = {
+                        motionSensitivity = it
+                        motionDetector?.updateConfig(MotionThresholdConfig(sensitivity = it))
+                        container?.settingsRepository?.setMotionSensitivity(it)
+                    },
+                    valueRange = 0.50f..1.50f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = BrandMagenta,
+                        activeTrackColor = BrandMagenta,
+                        inactiveTrackColor = DarkSurfaceHighlight
+                    )
+                )
+
+                if (motionCalibrationNotice.isNotBlank()) {
+                    Text(text = motionCalibrationNotice, fontSize = 11.sp, color = SafeGreen)
+                    Spacer(modifier = Modifier.height(6.dp))
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        motionDetector?.calibrateBaseline()
+                        motionCalibrationNotice = "Baseline gravity calibrated to resting orientation."
+                    },
+                    modifier = Modifier.fillMaxWidth().height(38.dp),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Calibrate Motion Baseline", fontSize = 12.sp, color = TextPrimary)
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Verification Countdown Duration
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Verification Countdown",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Time allowed to cancel before automatic alert dispatch",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    }
+                    Text(
+                        text = "${countdownSeconds}s",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = WarningAmber
+                    )
+                }
+
+                Slider(
+                    value = countdownSeconds.toFloat(),
+                    onValueChange = {
+                        val secs = it.toInt().coerceIn(5, 30)
+                        countdownSeconds = secs
+                        coordinator?.setVerificationTimeoutMs(secs * 1000L)
+                        container?.settingsRepository?.setCountdownDuration(secs)
+                    },
+                    valueRange = 5f..30f,
+                    steps = 4,
+                    colors = SliderDefaults.colors(
+                        thumbColor = WarningAmber,
+                        activeTrackColor = WarningAmber,
+                        inactiveTrackColor = DarkSurfaceHighlight
+                    )
+                )
             }
         }
 
@@ -662,6 +837,7 @@ fun SettingsScreen(
                 PermissionRow("Microphone (Acoustic YAMNet Classifier)", state.isAudioPermissionGranted, Icons.Default.Mic)
                 PermissionRow("Precise Location (Emergency Coordinates)", state.isLocationPermissionGranted, Icons.Default.LocationOn)
                 PermissionRow("Foreground Service Notification", state.isNotificationPermissionGranted, Icons.Default.Notifications)
+                PermissionRow("Emergency SMS Fallback", state.isSmsPermissionGranted, Icons.Default.Sms)
 
                 val allRequiredGranted = state.isAudioPermissionGranted && state.isLocationPermissionGranted && state.isNotificationPermissionGranted
 
@@ -677,6 +853,22 @@ fun SettingsScreen(
                     ) {
                         Text("Grant Required Permissions", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.Black)
                     }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = {
+                        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        }
+                        context.startActivity(intent)
+                    },
+                    modifier = Modifier.fillMaxWidth().height(38.dp),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(imageVector = Icons.Default.Notifications, contentDescription = null, modifier = Modifier.size(16.dp), tint = TextSecondary)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("System Notification Settings", fontSize = 12.sp, color = TextPrimary)
                 }
             }
         }
@@ -742,6 +934,19 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Clean Temporary Previews", fontSize = 12.sp, color = TextSecondary)
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedButton(
+                    onClick = { showPurgePersonalDataDialog = true },
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = EmergencyLightRed)
+                ) {
+                    Icon(imageVector = Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = EmergencyLightRed)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Erase All Incidents & Audio Evidence", fontSize = 12.sp, color = EmergencyLightRed)
+                }
             }
         }
 
@@ -805,21 +1010,36 @@ fun SettingsScreen(
                     name = "Telegram Bot API",
                     status = if (isTelegramSaved) "Operational (Real HTTPS)" else "Unconfigured",
                     isOperational = isTelegramSaved,
-                    icon = Icons.Default.Send
+                    icon = Icons.AutoMirrored.Filled.Send
                 )
 
                 ChannelStatusRow(
                     name = "Cellular SMS",
-                    status = "Simulated (Carrier SMS Pending)",
-                    isOperational = false,
+                    status = if (state.isSmsPermissionGranted) "Ready (Android SmsManager)" else "Permission Required",
+                    isOperational = state.isSmsPermissionGranted,
                     icon = Icons.Default.Sms
                 )
 
                 ChannelStatusRow(
                     name = "BLE Mesh Relay",
-                    status = "In Development (Payload Ready)",
+                    status = "Offline Payload Foundation Ready",
                     isOperational = false,
                     icon = Icons.Default.Bluetooth
+                )
+
+                val guardianMgr = container?.guardianConnectivityManager
+                val gState = guardianMgr?.state?.collectAsState()?.value
+                val guardianRelayConfigured = container?.guardianRelayClient?.isRelayEndpointConfigured() == true
+                val pairedGuardiansCount = gState?.pairedGuardians?.size ?: 0
+                ChannelStatusRow(
+                    name = "Guardian Pairing Relay",
+                    status = when {
+                        pairedGuardiansCount > 0 && guardianRelayConfigured -> "$pairedGuardiansCount Guardian(s) Ready"
+                        pairedGuardiansCount > 0 -> "$pairedGuardiansCount Paired (Set Relay URL)"
+                        else -> "No Paired Guardians"
+                    },
+                    isOperational = pairedGuardiansCount > 0 && guardianRelayConfigured,
+                    icon = Icons.Default.Devices
                 )
 
                 Spacer(modifier = Modifier.height(12.dp))
@@ -836,42 +1056,52 @@ fun SettingsScreen(
         Spacer(modifier = Modifier.height(36.dp))
     }
 
-    // --- Add Contact Dialog ---
-    if (showAddContactDialog) {
-        var nameInput by remember { mutableStateOf("") }
-        var phoneInput by remember { mutableStateOf("") }
-        var relationInput by remember { mutableStateOf("") }
+    // --- Picked Contact Confirmation Dialog (Native Picker — no manual phone entry) ---
+    if (showAddContactDialog && pickedContact != null) {
+        val info = pickedContact!!
+        var relationInput by remember(info) { mutableStateOf("Family") }
+        var isPrimaryContact by remember(info) { mutableStateOf(state.trustedContacts.isEmpty()) }
         var inputError by remember { mutableStateOf("") }
 
         AlertDialog(
-            onDismissRequest = { showAddContactDialog = false },
+            onDismissRequest = {
+                showAddContactDialog = false
+                pickedContact = null
+            },
             title = {
-                Text(text = "Add Emergency Contact", fontWeight = FontWeight.Bold, color = TextPrimary)
+                Text(text = "Confirm Picked Responder", fontWeight = FontWeight.Bold, color = TextPrimary)
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                    OutlinedTextField(
-                        value = nameInput,
-                        onValueChange = { nameInput = it },
-                        label = { Text("Name") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                    OutlinedTextField(
-                        value = phoneInput,
-                        onValueChange = { phoneInput = it },
-                        label = { Text("Phone Number") },
-                        placeholder = { Text("+1234567890") },
-                        singleLine = true,
-                        modifier = Modifier.fillMaxWidth()
-                    )
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(8.dp))
+                            .background(DarkSurface)
+                            .padding(10.dp)
+                    ) {
+                        Text(text = info.displayName, fontWeight = FontWeight.Bold, fontSize = 14.sp, color = TextPrimary)
+                        Text(text = info.normalizedPhoneNumber, fontSize = 12.sp, color = SafeGreen)
+                    }
                     OutlinedTextField(
                         value = relationInput,
                         onValueChange = { relationInput = it },
-                        label = { Text("Relationship (e.g. Spouse, Parent)") },
+                        label = { Text("Relationship (e.g. Parent, Partner)") },
                         singleLine = true,
                         modifier = Modifier.fillMaxWidth()
                     )
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Text(text = "Set as Primary Contact", fontSize = 12.sp, color = TextPrimary)
+                        Switch(
+                            checked = isPrimaryContact,
+                            onCheckedChange = { isPrimaryContact = it },
+                            colors = SwitchDefaults.colors(checkedThumbColor = Color.White, checkedTrackColor = BrandMagenta)
+                        )
+                    }
                     if (inputError.isNotBlank()) {
                         Text(text = inputError, color = EmergencyLightRed, fontSize = 11.sp)
                     }
@@ -880,22 +1110,19 @@ fun SettingsScreen(
             confirmButton = {
                 Button(
                     onClick = {
-                        val name = nameInput.trim()
-                        val phone = phoneInput.trim()
                         val rel = relationInput.trim()
-                        if (name.isBlank() || phone.isBlank()) {
-                            inputError = "Name and phone number are required."
-                            return@Button
-                        }
                         val newContact = EmergencyContact(
                             id = UUID.randomUUID().toString(),
-                            name = name,
-                            phoneNumber = phone,
-                            telegramChatId = if (rel.isNotBlank()) rel else null
+                            name = info.displayName,
+                            phoneNumber = info.normalizedPhoneNumber,
+                            telegramChatId = null,
+                            isPrimary = isPrimaryContact,
+                            relationship = rel.ifBlank { "Emergency Contact" }
                         )
                         val result = container?.settingsRepository?.addContact(newContact)
                         if (result?.isSuccess == true) {
                             container.settingsRepository.syncToStateHolder()
+                            pickedContact = null
                             showAddContactDialog = false
                         } else {
                             inputError = result?.exceptionOrNull()?.message ?: "Failed to save contact."
@@ -907,11 +1134,54 @@ fun SettingsScreen(
                 }
             },
             dismissButton = {
-                TextButton(onClick = { showAddContactDialog = false }) {
+                TextButton(
+                    onClick = {
+                        showAddContactDialog = false
+                        pickedContact = null
+                    }
+                ) {
                     Text("Cancel", color = TextSecondary)
                 }
             },
             containerColor = DarkSurfaceElevated
+        )
+    }
+
+    if (showPurgePersonalDataDialog) {
+        AlertDialog(
+            onDismissRequest = { showPurgePersonalDataDialog = false },
+            containerColor = DarkSurfaceElevated,
+            title = {
+                Text("Erase Stored Evidence & History?", color = TextPrimary, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Text(
+                    text = "This permanently deletes all saved incident records and all recorded WAV audio evidence files from device storage.",
+                    color = TextSecondary,
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        container?.incidentRepository?.clearAllIncidents()
+                        if (audioDir.exists()) {
+                            audioDir.listFiles()?.forEach { it.delete() }
+                        }
+                        refreshAudioStorage()
+                        cleanupNotice = "All incident history and audio evidence permanently erased."
+                        showPurgePersonalDataDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = EmergencyRed)
+                ) {
+                    Text("Erase Permanently", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPurgePersonalDataDialog = false }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            }
         )
     }
 }

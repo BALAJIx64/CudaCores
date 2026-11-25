@@ -1,6 +1,7 @@
 package com.guardiangrid
 
 import android.content.Context
+import android.os.Build
 import com.guardiangrid.core.interfaces.EmergencyCommunicator
 import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.core.state.FileIncidentRepository
@@ -8,6 +9,10 @@ import com.guardiangrid.core.state.IncidentRepository
 import com.guardiangrid.location.GuardianLocationManager
 import com.guardiangrid.modules.audio.AudioModuleStub
 import com.guardiangrid.modules.communication.EmergencyCommunicatorImpl
+import com.guardiangrid.modules.communication.guardian.GuardianConnectivityManager
+import com.guardiangrid.modules.communication.guardian.GuardianRelayClient
+import com.guardiangrid.modules.communication.guardian.HttpGuardianRelayClient
+import com.guardiangrid.modules.communication.network.DefaultHttpTransport
 import com.guardiangrid.modules.communication.persistence.FileSettingsRepository
 import com.guardiangrid.modules.communication.persistence.SettingsRepository
 import com.guardiangrid.modules.communication.queue.FileEmergencyQueueRepository
@@ -16,10 +21,14 @@ import com.guardiangrid.modules.communication.security.SecureCredentialStorage
 import com.guardiangrid.modules.communication.security.SecureTelegramCredentialStore
 import com.guardiangrid.modules.communication.sms.AndroidSmsSender
 import com.guardiangrid.modules.communication.sms.MockSmsSender
+import com.guardiangrid.modules.communication.supabase.SupabaseConfigManager
+import com.guardiangrid.modules.communication.supabase.SupabaseEmergencyBackendClient
 import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
+import com.guardiangrid.modules.motion.anomaly.MotionThresholdConfig
 import com.guardiangrid.modules.motion.fusion.MultimodalFusionEngineImpl
 import com.guardiangrid.modules.motion.sensors.AndroidMotionSensorSource
 import com.guardiangrid.modules.motion.sensors.MotionSensorSource
+import com.guardiangrid.modules.motion.sensors.SyntheticMotionSensorSource
 import java.io.File
 
 /**
@@ -42,6 +51,9 @@ interface GuardianGridContainer {
     val settingsRepository: SettingsRepository
     val incidentRepository: IncidentRepository
     val secureCredentialStore: SecureCredentialStorage
+    val guardianConnectivityManager: GuardianConnectivityManager
+    val guardianRelayClient: GuardianRelayClient
+    val supabaseBackendClient: SupabaseEmergencyBackendClient
 }
 
 /**
@@ -84,6 +96,26 @@ class DefaultGuardianGridContainer(
         }
     }
 
+    override val guardianConnectivityManager: GuardianConnectivityManager by lazy {
+        val baseDir = appContext?.filesDir ?: File(System.getProperty("java.io.tmpdir"), "gg_container_files")
+        SupabaseConfigManager.initialize(File(baseDir, "security").apply { mkdirs() })
+        val modelName = listOfNotNull(Build.MANUFACTURER, Build.MODEL)
+            .joinToString(" ")
+            .trim()
+            .ifBlank { "GuardianGrid Device" }
+        GuardianConnectivityManager(File(baseDir, "guardian").apply { mkdirs() }, defaultDeviceName = modelName)
+    }
+
+    private val httpTransport by lazy { DefaultHttpTransport() }
+
+    override val guardianRelayClient: GuardianRelayClient by lazy {
+        HttpGuardianRelayClient(guardianConnectivityManager, httpTransport)
+    }
+
+    override val supabaseBackendClient: SupabaseEmergencyBackendClient by lazy {
+        SupabaseEmergencyBackendClient(guardianConnectivityManager, httpTransport)
+    }
+
     override val locationManager: GuardianLocationManager by lazy {
         customLocationManager ?: GuardianLocationManager(appContext)
     }
@@ -94,8 +126,12 @@ class DefaultGuardianGridContainer(
             val queueDir = File(baseDir, "emergency_queue")
             val queueRepo = FileEmergencyQueueRepository(queueDir)
             EmergencyCommunicatorImpl(
+                transport = httpTransport,
                 queueRepository = queueRepo,
                 smsSender = if (appContext != null) AndroidSmsSender(appContext) else MockSmsSender(),
+                guardianConnectivityManager = guardianConnectivityManager,
+                guardianRelayClient = guardianRelayClient,
+                supabaseBackendClient = supabaseBackendClient,
                 onOfflineRetryScheduled = {
                     appContext?.let { EmergencyDeliveryWorkScheduler.scheduleRetry(it) }
                 }
@@ -135,12 +171,14 @@ class DefaultGuardianGridContainer(
     }
 
     private val motionSensorSource: MotionSensorSource by lazy {
-        customMotionSource ?: (appContext?.let { AndroidMotionSensorSource(it) }
-            ?: throw IllegalStateException("MotionSensorSource requires non-null context or customMotionSource"))
+        customMotionSource ?: (appContext?.let { AndroidMotionSensorSource(it) } ?: SyntheticMotionSensorSource())
     }
 
     override val motionDetector: MotionAnomalyDetectorImpl by lazy {
-        customMotionDetector ?: MotionAnomalyDetectorImpl(sensorSource = motionSensorSource)
+        customMotionDetector ?: MotionAnomalyDetectorImpl(
+            sensorSource = motionSensorSource,
+            config = MotionThresholdConfig(sensitivity = settingsRepository.getSettings().motionSensitivity)
+        )
     }
 
     override val fusionEngine: MultimodalFusionEngineImpl by lazy {
@@ -148,6 +186,8 @@ class DefaultGuardianGridContainer(
     }
 
     override val coordinator: EmergencyCoordinatorImpl by lazy {
+        val savedSettings = settingsRepository.getSettings()
+        audioModule.setSensitivity(savedSettings.screamSensitivity)
         customCoordinator ?: EmergencyCoordinatorImpl(
             locationProvider = {
                 locationManager.lastLocation.value ?: locationManager.getLastKnownLocation()
@@ -157,6 +197,8 @@ class DefaultGuardianGridContainer(
             motionDetector = motionDetector,
             fusionEngine = fusionEngine,
             incidentRepository = incidentRepository
-        )
+        ).apply {
+            setVerificationTimeoutMs(savedSettings.countdownDurationSeconds * 1000L)
+        }
     }
 }
