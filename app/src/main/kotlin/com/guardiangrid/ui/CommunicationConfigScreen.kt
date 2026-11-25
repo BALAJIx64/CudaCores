@@ -188,7 +188,7 @@ fun CommunicationConfigScreen(
                     Text(text = "→", color = TextTertiary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
                     PriorityPill(step = "2", name = "Cellular SMS", status = if (isSmsGranted) "READY" else "NEED PERM", isConfigured = isSmsGranted)
                     Text(text = "→", color = TextTertiary, fontSize = 16.sp, fontWeight = FontWeight.Bold)
-                    PriorityPill(step = "3", name = "BLE Relay", status = "STANDBY", isConfigured = true)
+                    PriorityPill(step = "3", name = "BLE Relay", status = "COMING SOON", isConfigured = false)
                 }
             }
         }
@@ -234,7 +234,14 @@ fun CommunicationConfigScreen(
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Icon(imageVector = Icons.Default.Lock, contentDescription = null, tint = SafeGreen, modifier = Modifier.size(12.dp))
                             Spacer(modifier = Modifier.width(4.dp))
-                            Text(text = "AES-256-GCM VAULT", fontSize = 9.sp, fontWeight = FontWeight.Bold, color = SafeGreen)
+                            Text(
+                                text = "AES-256 VAULT",
+                                fontSize = 9.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = SafeGreen,
+                                maxLines = 1,
+                                softWrap = false
+                            )
                         }
                     }
                 }
@@ -511,25 +518,47 @@ fun CommunicationConfigScreen(
             border = CardDefaults.outlinedCardBorder().copy(brush = SolidColor(DarkBorder))
         ) {
             Column(modifier = Modifier.padding(16.dp)) {
-                Row(verticalAlignment = Alignment.CenterVertically) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.weight(1f)) {
+                        Box(
+                            modifier = Modifier
+                                .size(34.dp)
+                                .clip(CircleShape)
+                                .background(TextDisabled.copy(alpha = 0.15f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(imageVector = Icons.Default.Bluetooth, contentDescription = null, tint = TextSecondary, modifier = Modifier.size(18.dp))
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column {
+                            Text(text = "BLUETOOTH STORE & FORWARD", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
+                            Text(text = "Offline mesh relay (disabled in this release)", fontSize = 11.sp, color = TextSecondary)
+                        }
+                    }
+
                     Box(
                         modifier = Modifier
-                            .size(34.dp)
-                            .clip(CircleShape)
-                            .background(BrandMagenta.copy(alpha = 0.15f)),
-                        contentAlignment = Alignment.Center
+                            .clip(RoundedCornerShape(6.dp))
+                            .background(WarningAmber.copy(alpha = 0.15f))
+                            .padding(horizontal = 8.dp, vertical = 4.dp)
                     ) {
-                        Icon(imageVector = Icons.Default.Bluetooth, contentDescription = null, tint = BrandMagenta, modifier = Modifier.size(18.dp))
-                    }
-                    Spacer(modifier = Modifier.width(10.dp))
-                    Column {
-                        Text(text = "BLUETOOTH STORE & FORWARD", fontSize = 13.sp, fontWeight = FontWeight.Bold, color = TextPrimary)
-                        Text(text = "Local offline mesh relay foundation", fontSize = 11.sp, color = TextSecondary)
+                        Text(
+                            text = "COMING SOON",
+                            fontSize = 9.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = WarningAmber,
+                            maxLines = 1,
+                            softWrap = false
+                        )
                     }
                 }
                 Spacer(modifier = Modifier.height(10.dp))
                 Text(
-                    text = "If cellular and internet networks are both severed, GuardianGrid caches encrypted distress packets and broadcasts BLE advertising signals to relay emergency beacons to nearby participating GuardianGrid nodes.",
+                    text = "Future implementation: BLE scanning, advertising, and local mesh relay are currently disabled. Emergency alerts use Telegram, Supabase, and Cellular SMS.",
                     fontSize = 11.sp,
                     color = TextSecondary,
                     lineHeight = 16.sp

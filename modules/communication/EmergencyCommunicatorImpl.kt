@@ -192,23 +192,10 @@ class EmergencyCommunicatorImpl(
             }
 
             DeliveryChannel.BLUETOOTH_RELAY -> {
-                _lastDeliveryState.value = EmergencyDeliveryState.TRANSMISSION_ATTEMPTED
-                bluetoothRelay.startBroadcastingRelay(sanitizedPayload)
-                val bleAudit = CommunicationAuditRecord(
-                    recordId = UUID.randomUUID().toString(),
-                    incidentId = payload.incidentId,
-                    eventId = "ble-${UUID.randomUUID()}",
-                    channel = DeliveryChannel.BLUETOOTH_RELAY,
-                    state = EmergencyDeliveryState.TRANSMISSION_ATTEMPTED,
-                    attemptCount = 1,
-                    timestampEpochMs = System.currentTimeMillis()
-                )
-                recordAudit(bleAudit)
                 DeliveryReceipt(
                     channel = DeliveryChannel.BLUETOOTH_RELAY,
-                    status = DeliveryStatus.IN_FLIGHT,
-                    messageId = bleAudit.eventId,
-                    latencyMs = 15L
+                    status = DeliveryStatus.FAILED_RETRYING,
+                    errorMessage = "BLE relay is disabled (Coming Soon)"
                 )
             }
 
@@ -496,7 +483,7 @@ class EmergencyCommunicatorImpl(
         return when (channel) {
             DeliveryChannel.TELEGRAM -> TelegramConfigManager.isConfigured() || supabaseBackendClient?.isConfigured() == true
             DeliveryChannel.SMS -> smsSender.isAvailable()
-            DeliveryChannel.BLUETOOTH_RELAY -> true
+            DeliveryChannel.BLUETOOTH_RELAY -> false
             DeliveryChannel.INTERNET_API -> (guardianRelayClient?.isRelayEndpointConfigured() == true) || (supabaseBackendClient?.isConfigured() == true)
         }
     }

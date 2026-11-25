@@ -312,7 +312,7 @@ fun DashboardScreen(
                 ) {
                     GuardianGridWordmark(
                         emblemSize = 30.dp,
-                        subtitle = null
+                        subtitle = "Your Safety. Always Guarded."
                     )
 
                     Row(
@@ -459,7 +459,7 @@ fun DashboardScreen(
             }
         }
 
-        // --- B. Primary Home Actions: 1. SOS (Red Circle), 2. Share Location (Green Circle), 3. Live Protection (Blue Shield) ---
+        // --- B. Redesigned Home Actions: Centre Large SOS Circle + Bottom Action Row (Share Location | Live Protection) ---
         item {
             var sosHoldProgress by remember { mutableFloatStateOf(0f) }
             var sosPressed by remember { mutableStateOf(false) }
@@ -494,18 +494,20 @@ fun DashboardScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 4.dp),
+                    .padding(vertical = 12.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(22.dp)
+                verticalArrangement = Arrangement.spacedBy(28.dp)
             ) {
-                // 1. SOS — Red circular button, subtle rim & shadow, steady when idle, hold 0.8s to activate
+                // 1. Centre — Large circular Emergency SOS button (press-and-hold 0.8s)
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.fillMaxWidth()
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(top = 12.dp)
                 ) {
                     Surface(
                         modifier = Modifier
-                            .size(148.dp)
+                            .size(204.dp)
                             .scale(sosScale)
                             .pointerInput(Unit) {
                                 detectTapGestures(
@@ -541,16 +543,16 @@ fun DashboardScreen(
                             },
                         shape = CircleShape,
                         color = EmergencyRed,
-                        shadowElevation = 6.dp,
-                        border = BorderStroke(2.5.dp, Color(0xFFFCA5A5))
+                        shadowElevation = 10.dp,
+                        border = BorderStroke(3.dp, BrandMagenta.copy(alpha = 0.85f))
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             if (sosHoldProgress > 0f) {
                                 CircularProgressIndicator(
                                     progress = { sosHoldProgress },
-                                    modifier = Modifier.size(134.dp),
+                                    modifier = Modifier.size(188.dp),
                                     color = Color.White,
-                                    strokeWidth = 5.dp,
+                                    strokeWidth = 6.dp,
                                     trackColor = Color.Transparent
                                 )
                             }
@@ -562,21 +564,21 @@ fun DashboardScreen(
                                     imageVector = Icons.Default.Campaign,
                                     contentDescription = "SOS Emergency Trigger",
                                     tint = Color.White,
-                                    modifier = Modifier.size(44.dp)
+                                    modifier = Modifier.size(56.dp)
                                 )
-                                Spacer(modifier = Modifier.height(2.dp))
+                                Spacer(modifier = Modifier.height(4.dp))
                                 Text(
                                     text = "SOS",
-                                    fontSize = 26.sp,
+                                    fontSize = 34.sp,
                                     fontWeight = FontWeight.Black,
                                     color = Color.White,
-                                    letterSpacing = 1.2.sp
+                                    letterSpacing = 1.5.sp
                                 )
                             }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                    Spacer(modifier = Modifier.height(12.dp))
 
                     Text(
                         text = "Emergency SOS",
@@ -592,55 +594,123 @@ fun DashboardScreen(
                     )
                 }
 
-                // 2. Share Location — Green circular button, subtle rim & shadow + label & 1-line explanation below
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.fillMaxWidth()
+                // 2. Bottom Action Row — Left: Share Location | Right: Activate Live Protection
+                val protectionShortLabel = when (state.monitoringServiceState) {
+                    MonitoringServiceState.ACTIVE -> "Stop Protection"
+                    MonitoringServiceState.STARTING -> "Starting..."
+                    MonitoringServiceState.STOPPING -> "Stopping..."
+                    MonitoringServiceState.PERMISSION_REQUIRED -> "Grant Mic"
+                    MonitoringServiceState.ERROR -> "Retry"
+                    MonitoringServiceState.STOPPED -> "Live Protection"
+                }
+
+                Row(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 8.dp),
+                    horizontalArrangement = Arrangement.SpaceEvenly,
+                    verticalAlignment = Alignment.Top
                 ) {
-                    Surface(
-                        onClick = {
-                            isLiveLocationExpanded = !isLiveLocationExpanded
-                            if (isLiveLocationExpanded) {
-                                scope.launch { listState.animateScrollToItem(3) }
-                            }
-                        },
-                        interactionSource = locationInteraction,
-                        modifier = Modifier
-                            .size(148.dp)
-                            .scale(locationScale),
-                        shape = CircleShape,
-                        color = SafeGreen,
-                        shadowElevation = 6.dp,
-                        border = BorderStroke(2.5.dp, Color(0xFF86EFAC))
+                    // Left: Share Location
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.weight(1f)
                     ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            Icon(
-                                imageVector = Icons.Default.MyLocation,
-                                contentDescription = "Share Location",
-                                tint = Color.White,
-                                modifier = Modifier.size(48.dp)
-                            )
+                        Surface(
+                            onClick = {
+                                isLiveLocationExpanded = !isLiveLocationExpanded
+                                if (isLiveLocationExpanded) {
+                                    scope.launch { listState.animateScrollToItem(2) }
+                                }
+                            },
+                            interactionSource = locationInteraction,
+                            modifier = Modifier
+                                .size(84.dp)
+                                .scale(locationScale),
+                            shape = CircleShape,
+                            color = SafeGreen,
+                            shadowElevation = 6.dp,
+                            border = BorderStroke(2.dp, Color(0xFF86EFAC))
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                Icon(
+                                    imageVector = Icons.Default.MyLocation,
+                                    contentDescription = "Share Location",
+                                    tint = Color.White,
+                                    modifier = Modifier.size(34.dp)
+                                )
+                            }
                         }
+
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text(
+                            text = if (liveShareState.isSharing) "Sharing Active" else "Share Location",
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (liveShareState.isSharing) SafeGreen else TextPrimary,
+                            textAlign = TextAlign.Center
+                        )
                     }
 
-                    Spacer(modifier = Modifier.height(8.dp))
+                    // Right: Activate Live Protection
+                    Column(
+                        horizontalAlignment = Alignment.CenterHorizontally,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Surface(
+                            onClick = {
+                                if (!isTransitioning) {
+                                    if (isServiceActive) {
+                                        GuardianForegroundService.stop(context)
+                                    } else {
+                                        if (!PermissionManager.isPermissionGranted(context, Manifest.permission.RECORD_AUDIO)) {
+                                            EmergencyStateHolder.setMonitoringServiceState(
+                                                MonitoringServiceState.PERMISSION_REQUIRED,
+                                                "Microphone permission required for audio distress monitoring."
+                                            )
+                                            onRequestPermissions()
+                                        } else {
+                                            GuardianForegroundService.start(context)
+                                        }
+                                    }
+                                }
+                            },
+                            interactionSource = protectionInteraction,
+                            modifier = Modifier
+                                .size(84.dp)
+                                .scale(protectionScale),
+                            shape = CircleShape,
+                            color = InfoBlue,
+                            shadowElevation = 6.dp,
+                            border = BorderStroke(2.dp, Color(0xFF93C5FD))
+                        ) {
+                            Box(contentAlignment = Alignment.Center) {
+                                if (isTransitioning) {
+                                    CircularProgressIndicator(
+                                        modifier = Modifier.size(28.dp),
+                                        strokeWidth = 3.dp,
+                                        color = Color.White
+                                    )
+                                } else {
+                                    Icon(
+                                        imageVector = Icons.Default.Security,
+                                        contentDescription = protectionShortLabel,
+                                        tint = Color.White,
+                                        modifier = Modifier.size(34.dp)
+                                    )
+                                }
+                            }
+                        }
 
-                    Text(
-                        text = if (liveShareState.isSharing) "Live Location Active" else "Share Location",
-                        style = MaterialTheme.typography.titleMedium,
-                        color = if (liveShareState.isSharing) SafeGreen else TextPrimary,
-                        textAlign = TextAlign.Center
-                    )
-                    Text(
-                        text = if (liveShareState.isSharing) {
-                            "Sharing live updates with ${liveShareState.recipientNames.joinToString(", ")}"
-                        } else {
-                            "Send a private, auto-expiring live map link"
-                        },
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary,
-                        textAlign = TextAlign.Center
-                    )
+                        Spacer(modifier = Modifier.height(8.dp))
+
+                        Text(
+                            text = protectionShortLabel,
+                            style = MaterialTheme.typography.labelLarge,
+                            color = if (isServiceActive) InfoBlue else TextPrimary,
+                            textAlign = TextAlign.Center
+                        )
+                    }
                 }
 
                 // Inline Live-Location Sharing Flow (expanded on tap or when active)
@@ -655,89 +725,6 @@ fun DashboardScreen(
                         trustedContacts = state.trustedContacts,
                         onRequestPermissions = { showPermissionDialog = true },
                         onNavigateToContacts = onNavigateToContacts
-                    )
-                }
-
-                // 3. Live Protection — Blue shield-shaped button, subtle rim & shadow + visible label & explanation below
-                val protectionLabel = when (state.monitoringServiceState) {
-                    MonitoringServiceState.ACTIVE -> "Stop Live Protection"
-                    MonitoringServiceState.STARTING -> "Starting Live Protection..."
-                    MonitoringServiceState.STOPPING -> "Stopping Live Protection..."
-                    MonitoringServiceState.PERMISSION_REQUIRED -> "Grant Microphone Permission"
-                    MonitoringServiceState.ERROR -> "Retry Live Protection"
-                    MonitoringServiceState.STOPPED -> "Activate Live Protection"
-                }
-                val protectionDescription = when (state.monitoringServiceState) {
-                    MonitoringServiceState.ACTIVE -> "Monitoring microphone and motion in background"
-                    MonitoringServiceState.STARTING -> "Initializing audio and motion sensors"
-                    MonitoringServiceState.STOPPING -> "Safely stopping monitoring service"
-                    MonitoringServiceState.PERMISSION_REQUIRED -> "Microphone access needed to detect distress"
-                    MonitoringServiceState.ERROR -> state.statusMessage.ifBlank { "Sensor activation failed — tap to retry" }
-                    MonitoringServiceState.STOPPED -> "Listen for screams and detect sudden falls"
-                }
-
-                Column(
-                    horizontalAlignment = Alignment.CenterHorizontally,
-                    modifier = Modifier.fillMaxWidth()
-                ) {
-                    Surface(
-                        onClick = {
-                            if (!isTransitioning) {
-                                if (isServiceActive) {
-                                    GuardianForegroundService.stop(context)
-                                } else {
-                                    if (!PermissionManager.isPermissionGranted(context, Manifest.permission.RECORD_AUDIO)) {
-                                        EmergencyStateHolder.setMonitoringServiceState(
-                                            MonitoringServiceState.PERMISSION_REQUIRED,
-                                            "Microphone permission required for audio distress monitoring."
-                                        )
-                                        onRequestPermissions()
-                                    } else {
-                                        GuardianForegroundService.start(context)
-                                    }
-                                }
-                            }
-                        },
-                        interactionSource = protectionInteraction,
-                        modifier = Modifier
-                            .size(148.dp)
-                            .scale(protectionScale),
-                        shape = ShieldButtonShape,
-                        color = InfoBlue,
-                        shadowElevation = 6.dp,
-                        border = BorderStroke(2.5.dp, Color(0xFF93C5FD))
-                    ) {
-                        Box(contentAlignment = Alignment.Center) {
-                            if (isTransitioning) {
-                                CircularProgressIndicator(
-                                    modifier = Modifier.size(36.dp),
-                                    strokeWidth = 3.dp,
-                                    color = Color.White
-                                )
-                            } else {
-                                Icon(
-                                    imageVector = Icons.Default.Security,
-                                    contentDescription = protectionLabel,
-                                    tint = Color.White,
-                                    modifier = Modifier.size(48.dp)
-                                )
-                            }
-                        }
-                    }
-
-                    Spacer(modifier = Modifier.height(8.dp))
-
-                    Text(
-                        text = protectionLabel,
-                        style = MaterialTheme.typography.titleMedium,
-                        color = if (isServiceActive) InfoBlue else TextPrimary,
-                        textAlign = TextAlign.Center
-                    )
-                    Text(
-                        text = protectionDescription,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = TextSecondary,
-                        textAlign = TextAlign.Center
                     )
                 }
             }
