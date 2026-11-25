@@ -1,8 +1,12 @@
 package com.guardiangrid.ui
 
+import android.content.Intent
+import androidx.core.content.FileProvider
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -30,8 +34,11 @@ import androidx.compose.material.icons.filled.History
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Security
+import androidx.compose.material.icons.filled.Share
 import androidx.compose.material.icons.filled.Warning
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -41,14 +48,20 @@ import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.Slider
+import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
+import kotlinx.coroutines.delay
+import com.guardiangrid.ui.guardian.WavAudioPlayer
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
@@ -530,12 +543,33 @@ private fun IncidentDetailsDialog(
     dateFormatter: SimpleDateFormat,
     onDismiss: () -> Unit
 ) {
+    val context = LocalContext.current
     val dateStr = remember(incident.startTimeEpochMs) {
         dateFormatter.format(Date(incident.startTimeEpochMs))
     }
+    val audioPlayer = remember(incident.incidentId) { WavAudioPlayer() }
+    val isPlaying by audioPlayer.isPlaying.collectAsState()
+    val currentPositionMs by audioPlayer.currentPositionMs.collectAsState()
+    val durationMs by audioPlayer.durationMs.collectAsState()
+    val playbackError by audioPlayer.playbackError.collectAsState()
+    var shareError by remember { mutableStateOf<String?>(null) }
+
+    DisposableEffect(incident.incidentId) {
+        onDispose { audioPlayer.stop() }
+    }
+
+    LaunchedEffect(isPlaying) {
+        while (isPlaying) {
+            audioPlayer.refreshProgress()
+            delay(200L)
+        }
+    }
 
     AlertDialog(
-        onDismissRequest = onDismiss,
+        onDismissRequest = {
+            audioPlayer.stop()
+            onDismiss()
+        },
         title = {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
@@ -555,7 +589,9 @@ private fun IncidentDetailsDialog(
         },
         text = {
             Column(
-                modifier = Modifier.fillMaxWidth(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .verticalScroll(rememberScrollState()),
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 DetailRow("Incident ID", incident.incidentId, isMonospace = true)
@@ -569,27 +605,134 @@ private fun IncidentDetailsDialog(
                     incident.location?.let { "Lat: ${"%.5f".format(it.latitude)}, Lon: ${"%.5f".format(it.longitude)} (±${it.accuracyMeters.toInt()}m)" }
                         ?: "Unavailable"
                 )
+                val evidenceFile = incident.audioEvidencePath?.let { File(it) }?.takeIf { it.exists() && it.length() > 44L }
                 DetailRow(
                     "Audio Evidence",
-                    if (incident.hasValidEvidenceFile) {
-                        val file = File(incident.audioEvidencePath!!)
-                        "Available (${file.length() / 1024} KB)\n${file.name}"
+                    if (evidenceFile != null) {
+                        "Available (${evidenceFile.length() / 1024} KB) • ${evidenceFile.name}"
                     } else {
-                        "None / Deleted"
+                        "None / Missing on device"
                     }
                 )
+
+                if (evidenceFile != null) {
+                    Card(
+                        modifier = Modifier.fillMaxWidth(),
+                        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+                        shape = RoundedCornerShape(12.dp)
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(10.dp),
+                            verticalArrangement = Arrangement.spacedBy(6.dp)
+                        ) {
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.SpaceBetween
+                            ) {
+                                Button(
+                                    onClick = {
+                                        audioPlayer.playOrPause(incident.incidentId, evidenceFile.absolutePath)
+                                    },
+                                    colors = ButtonDefaults.buttonColors(containerColor = BrandMagenta)
+                                ) {
+                                    Icon(
+                                        imageVector = if (isPlaying) Icons.Default.Pause else Icons.Default.PlayArrow,
+                                        contentDescription = if (isPlaying) "Pause" else "Play",
+                                        tint = Color.White,
+                                        modifier = Modifier.size(16.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text(
+                                        text = if (isPlaying) "Pause" else "Play",
+                                        color = Color.White,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold
+                                    )
+                                }
+
+                                OutlinedButton(
+                                    onClick = {
+                                        try {
+                                            shareError = null
+                                            val uri = FileProvider.getUriForFile(
+                                                context,
+                                                "${context.packageName}.fileprovider",
+                                                evidenceFile
+                                            )
+                                            val shareIntent = Intent(Intent.ACTION_SEND).apply {
+                                                type = "audio/wav"
+                                                putExtra(Intent.EXTRA_STREAM, uri)
+                                                putExtra(Intent.EXTRA_SUBJECT, "GuardianGrid Evidence ${incident.incidentId}")
+                                                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                                            }
+                                            context.startActivity(Intent.createChooser(shareIntent, "Share Audio Evidence"))
+                                        } catch (e: Exception) {
+                                            shareError = e.message ?: "Unable to share audio file."
+                                        }
+                                    }
+                                ) {
+                                    Icon(
+                                        imageVector = Icons.Default.Share,
+                                        contentDescription = "Share Audio",
+                                        tint = InfoBlue,
+                                        modifier = Modifier.size(15.dp)
+                                    )
+                                    Spacer(modifier = Modifier.width(4.dp))
+                                    Text("Share", color = InfoBlue, fontSize = 11.sp)
+                                }
+                            }
+
+                            if (durationMs > 0L) {
+                                Slider(
+                                    value = currentPositionMs.toFloat().coerceIn(0f, durationMs.toFloat()),
+                                    onValueChange = { audioPlayer.seekTo(it.toLong()) },
+                                    valueRange = 0f..durationMs.toFloat(),
+                                    colors = SliderDefaults.colors(
+                                        thumbColor = BrandMagenta,
+                                        activeTrackColor = BrandMagenta,
+                                        inactiveTrackColor = DarkBorder
+                                    )
+                                )
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text(text = formatDurationMs(currentPositionMs), fontSize = 10.sp, color = TextSecondary)
+                                    Text(text = formatDurationMs(durationMs), fontSize = 10.sp, color = TextSecondary)
+                                }
+                            }
+
+                            val errMsg = playbackError ?: shareError
+                            if (!errMsg.isNullOrBlank()) {
+                                Text(text = errMsg, fontSize = 10.sp, color = EmergencyRed)
+                            }
+                        }
+                    }
+                }
+
                 if (incident.notes.isNotBlank()) {
                     DetailRow("Notes", incident.notes)
                 }
             }
         },
         confirmButton = {
-            TextButton(onClick = onDismiss) {
+            TextButton(onClick = {
+                audioPlayer.stop()
+                onDismiss()
+            }) {
                 Text("Close", color = BrandMagenta, fontWeight = FontWeight.Bold)
             }
         },
         containerColor = DarkSurfaceElevated
     )
+}
+
+private fun formatDurationMs(ms: Long): String {
+    val totalSec = (ms / 1000L).coerceAtLeast(0L)
+    val min = totalSec / 60L
+    val sec = totalSec % 60L
+    return "%02d:%02d".format(min, sec)
 }
 
 @Composable

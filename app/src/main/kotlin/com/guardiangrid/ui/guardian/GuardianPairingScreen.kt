@@ -138,6 +138,7 @@ fun GuardianPairingScreen(
     var isSyncing by remember { mutableStateOf(false) }
     var isPairingInProgress by remember { mutableStateOf(false) }
     var nowClockMs by remember { mutableStateOf(System.currentTimeMillis()) }
+    var backendUnavailableReason by remember { mutableStateOf<String?>(null) }
 
     LaunchedEffect(Unit) {
         while (true) {
@@ -148,13 +149,28 @@ fun GuardianPairingScreen(
 
     // Automatically register device/invite & sync confirmed pairings when Supabase backend is active
     LaunchedEffect(selectedTab, guardianState?.activeInvitationId) {
-        if (supabaseClient != null && supabaseClient.isConfigured() && connectivityManager != null) {
+        if (supabaseClient == null || !supabaseClient.isConfigured()) {
+            backendUnavailableReason = "Supabase backend is not configured."
+            return@LaunchedEffect
+        }
+        if (connectivityManager != null) {
             withContext(Dispatchers.IO) {
                 if (selectedTab == 0) {
                     if (guardianState?.isActiveInvitationRegisteredWithBackend == false) {
-                        supabaseClient.createPairingInvitation(connectivityManager.getActiveInvitationModel())
+                        val inviteRes = supabaseClient.createPairingInvitation(connectivityManager.getActiveInvitationModel())
+                        if (inviteRes.isFailure) {
+                            backendUnavailableReason = inviteRes.exceptionOrNull()?.message
+                                ?: "Backend pairing endpoint unavailable."
+                        } else {
+                            backendUnavailableReason = null
+                        }
                     }
-                    supabaseClient.fetchConfirmedPairings()
+                    val syncRes = supabaseClient.fetchConfirmedPairings()
+                    if (syncRes.isSuccess) {
+                        backendUnavailableReason = null
+                    } else if (backendUnavailableReason == null) {
+                        backendUnavailableReason = syncRes.exceptionOrNull()?.message
+                    }
                 } else {
                     relayClient?.pollIncomingAlerts()
                 }
@@ -258,27 +274,29 @@ fun GuardianPairingScreen(
                 onClick = { selectedTab = 0 },
                 modifier = Modifier.weight(1f),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (selectedTab == 0) BrandMagenta else DarkSurfaceElevated
+                    containerColor = if (selectedTab == 0) BrandMagenta else DarkSurfaceElevated,
+                    contentColor = if (selectedTab == 0) Color.White else TextSecondary
                 ),
                 shape = RoundedCornerShape(10.dp)
             ) {
                 Icon(Icons.Default.QrCode2, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
-                Text("Pairing & Setup", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("Pairing & Setup", fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
             }
 
             Button(
                 onClick = { selectedTab = 1 },
                 modifier = Modifier.weight(1f),
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (selectedTab == 1) BrandPurple else DarkSurfaceElevated
+                    containerColor = if (selectedTab == 1) BrandPurple else DarkSurfaceElevated,
+                    contentColor = if (selectedTab == 1) Color.White else TextSecondary
                 ),
                 shape = RoundedCornerShape(10.dp)
             ) {
                 Icon(Icons.Default.GraphicEq, contentDescription = null, modifier = Modifier.size(16.dp))
                 Spacer(Modifier.width(6.dp))
                 val rxCount = guardianState?.receivedAlerts?.size ?: 0
-                Text("Audio Receiver ($rxCount)", fontSize = 12.sp, fontWeight = FontWeight.Bold)
+                Text("Audio Receiver ($rxCount)", fontSize = 12.sp, fontWeight = FontWeight.Bold, maxLines = 1, softWrap = false)
             }
         }
 
@@ -376,6 +394,7 @@ fun GuardianPairingScreen(
             val expMin = (remainingMs / 60_000L)
             val expSec = (remainingMs % 60_000L) / 1000L
             val isBackendActive = supabaseClient?.isConfigured() == true
+            val isBackendUnavailable = !isBackendActive || (backendUnavailableReason != null && !guardianState.isActiveInvitationRegisteredWithBackend)
 
             Card(
                 modifier = Modifier.fillMaxWidth(),
@@ -407,17 +426,36 @@ fun GuardianPairingScreen(
                             color = if (isInviteExpired) EmergencyRed else CyberTeal
                         )
                     }
-                    Text(
-                        text = if (guardianState.isActiveInvitationRegisteredWithBackend) {
-                            "Single-use, secret-free invitation registered on backend. Have your trusted Guardian scan or import this QR before expiry."
-                        } else if (isBackendActive) {
-                            "Registering single-use invite with backend... Tap Rotate to issue a fresh expiring QR."
-                        } else {
-                            "Configure Supabase backend (Settings > Channels) to enable server-authenticated QR pairing."
-                        },
-                        fontSize = 11.sp,
-                        color = if (guardianState.isActiveInvitationRegisteredWithBackend) TextSecondary else WarningAmber
-                    )
+                    if (isBackendUnavailable) {
+                        Box(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clip(RoundedCornerShape(10.dp))
+                                .background(WarningAmber.copy(alpha = 0.14f))
+                                .padding(horizontal = 12.dp, vertical = 10.dp)
+                        ) {
+                            Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                                Text(
+                                    text = "PAIRING COMING SOON",
+                                    fontSize = 11.sp,
+                                    fontWeight = FontWeight.Black,
+                                    color = WarningAmber,
+                                    letterSpacing = 0.8.sp
+                                )
+                                Text(
+                                    text = "Backend registration is unavailable (${backendUnavailableReason ?: "Supabase emergency-relay not deployed"}). Local QR preview is shown, but pairing confirmation is disabled until the backend is deployed.",
+                                    fontSize = 11.sp,
+                                    color = TextSecondary
+                                )
+                            }
+                        }
+                    } else {
+                        Text(
+                            text = "Single-use, secret-free invitation registered on backend. Have your trusted Guardian scan or import this QR before expiry.",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    }
 
                     QrCodeImage(
                         content = guardianState.activeInvitationUri,
@@ -529,19 +567,21 @@ fun GuardianPairingScreen(
                     ) {
                         OutlinedButton(
                             onClick = { cameraQrLauncher.launch(null) },
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 8.dp)
                         ) {
                             Icon(Icons.Default.CameraAlt, contentDescription = null, modifier = Modifier.size(15.dp), tint = CyberTeal)
                             Spacer(Modifier.width(4.dp))
-                            Text("Camera", fontSize = 11.sp, color = TextPrimary)
+                            Text("Camera", fontSize = 11.sp, color = TextPrimary, maxLines = 1, softWrap = false)
                         }
                         OutlinedButton(
                             onClick = { imageQrLauncher.launch("image/*") },
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 8.dp)
                         ) {
                             Icon(Icons.Default.Image, contentDescription = null, modifier = Modifier.size(15.dp), tint = InfoBlue)
                             Spacer(Modifier.width(4.dp))
-                            Text("Image", fontSize = 11.sp, color = TextPrimary)
+                            Text("Image", fontSize = 11.sp, color = TextPrimary, maxLines = 1, softWrap = false)
                         }
                         OutlinedButton(
                             onClick = {
@@ -558,11 +598,12 @@ fun GuardianPairingScreen(
                                     }
                                 }
                             },
-                            modifier = Modifier.weight(1f)
+                            modifier = Modifier.weight(1f),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 6.dp, vertical = 8.dp)
                         ) {
                             Icon(Icons.Default.QrCode2, contentDescription = null, modifier = Modifier.size(15.dp))
                             Spacer(Modifier.width(4.dp))
-                            Text("Paste", fontSize = 11.sp, color = TextPrimary)
+                            Text("Paste", fontSize = 11.sp, color = TextPrimary, maxLines = 1, softWrap = false)
                         }
                     }
 
@@ -595,7 +636,7 @@ fun GuardianPairingScreen(
                                 statusNotice = "Cannot confirm pairing: configure Supabase Project URL & Anon Key in Settings > Channels first."
                             }
                         },
-                        enabled = inviteInput.isNotBlank() && !isPairingInProgress,
+                        enabled = !isBackendUnavailable && inviteInput.isNotBlank() && !isPairingInProgress,
                         modifier = Modifier.fillMaxWidth(),
                         colors = ButtonDefaults.buttonColors(containerColor = BrandPurple)
                     ) {

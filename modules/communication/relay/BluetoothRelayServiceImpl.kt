@@ -22,7 +22,8 @@ class BluetoothRelayServiceImpl(
     val bleSenderManager: BleSenderManager? = null,
     val bleRelayManager: BleRelayManager? = null,
     val defaultAccountId: String? = null,
-    val deviceId: String = "DEV-${UUID.randomUUID()}"
+    val deviceId: String = "DEV-${UUID.randomUUID()}",
+    val bleEnabled: Boolean = false
 ) : BluetoothRelayService {
 
     private var active = false
@@ -34,7 +35,10 @@ class BluetoothRelayServiceImpl(
         active = true
         lastBroadcastPayload = payload
         // Serializes payload into compact binary advertisement format
-        val compactBeaconData = encodePayloadToCompactBeacon(payload)
+        encodePayloadToCompactBeacon(payload)
+
+        // Active BLE GATT broadcasting is postponed (bleEnabled = false in production).
+        if (!bleEnabled) return
 
         // If BleSenderManager is configured with a valid token and account UUID, also broadcast signed GATT packet
         if (bleSenderManager != null && bleSenderManager.hasValidCachedToken()) {
@@ -60,7 +64,7 @@ class BluetoothRelayServiceImpl(
         }
     }
     override fun startRelayScanner(): Flow<AlertPayload> {
-        active = true
+        active = bleEnabled
         return scannedBeaconsFlow.asSharedFlow()
     }
 
