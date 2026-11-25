@@ -16,9 +16,11 @@ import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.interaction.collectIsPressedAsState
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
@@ -285,11 +287,16 @@ fun DashboardScreen(
         )
     }
 
-    Box(
+    BoxWithConstraints(
         modifier = Modifier
             .fillMaxSize()
             .background(DarkBackground)
     ) {
+    val sosDiameter = minOf(
+        maxWidth * 0.84f,
+        (maxHeight - 250.dp).coerceAtLeast(180.dp)
+    ).coerceAtLeast(180.dp)
+
     LazyColumn(
         state = listState,
         modifier = Modifier
@@ -494,20 +501,21 @@ fun DashboardScreen(
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .padding(vertical = 12.dp),
+                    .padding(vertical = 6.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(28.dp)
+                verticalArrangement = Arrangement.spacedBy(20.dp)
             ) {
-                // 1. Centre — Large circular Emergency SOS button (press-and-hold 0.8s)
+                // 1. Centre — Very large dynamically scaled circular Emergency SOS button (press-and-hold 0.8s)
                 Column(
                     horizontalAlignment = Alignment.CenterHorizontally,
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(top = 12.dp)
+                        .padding(top = 6.dp)
                 ) {
                     Surface(
                         modifier = Modifier
-                            .size(204.dp)
+                            .size(sosDiameter)
+                            .aspectRatio(1f)
                             .scale(sosScale)
                             .pointerInput(Unit) {
                                 detectTapGestures(
@@ -543,16 +551,16 @@ fun DashboardScreen(
                             },
                         shape = CircleShape,
                         color = EmergencyRed,
-                        shadowElevation = 10.dp,
+                        shadowElevation = 12.dp,
                         border = BorderStroke(3.dp, BrandMagenta.copy(alpha = 0.85f))
                     ) {
                         Box(contentAlignment = Alignment.Center) {
                             if (sosHoldProgress > 0f) {
                                 CircularProgressIndicator(
                                     progress = { sosHoldProgress },
-                                    modifier = Modifier.size(188.dp),
+                                    modifier = Modifier.size(sosDiameter * 0.92f),
                                     color = Color.White,
-                                    strokeWidth = 6.dp,
+                                    strokeWidth = 7.dp,
                                     trackColor = Color.Transparent
                                 )
                             }
@@ -564,21 +572,21 @@ fun DashboardScreen(
                                     imageVector = Icons.Default.Campaign,
                                     contentDescription = "SOS Emergency Trigger",
                                     tint = Color.White,
-                                    modifier = Modifier.size(56.dp)
+                                    modifier = Modifier.size((sosDiameter * 0.28f).coerceIn(48.dp, 88.dp))
                                 )
-                                Spacer(modifier = Modifier.height(4.dp))
+                                Spacer(modifier = Modifier.height(6.dp))
                                 Text(
                                     text = "SOS",
-                                    fontSize = 34.sp,
+                                    fontSize = 42.sp,
                                     fontWeight = FontWeight.Black,
                                     color = Color.White,
-                                    letterSpacing = 1.5.sp
+                                    letterSpacing = 2.sp
                                 )
                             }
                         }
                     }
 
-                    Spacer(modifier = Modifier.height(12.dp))
+                    Spacer(modifier = Modifier.height(10.dp))
 
                     Text(
                         text = "Emergency SOS",
@@ -594,7 +602,7 @@ fun DashboardScreen(
                     )
                 }
 
-                // 2. Bottom Action Row — Left: Share Location | Right: Activate Live Protection
+                // 2. Bottom Action Row — Two rectangular buttons side-by-side: Share Location | Live Protection
                 val protectionShortLabel = when (state.monitoringServiceState) {
                     MonitoringServiceState.ACTIVE -> "Stop Protection"
                     MonitoringServiceState.STARTING -> "Starting..."
@@ -607,109 +615,111 @@ fun DashboardScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 12.dp, vertical = 8.dp),
-                    horizontalArrangement = Arrangement.SpaceEvenly,
-                    verticalAlignment = Alignment.Top
+                        .padding(vertical = 4.dp),
+                    horizontalArrangement = Arrangement.spacedBy(12.dp),
+                    verticalAlignment = Alignment.CenterVertically
                 ) {
-                    // Left: Share Location
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Surface(
-                            onClick = {
-                                isLiveLocationExpanded = !isLiveLocationExpanded
-                                if (isLiveLocationExpanded) {
-                                    scope.launch { listState.animateScrollToItem(2) }
-                                }
-                            },
-                            interactionSource = locationInteraction,
-                            modifier = Modifier
-                                .size(84.dp)
-                                .scale(locationScale),
-                            shape = CircleShape,
-                            color = SafeGreen,
-                            shadowElevation = 6.dp,
-                            border = BorderStroke(2.dp, Color(0xFF86EFAC))
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                Icon(
-                                    imageVector = Icons.Default.MyLocation,
-                                    contentDescription = "Share Location",
-                                    tint = Color.White,
-                                    modifier = Modifier.size(34.dp)
-                                )
+                    // Left: Share Location (Rectangular)
+                    Surface(
+                        onClick = {
+                            isLiveLocationExpanded = !isLiveLocationExpanded
+                            if (isLiveLocationExpanded) {
+                                scope.launch { listState.animateScrollToItem(2) }
                             }
+                        },
+                        interactionSource = locationInteraction,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(64.dp)
+                            .scale(locationScale),
+                        shape = RoundedCornerShape(16.dp),
+                        color = SafeGreen,
+                        shadowElevation = 6.dp,
+                        border = BorderStroke(1.5.dp, Color(0xFF86EFAC))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.MyLocation,
+                                contentDescription = "Share Location",
+                                tint = Color.White,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (liveShareState.isSharing) "Sharing Active" else "Share Location",
+                                style = MaterialTheme.typography.labelLarge,
+                                color = Color.White,
+                                maxLines = 1,
+                                softWrap = false
+                            )
                         }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        Text(
-                            text = if (liveShareState.isSharing) "Sharing Active" else "Share Location",
-                            style = MaterialTheme.typography.labelLarge,
-                            color = if (liveShareState.isSharing) SafeGreen else TextPrimary,
-                            textAlign = TextAlign.Center
-                        )
                     }
 
-                    // Right: Activate Live Protection
-                    Column(
-                        horizontalAlignment = Alignment.CenterHorizontally,
-                        modifier = Modifier.weight(1f)
-                    ) {
-                        Surface(
-                            onClick = {
-                                if (!isTransitioning) {
-                                    if (isServiceActive) {
-                                        GuardianForegroundService.stop(context)
+                    // Right: Activate Live Protection (Rectangular)
+                    Surface(
+                        onClick = {
+                            if (!isTransitioning) {
+                                if (isServiceActive) {
+                                    GuardianForegroundService.stop(context)
+                                } else {
+                                    if (!PermissionManager.isPermissionGranted(context, Manifest.permission.RECORD_AUDIO)) {
+                                        EmergencyStateHolder.setMonitoringServiceState(
+                                            MonitoringServiceState.PERMISSION_REQUIRED,
+                                            "Microphone permission required for audio distress monitoring."
+                                        )
+                                        onRequestPermissions()
                                     } else {
-                                        if (!PermissionManager.isPermissionGranted(context, Manifest.permission.RECORD_AUDIO)) {
-                                            EmergencyStateHolder.setMonitoringServiceState(
-                                                MonitoringServiceState.PERMISSION_REQUIRED,
-                                                "Microphone permission required for audio distress monitoring."
-                                            )
-                                            onRequestPermissions()
-                                        } else {
-                                            GuardianForegroundService.start(context)
-                                        }
+                                        GuardianForegroundService.start(context)
                                     }
                                 }
-                            },
-                            interactionSource = protectionInteraction,
-                            modifier = Modifier
-                                .size(84.dp)
-                                .scale(protectionScale),
-                            shape = CircleShape,
-                            color = InfoBlue,
-                            shadowElevation = 6.dp,
-                            border = BorderStroke(2.dp, Color(0xFF93C5FD))
-                        ) {
-                            Box(contentAlignment = Alignment.Center) {
-                                if (isTransitioning) {
-                                    CircularProgressIndicator(
-                                        modifier = Modifier.size(28.dp),
-                                        strokeWidth = 3.dp,
-                                        color = Color.White
-                                    )
-                                } else {
-                                    Icon(
-                                        imageVector = Icons.Default.Security,
-                                        contentDescription = protectionShortLabel,
-                                        tint = Color.White,
-                                        modifier = Modifier.size(34.dp)
-                                    )
-                                }
                             }
+                        },
+                        interactionSource = protectionInteraction,
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(64.dp)
+                            .scale(protectionScale),
+                        shape = RoundedCornerShape(16.dp),
+                        color = InfoBlue,
+                        shadowElevation = 6.dp,
+                        border = BorderStroke(1.5.dp, Color(0xFF93C5FD))
+                    ) {
+                        Row(
+                            modifier = Modifier
+                                .fillMaxSize()
+                                .padding(horizontal = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            if (isTransitioning) {
+                                CircularProgressIndicator(
+                                    modifier = Modifier.size(20.dp),
+                                    strokeWidth = 2.5.dp,
+                                    color = Color.White
+                                )
+                            } else {
+                                Icon(
+                                    imageVector = Icons.Default.Security,
+                                    contentDescription = protectionShortLabel,
+                                    tint = Color.White,
+                                    modifier = Modifier.size(22.dp)
+                                )
+                            }
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = protectionShortLabel,
+                                style = MaterialTheme.typography.labelLarge,
+                                color = Color.White,
+                                maxLines = 1,
+                                softWrap = false
+                            )
                         }
-
-                        Spacer(modifier = Modifier.height(8.dp))
-
-                        Text(
-                            text = protectionShortLabel,
-                            style = MaterialTheme.typography.labelLarge,
-                            color = if (isServiceActive) InfoBlue else TextPrimary,
-                            textAlign = TextAlign.Center
-                        )
                     }
                 }
 
