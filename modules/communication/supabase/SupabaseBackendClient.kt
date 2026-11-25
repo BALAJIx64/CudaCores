@@ -1,6 +1,9 @@
 package com.guardiangrid.modules.communication.supabase
 
 import com.guardiangrid.core.models.AlertPayload
+import com.guardiangrid.core.models.BleEmergencyAlertPacket
+import com.guardiangrid.core.models.BleEmergencyToken
+import com.guardiangrid.core.models.BleRelayAcknowledgement
 import com.guardiangrid.core.models.DeliveryChannel
 import com.guardiangrid.modules.communication.guardian.GuardianConnectivityManager
 import com.guardiangrid.modules.communication.guardian.GuardianCryptoCodec
@@ -680,6 +683,79 @@ class SupabaseEmergencyBackendClient(
             )
         }
         return results
+    }
+
+    /**
+     * Obtains a short-lived BLE emergency signing token from the backend for offline alert signing.
+     */
+    fun issueBleToken(accountId: String, deviceId: String, validityHours: Int = 72): Result<BleEmergencyToken> {
+        val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
+        if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
+
+        if (!ensureDeviceRegistered()) {
+            return Result.failure(IllegalStateException("Device registration with backend failed"))
+        }
+        val headers = buildAuthenticatedHeaders(cfg, "issue-ble-token|$accountId|$deviceId")
+        val json = """{"accountId":"${jsonEscape(accountId)}","deviceId":"${jsonEscape(deviceId)}","validityHours":$validityHours}"""
+
+        return try {
+            val resp = transport.postJson("${cfg.functionsBaseUrl()}/issue-ble-token", json, headers)
+            if (resp.isSuccessful) {
+                val token = BleEmergencyToken.fromJson(resp.body)
+                if (token != null) Result.success(token)
+                else Result.failure(IllegalStateException("Failed to parse token response: ${resp.body}"))
+            } else {
+                Result.failure(IllegalStateException("Token issuance failed HTTP ${resp.statusCode}: ${resp.body.take(120)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    /**
+     * Forwards an emergency alert packet received by this Relay Phone to the Supabase backend.
+     * Preserves the original packet and its signature completely unchanged.
+     */
+    fun forwardBleRelayAlert(relayDeviceId: String, packet: BleEmergencyAlertPacket): Result<BleRelayAcknowledgement> {
+        val cfg = configProvider() ?: return Result.failure(IllegalStateException("Supabase backend not configured"))
+        if (!cfg.isValid()) return Result.failure(IllegalArgumentException("Invalid Supabase configuration"))
+
+        val headers = mapOf(
+            "Authorization" to "Bearer ${cfg.anonKey.trim()}",
+            "apikey" to cfg.anonKey.trim(),
+            "Content-Type" to "application/json"
+        )
+        val jsonBody = """{"relayDeviceId":"${jsonEscape(relayDeviceId)}","packet":${packet.toJson()}}"""
+
+        return try {
+            val resp = transport.postJson("${cfg.functionsBaseUrl()}/ble-relay-alert", jsonBody, headers)
+            if (resp.isSuccessful) {
+                val ack = parseBleRelayAck(resp.body, packet.alertId)
+                Result.success(ack)
+            } else {
+                Result.failure(IllegalStateException("Relay forwarding failed HTTP ${resp.statusCode}: ${resp.body.take(120)}"))
+            }
+        } catch (e: Exception) {
+            Result.failure(e)
+        }
+    }
+
+    private fun parseBleRelayAck(json: String, defaultAlertId: String): BleRelayAcknowledgement {
+        val ok = json.contains(""""ok"\s*:\s*true""".toRegex())
+        val alertId = """"alertId"\s*:\s*"([^"]+)"""".toRegex().find(json)?.groupValues?.get(1) ?: defaultAlertId
+        val status = """"status"\s*:\s*"([^"]+)"""".toRegex().find(json)?.groupValues?.get(1) ?: "RECEIVED"
+        val smsDispatched = json.contains(""""smsDispatched"\s*:\s*true""".toRegex())
+        val smsError = """"smsError"\s*:\s*"([^"]+)"""".toRegex().find(json)?.groupValues?.get(1)
+        val duplicate = json.contains(""""duplicate"\s*:\s*true""".toRegex())
+        return BleRelayAcknowledgement(
+            ok = ok,
+            alertId = alertId,
+            status = status,
+            smsDispatched = smsDispatched,
+            smsError = smsError,
+            acknowledged = true,
+            duplicate = duplicate
+        )
     }
 
     private fun extractJsonArrayContent(json: String, key: String): String {
