@@ -12,6 +12,7 @@ import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.IBinder
+import android.os.PowerManager
 import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
@@ -36,6 +37,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 class GuardianForegroundService : Service() {
 
     private val isRunning = AtomicBoolean(false)
+    private var wakeLock: PowerManager.WakeLock? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -87,14 +89,21 @@ class GuardianForegroundService : Service() {
         // 2. Build persistent status notification
         val notification = buildForegroundNotification()
 
-        // 3. Launch foreground execution with API 34+ microphone type declaration
+        // 3. Launch foreground execution with API 34+ microphone (+ location when granted) type declaration
         try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+                val hasLocationPerm = ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED ||
+                        ContextCompat.checkSelfPermission(this, Manifest.permission.ACCESS_COARSE_LOCATION) == PackageManager.PERMISSION_GRANTED
+                val fgsType = if (hasLocationPerm) {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE or ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION
+                } else {
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                }
                 ServiceCompat.startForeground(
                     this,
                     NOTIFICATION_ID,
                     notification,
-                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE
+                    fgsType
                 )
             } else {
                 startForeground(NOTIFICATION_ID, notification)
@@ -124,6 +133,7 @@ class GuardianForegroundService : Service() {
         }
 
         try {
+            acquireProtectionWakeLock()
             container.coordinator.startProtection()
             container.locationManager.startLocationUpdates()
 
@@ -151,6 +161,8 @@ class GuardianForegroundService : Service() {
             container?.locationManager?.stopLocationUpdates()
         } catch (e: Exception) {
             Log.w(TAG, "Exception during stopProtection cleanup: ${e.message}")
+        } finally {
+            releaseProtectionWakeLock()
         }
 
         isRunning.set(false)
@@ -173,7 +185,33 @@ class GuardianForegroundService : Service() {
             }
             EmergencyStateHolder.setMonitoringServiceState(MonitoringServiceState.STOPPED)
         }
+        releaseProtectionWakeLock()
         Log.d(TAG, "GuardianForegroundService destroyed.")
+    }
+
+    private fun acquireProtectionWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) return
+            val pm = getSystemService(Context.POWER_SERVICE) as? PowerManager ?: return
+            wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "GuardianGrid:ProtectionWakeLock").apply {
+                setReferenceCounted(false)
+                // Safety timeout of 12 hours max; also explicitly released in stop/onDestroy
+                acquire(12 * 60 * 60 * 1000L)
+            }
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not acquire partial wake lock: ${e.message}")
+        }
+    }
+
+    private fun releaseProtectionWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+            wakeLock = null
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not release partial wake lock: ${e.message}")
+        }
     }
 
     private fun createNotificationChannel() {
@@ -216,6 +254,7 @@ class GuardianForegroundService : Service() {
             .setContentTitle("GuardianGrid Active Protection")
             .setContentText("Continuous acoustic & motion safety monitoring is active.")
             .setSmallIcon(R.drawable.ic_stat_guardiangrid)
+            .setColor(0xFFE0115F.toInt())
             .setOngoing(true)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)

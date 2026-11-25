@@ -66,7 +66,19 @@ class EmergencyCoordinatorImpl(
     @Volatile
     private var activeIncidentDispatched = false
 
+    @Volatile
+    private var verificationTimeoutOverrideMs: Long = stateMachine.verificationTimeoutMs
+
+    fun setVerificationTimeoutMs(timeoutMs: Long) {
+        verificationTimeoutOverrideMs = timeoutMs.coerceIn(3000L, 30000L)
+        EmergencyStateHolder.updateVerificationTotalTimeout(verificationTimeoutOverrideMs)
+    }
+
     override fun triggerDiscreetSos(triggerSource: String) {
+        triggerDiscreetSos(triggerSource = triggerSource, locationOverride = null)
+    }
+
+    fun triggerDiscreetSos(triggerSource: String, locationOverride: LocationData? = null) {
         val signal = DistressSignal(
             id = UUID.randomUUID().toString(),
             type = DistressType.SILENT_ACTIVATION,
@@ -76,7 +88,7 @@ class EmergencyCoordinatorImpl(
         )
         EmergencyStateHolder.recordDistressSignal(signal)
         val nextState = stateMachine.onSignal(signal)
-        reconcileState(nextState, signal, isSilent = true)
+        reconcileState(nextState, signal, isSilent = true, locationOverride = locationOverride)
     }
 
     /**
@@ -185,21 +197,38 @@ class EmergencyCoordinatorImpl(
         activeIncidentDispatched = false
 
         val hasAudioPermission = EmergencyStateHolder.state.value.isAudioPermissionGranted
-        val hasMotion = motionDetector != null
-        val audioActive = if (audioDetector != null) hasAudioPermission else true
-
-        EmergencyStateHolder.setSubsystemStatus(
-            audioRunning = audioActive,
-            motionRunning = if (motionDetector != null) true else true
-        )
 
         if (hasAudioPermission && audioDetector != null) {
             startAudioMonitoring()
         }
 
-        if (hasMotion) {
+        if (motionDetector != null) {
             startMotionMonitoring()
         }
+
+        val audioRunning = if (audioDetector != null) (hasAudioPermission && audioDetector.isMonitoring()) else true
+        val motionRunning = if (motionDetector != null) motionDetector.isMonitoring() else true
+        val accelAvailable = if (motionDetector is com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl) {
+            motionDetector.hasAccelerometer()
+        } else true
+
+        EmergencyStateHolder.updateMotionHardwareAvailability(accelAvailable)
+        EmergencyStateHolder.setSubsystemStatus(
+            audioRunning = audioRunning,
+            motionRunning = motionRunning
+        )
+    }
+
+    /**
+     * Resumes active monitoring state after a user cancels a verification countdown or resolves an emergency
+     * while the GuardianForegroundService remains active.
+     */
+    fun resumeMonitoringAfterUserClearance() {
+        stateMachine.resetToNormal()
+        activeIncidentDispatched = false
+        val discreet = EmergencyStateHolder.state.value.isDiscreetModeEnabled
+        val mode = if (discreet) ProtectionMode.DISCREET_MONITORING else ProtectionMode.ACTIVE_MONITORING
+        EmergencyStateHolder.setProtectionActive(true, mode)
     }
 
     override fun stopProtection() {
@@ -216,11 +245,14 @@ class EmergencyCoordinatorImpl(
     private fun startAudioMonitoring() {
         stopAudioMonitoring()
         val detector = audioDetector ?: return
+        val flow = detector.startMonitoring()
         audioMonitoringJob = coroutineScope.launch {
             try {
-                detector.startMonitoring().collect { signal ->
+                flow.collect { signal ->
                     handleDistressSignal(signal)
                 }
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
             } catch (e: Exception) {
                 Log.w("EmergencyCoordinator", "Audio monitoring interrupted: ${e.message}")
             }
@@ -236,11 +268,14 @@ class EmergencyCoordinatorImpl(
     private fun startMotionMonitoring() {
         stopMotionMonitoring()
         val detector = motionDetector ?: return
+        val flow = detector.startMonitoring()
         motionMonitoringJob = coroutineScope.launch {
             try {
-                detector.startMonitoring().collect { signal ->
+                flow.collect { signal ->
                     handleDistressSignal(signal)
                 }
+            } catch (ce: kotlinx.coroutines.CancellationException) {
+                throw ce
             } catch (e: Exception) {
                 Log.w("EmergencyCoordinator", "Motion monitoring interrupted: ${e.message}")
             }
@@ -301,9 +336,11 @@ class EmergencyCoordinatorImpl(
                 persistDurableIncident(incident, verificationOutcome = "PENDING_VERIFICATION")
 
                 if (!isAlreadyVerifying) {
+                    val effectiveTimeout = verificationTimeoutOverrideMs
+                    EmergencyStateHolder.updateVerificationTotalTimeout(effectiveTimeout)
                     startVerificationCountdown(
                         sessionId = stateMachine.activeVerificationSessionId,
-                        timeoutMs = stateMachine.verificationTimeoutMs,
+                        timeoutMs = effectiveTimeout,
                         triggeringSignal = triggeringSignal,
                         isSilent = isSilent
                     )

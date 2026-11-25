@@ -29,13 +29,28 @@ class FalseAlarmFilter(
             }
         }
 
-        // Violent struggle/shaking requires sustained agitation, not a single walking step
+        // Violent struggle/shaking requires sustained agitation, not a single walking step or jogging
         if (candidateType == DistressType.MOTION_ANOMALY) {
             if (isNormalGaitWalking(features)) return true
+            if (isRunningGait(features)) return true
             if (isSingleTransientJostle(features)) return true
         }
 
         return false
+    }
+
+    /**
+     * Detects rhythmic jogging / running gait:
+     * Periodic medium-high acceleration bounces with moderate rotation and no extreme snatch jerk or freefall struggle.
+     */
+    fun isRunningGait(features: MotionFeatures): Boolean {
+        val isRunningRange = features.meanMagnitude in 9.0f..17.5f
+        val boundedVariance = features.varianceMagnitude < 16.0f
+        val boundedRotation = features.peakAngularSpeed < 3.4f
+        val boundedJerk = features.peakJerk < 90.0f
+        val noExtendedFreefall = features.freefallDurationMs < 80L
+
+        return isRunningRange && boundedVariance && boundedRotation && boundedJerk && noExtendedFreefall
     }
 
     /**

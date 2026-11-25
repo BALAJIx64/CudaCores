@@ -1,5 +1,8 @@
 package com.guardiangrid.ui
 
+import android.content.Intent
+import android.os.Build
+import android.provider.Settings
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -19,6 +22,7 @@ import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Bluetooth
 import androidx.compose.material.icons.filled.CheckCircle
@@ -34,7 +38,6 @@ import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Phone
 import androidx.compose.material.icons.filled.Security
-import androidx.compose.material.icons.filled.Send
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Sms
 import androidx.compose.material.icons.filled.Warning
@@ -59,6 +62,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -70,14 +74,18 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.guardiangrid.GuardianGridApp
 import com.guardiangrid.core.models.EmergencyContact
+import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.core.state.EmergencyStateHolder
 import com.guardiangrid.modules.audio.AudioModuleStub
 import com.guardiangrid.modules.communication.security.TelegramConfigManager
 import com.guardiangrid.modules.communication.security.TelegramCredentials
+import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
+import com.guardiangrid.modules.motion.anomaly.MotionThresholdConfig
 import com.guardiangrid.ui.theme.BrandMagenta
 import com.guardiangrid.ui.theme.CyberTeal
 import com.guardiangrid.ui.theme.DarkBackground
@@ -113,6 +121,8 @@ import java.util.UUID
 @Composable
 fun SettingsScreen(
     audioModule: AudioModuleStub,
+    motionDetector: MotionAnomalyDetectorImpl? = null,
+    coordinator: EmergencyCoordinatorImpl? = null,
     onRequestPermissions: () -> Unit,
     onNavigateBack: () -> Unit,
     onNavigateToContacts: () -> Unit = {},
@@ -126,9 +136,17 @@ fun SettingsScreen(
     val scrollState = rememberScrollState()
 
     var screamSensitivity by remember {
-        mutableFloatStateOf(container?.settingsRepository?.getSettings()?.screamSensitivity ?: 0.90f)
+        mutableFloatStateOf(container?.settingsRepository?.getSettings()?.screamSensitivity ?: 0.80f)
     }
+    var motionSensitivity by remember {
+        mutableFloatStateOf(container?.settingsRepository?.getSettings()?.motionSensitivity ?: 1.0f)
+    }
+    var countdownSeconds by remember {
+        mutableIntStateOf(container?.settingsRepository?.getSettings()?.countdownDurationSeconds ?: 10)
+    }
+    var motionCalibrationNotice by remember { mutableStateOf("") }
     var showAddContactDialog by remember { mutableStateOf(false) }
+    var showPurgePersonalDataDialog by remember { mutableStateOf(false) }
 
     // Telegram Bot API Configuration State
     val existingCreds = TelegramConfigManager.getCredentials()
@@ -235,7 +253,7 @@ fun SettingsScreen(
                         modifier = Modifier.weight(1f),
                         title = "Channels",
                         subtitle = "Telegram & SMS",
-                        icon = Icons.Default.Send,
+                        icon = Icons.AutoMirrored.Filled.Send,
                         accentColor = InfoBlue,
                         onClick = onNavigateToCommunication
                     )
@@ -398,7 +416,7 @@ fun SettingsScreen(
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(
-                            imageVector = Icons.Default.Send,
+                            imageVector = Icons.AutoMirrored.Filled.Send,
                             contentDescription = "Telegram",
                             tint = InfoBlue,
                             modifier = Modifier.size(18.dp)
@@ -445,6 +463,7 @@ fun SettingsScreen(
                     label = { Text("Bot API Token") },
                     placeholder = { Text("123456789:ABCdefGhIJKlmNoPQRsTUVwxyZ12345") },
                     singleLine = true,
+                    visualTransformation = PasswordVisualTransformation(),
                     modifier = Modifier.fillMaxWidth(),
                     colors = OutlinedTextFieldDefaults.colors(
                         focusedTextColor = TextPrimary,
@@ -591,6 +610,112 @@ fun SettingsScreen(
                         inactiveTrackColor = DarkSurfaceHighlight
                     )
                 )
+
+                Spacer(modifier = Modifier.height(10.dp))
+
+                // Motion Sensitivity Slider
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Motion & Fall Sensitivity",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Scales fall impact, snatch jerk, and shake detection",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    }
+                    Text(
+                        text = "${"%.2f".format(motionSensitivity)}x",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = BrandMagenta
+                    )
+                }
+
+                Slider(
+                    value = motionSensitivity,
+                    onValueChange = {
+                        motionSensitivity = it
+                        motionDetector?.updateConfig(MotionThresholdConfig(sensitivity = it))
+                        container?.settingsRepository?.setMotionSensitivity(it)
+                    },
+                    valueRange = 0.50f..1.50f,
+                    colors = SliderDefaults.colors(
+                        thumbColor = BrandMagenta,
+                        activeTrackColor = BrandMagenta,
+                        inactiveTrackColor = DarkSurfaceHighlight
+                    )
+                )
+
+                if (motionCalibrationNotice.isNotBlank()) {
+                    Text(text = motionCalibrationNotice, fontSize = 11.sp, color = SafeGreen)
+                    Spacer(modifier = Modifier.height(6.dp))
+                }
+
+                OutlinedButton(
+                    onClick = {
+                        motionDetector?.calibrateBaseline()
+                        motionCalibrationNotice = "Baseline gravity calibrated to resting orientation."
+                    },
+                    modifier = Modifier.fillMaxWidth().height(38.dp),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Text("Calibrate Motion Baseline", fontSize = 12.sp, color = TextPrimary)
+                }
+
+                Spacer(modifier = Modifier.height(14.dp))
+
+                // Verification Countdown Duration
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Column {
+                        Text(
+                            text = "Verification Countdown",
+                            fontSize = 13.sp,
+                            fontWeight = FontWeight.Bold,
+                            color = TextPrimary
+                        )
+                        Text(
+                            text = "Time allowed to cancel before automatic alert dispatch",
+                            fontSize = 11.sp,
+                            color = TextSecondary
+                        )
+                    }
+                    Text(
+                        text = "${countdownSeconds}s",
+                        fontSize = 13.sp,
+                        fontWeight = FontWeight.Bold,
+                        color = WarningAmber
+                    )
+                }
+
+                Slider(
+                    value = countdownSeconds.toFloat(),
+                    onValueChange = {
+                        val secs = it.toInt().coerceIn(5, 30)
+                        countdownSeconds = secs
+                        coordinator?.setVerificationTimeoutMs(secs * 1000L)
+                        container?.settingsRepository?.setCountdownDuration(secs)
+                    },
+                    valueRange = 5f..30f,
+                    steps = 4,
+                    colors = SliderDefaults.colors(
+                        thumbColor = WarningAmber,
+                        activeTrackColor = WarningAmber,
+                        inactiveTrackColor = DarkSurfaceHighlight
+                    )
+                )
             }
         }
 
@@ -662,6 +787,7 @@ fun SettingsScreen(
                 PermissionRow("Microphone (Acoustic YAMNet Classifier)", state.isAudioPermissionGranted, Icons.Default.Mic)
                 PermissionRow("Precise Location (Emergency Coordinates)", state.isLocationPermissionGranted, Icons.Default.LocationOn)
                 PermissionRow("Foreground Service Notification", state.isNotificationPermissionGranted, Icons.Default.Notifications)
+                PermissionRow("Emergency SMS Fallback", state.isSmsPermissionGranted, Icons.Default.Sms)
 
                 val allRequiredGranted = state.isAudioPermissionGranted && state.isLocationPermissionGranted && state.isNotificationPermissionGranted
 
@@ -677,6 +803,22 @@ fun SettingsScreen(
                     ) {
                         Text("Grant Required Permissions", fontSize = 12.sp, fontWeight = FontWeight.Bold, color = Color.Black)
                     }
+                }
+
+                Spacer(modifier = Modifier.height(10.dp))
+                OutlinedButton(
+                    onClick = {
+                        val intent = Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).apply {
+                            putExtra(Settings.EXTRA_APP_PACKAGE, context.packageName)
+                        }
+                        context.startActivity(intent)
+                    },
+                    modifier = Modifier.fillMaxWidth().height(38.dp),
+                    shape = RoundedCornerShape(10.dp)
+                ) {
+                    Icon(imageVector = Icons.Default.Notifications, contentDescription = null, modifier = Modifier.size(16.dp), tint = TextSecondary)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("System Notification Settings", fontSize = 12.sp, color = TextPrimary)
                 }
             }
         }
@@ -742,6 +884,19 @@ fun SettingsScreen(
                     Spacer(modifier = Modifier.width(8.dp))
                     Text("Clean Temporary Previews", fontSize = 12.sp, color = TextSecondary)
                 }
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                OutlinedButton(
+                    onClick = { showPurgePersonalDataDialog = true },
+                    modifier = Modifier.fillMaxWidth().height(40.dp),
+                    shape = RoundedCornerShape(10.dp),
+                    colors = ButtonDefaults.outlinedButtonColors(contentColor = EmergencyLightRed)
+                ) {
+                    Icon(imageVector = Icons.Default.Delete, contentDescription = null, modifier = Modifier.size(16.dp), tint = EmergencyLightRed)
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Erase All Incidents & Audio Evidence", fontSize = 12.sp, color = EmergencyLightRed)
+                }
             }
         }
 
@@ -805,19 +960,19 @@ fun SettingsScreen(
                     name = "Telegram Bot API",
                     status = if (isTelegramSaved) "Operational (Real HTTPS)" else "Unconfigured",
                     isOperational = isTelegramSaved,
-                    icon = Icons.Default.Send
+                    icon = Icons.AutoMirrored.Filled.Send
                 )
 
                 ChannelStatusRow(
                     name = "Cellular SMS",
-                    status = "Simulated (Carrier SMS Pending)",
-                    isOperational = false,
+                    status = if (state.isSmsPermissionGranted) "Ready (Android SmsManager)" else "Permission Required",
+                    isOperational = state.isSmsPermissionGranted,
                     icon = Icons.Default.Sms
                 )
 
                 ChannelStatusRow(
                     name = "BLE Mesh Relay",
-                    status = "In Development (Payload Ready)",
+                    status = "Offline Payload Foundation Ready",
                     isOperational = false,
                     icon = Icons.Default.Bluetooth
                 )
@@ -891,7 +1046,8 @@ fun SettingsScreen(
                             id = UUID.randomUUID().toString(),
                             name = name,
                             phoneNumber = phone,
-                            telegramChatId = if (rel.isNotBlank()) rel else null
+                            telegramChatId = null,
+                            relationship = rel.ifBlank { "Emergency Contact" }
                         )
                         val result = container?.settingsRepository?.addContact(newContact)
                         if (result?.isSuccess == true) {
@@ -912,6 +1068,44 @@ fun SettingsScreen(
                 }
             },
             containerColor = DarkSurfaceElevated
+        )
+    }
+
+    if (showPurgePersonalDataDialog) {
+        AlertDialog(
+            onDismissRequest = { showPurgePersonalDataDialog = false },
+            containerColor = DarkSurfaceElevated,
+            title = {
+                Text("Erase Stored Evidence & History?", color = TextPrimary, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Text(
+                    text = "This permanently deletes all saved incident records and all recorded WAV audio evidence files from device storage.",
+                    color = TextSecondary,
+                    fontSize = 13.sp
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        container?.incidentRepository?.clearAllIncidents()
+                        if (audioDir.exists()) {
+                            audioDir.listFiles()?.forEach { it.delete() }
+                        }
+                        refreshAudioStorage()
+                        cleanupNotice = "All incident history and audio evidence permanently erased."
+                        showPurgePersonalDataDialog = false
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = EmergencyRed)
+                ) {
+                    Text("Erase Permanently", color = Color.White, fontWeight = FontWeight.Bold)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showPurgePersonalDataDialog = false }) {
+                    Text("Cancel", color = TextSecondary)
+                }
+            }
         )
     }
 }

@@ -1,16 +1,11 @@
 package com.guardiangrid.ui
 
 import android.Manifest
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.core.FastOutSlowInEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -27,15 +22,13 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.DirectionsRun
+import androidx.compose.material.icons.automirrored.filled.KeyboardArrowRight
 import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.filled.Campaign
 import androidx.compose.material.icons.filled.CheckCircle
-import androidx.compose.material.icons.filled.GraphicEq
-import androidx.compose.material.icons.filled.History
-import androidx.compose.material.icons.filled.KeyboardArrowRight
 import androidx.compose.material.icons.filled.LocationOn
 import androidx.compose.material.icons.filled.Mic
-import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.PersonAdd
 import androidx.compose.material.icons.filled.Security
 import androidx.compose.material.icons.filled.Sensors
 import androidx.compose.material.icons.filled.Settings
@@ -44,10 +37,10 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
 import androidx.compose.material3.CardDefaults
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.LinearProgressIndicator
-import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
@@ -55,6 +48,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -62,10 +56,12 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.scale
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.hapticfeedback.HapticFeedbackType
+import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalHapticFeedback
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -73,12 +69,8 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import com.guardiangrid.GuardianGridApp
 import com.guardiangrid.core.interfaces.EmergencyCommunicator
-import com.guardiangrid.core.models.AlertPayload
-import com.guardiangrid.core.models.DeliveryChannel
 import com.guardiangrid.core.models.DeliveryStatus
 import com.guardiangrid.core.models.DistressType
-import com.guardiangrid.core.models.EmergencyIncident
-import com.guardiangrid.core.models.LocationData
 import com.guardiangrid.core.state.DurableIncident
 import com.guardiangrid.core.state.EmergencyCoordinatorImpl
 import com.guardiangrid.core.state.EmergencyStateHolder
@@ -89,6 +81,7 @@ import com.guardiangrid.modules.audio.AudioModuleStub
 import com.guardiangrid.modules.audio.LiveAudioMetrics
 import com.guardiangrid.modules.communication.EmergencyCommunicatorImpl
 import com.guardiangrid.modules.communication.security.TelegramConfigManager
+import com.guardiangrid.modules.motion.anomaly.LiveMotionMetrics
 import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
 import com.guardiangrid.service.GuardianForegroundService
 import com.guardiangrid.ui.brand.GuardianGridWordmark
@@ -96,22 +89,20 @@ import com.guardiangrid.ui.brand.MonitoringStatusBadge
 import com.guardiangrid.ui.permissions.PermissionManager
 import com.guardiangrid.ui.permissions.PermissionOnboardingDialog
 import com.guardiangrid.ui.theme.BrandMagenta
-import com.guardiangrid.ui.theme.BrandMagentaDark
 import com.guardiangrid.ui.theme.DarkBackground
 import com.guardiangrid.ui.theme.DarkBorder
 import com.guardiangrid.ui.theme.DarkSurface
 import com.guardiangrid.ui.theme.DarkSurfaceElevated
 import com.guardiangrid.ui.theme.DarkSurfaceHighlight
-import com.guardiangrid.ui.theme.EmergencyDarkRed
 import com.guardiangrid.ui.theme.EmergencyLightRed
 import com.guardiangrid.ui.theme.EmergencyRed
-import com.guardiangrid.ui.theme.InfoBlue
 import com.guardiangrid.ui.theme.SafeGreen
 import com.guardiangrid.ui.theme.TextDisabled
 import com.guardiangrid.ui.theme.TextPrimary
 import com.guardiangrid.ui.theme.TextSecondary
 import com.guardiangrid.ui.theme.TextTertiary
 import com.guardiangrid.ui.theme.WarningAmber
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import java.text.SimpleDateFormat
 import java.util.Date
@@ -136,9 +127,13 @@ fun DashboardScreen(
     communicator: EmergencyCommunicator,
     onRequestPermissions: () -> Unit,
     onNavigateToSettings: () -> Unit = {},
-    onNavigateToIncidents: () -> Unit = {}
+    onNavigateToIncidents: () -> Unit = {},
+    onNavigateToContacts: () -> Unit = {},
+    onNavigateToCommunication: () -> Unit = {},
+    onNavigateToOfflineQueue: () -> Unit = {}
 ) {
     val context = LocalContext.current
+    val haptics = LocalHapticFeedback.current
     val container = (context.applicationContext as? GuardianGridApp)?.container
     val state by EmergencyStateHolder.state.collectAsState()
     val scope = rememberCoroutineScope()
@@ -151,13 +146,13 @@ fun DashboardScreen(
     fun refreshDashboardData() {
         latestIncident = container?.incidentRepository?.getAllIncidents()
             ?.maxByOrNull { it.startTimeEpochMs }
-        val commImpl = container?.communicator as? EmergencyCommunicatorImpl
+        val commImpl = communicator as? EmergencyCommunicatorImpl
         pendingQueueCount = commImpl?.queueRepository?.getAll()?.count {
             it.status == DeliveryStatus.PENDING || it.status == DeliveryStatus.FAILED_RETRYING
         } ?: 0
     }
 
-    LaunchedEffect(state.activeIncident, state.incidentHistory.size) {
+    LaunchedEffect(state.activeIncident, state.incidentHistory.size, state.recentDeliveryReceipts.size) {
         refreshDashboardData()
     }
 
@@ -170,17 +165,6 @@ fun DashboardScreen(
             }
         )
     }
-
-    val infiniteTransition = rememberInfiniteTransition(label = "dashPulse")
-    val pulseScale by infiniteTransition.animateFloat(
-        initialValue = 1.0f,
-        targetValue = 1.05f,
-        animationSpec = infiniteRepeatable(
-            animation = tween(900, easing = FastOutSlowInEasing),
-            repeatMode = RepeatMode.Reverse
-        ),
-        label = "dashPulseScale"
-    )
 
     LazyColumn(
         modifier = Modifier
@@ -262,6 +246,55 @@ fun DashboardScreen(
                                 color = TextPrimary
                             )
                         }
+                    }
+                }
+            }
+        }
+
+        // --- Contacts Setup Banner (if no responders added yet) ---
+        if (state.trustedContacts.isEmpty()) {
+            item {
+                Card(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clickable { onNavigateToContacts() },
+                    colors = CardDefaults.cardColors(containerColor = BrandMagenta.copy(alpha = 0.10f)),
+                    shape = RoundedCornerShape(12.dp),
+                    border = CardDefaults.outlinedCardBorder().copy(
+                        brush = androidx.compose.ui.graphics.SolidColor(BrandMagenta.copy(alpha = 0.35f))
+                    )
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(12.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.PersonAdd,
+                            contentDescription = "Add Emergency Contacts",
+                            tint = BrandMagenta,
+                            modifier = Modifier.size(22.dp)
+                        )
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "Add Primary Emergency Contact",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = TextPrimary
+                            )
+                            Text(
+                                text = "Configure at least one trusted responder to receive SOS alerts.",
+                                fontSize = 10.sp,
+                                color = TextSecondary
+                            )
+                        }
+                        Icon(
+                            imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                            contentDescription = null,
+                            tint = BrandMagenta
+                        )
                     }
                 }
             }
@@ -406,46 +439,73 @@ fun DashboardScreen(
             }
         }
 
-        // --- C. SOS Controls: Prominent Manual SOS & Discreet Stealth SOS ---
+        // --- C. SOS Controls: Hold-Protected Manual SOS & Discreet Stealth SOS ---
         item {
+            var sosHoldProgress by remember { mutableFloatStateOf(0f) }
+            var discreetHoldProgress by remember { mutableFloatStateOf(0f) }
+            var holdHintMessage by remember { mutableStateOf("") }
+
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .padding(vertical = 4.dp),
                 horizontalAlignment = Alignment.CenterHorizontally
             ) {
-                // Primary Manual SOS Button
-                Button(
-                    onClick = {
-                        scope.launch {
-                            val freshLoc = locationManager.acquireFreshLocation(3000L)
-                            coordinator.triggerManualSos("Dashboard_SOS_Button", freshLoc)
-
-                            val payload = AlertPayload(
-                                incidentId = "MANUAL-${System.currentTimeMillis()}",
-                                timestampEpochMs = System.currentTimeMillis(),
-                                distressType = DistressType.MANUAL_SOS,
-                                confidence = 1.0f,
-                                emergencyMessage = "MANUAL SOS ACTIVATED: User requires urgent emergency assistance!",
-                                location = freshLoc
-                            )
-                            val receipts = communicator.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
-                            receipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
-                        }
-                    },
+                // Primary Manual SOS Control (Hold 0.8s prevents accidental pocket/scroll taps)
+                Box(
                     modifier = Modifier
-                        .size(165.dp)
+                        .size(168.dp)
                         .clip(CircleShape)
-                        .border(4.dp, EmergencyLightRed.copy(alpha = 0.5f), CircleShape),
-                    colors = ButtonDefaults.buttonColors(containerColor = EmergencyRed)
+                        .background(EmergencyRed)
+                        .border(4.dp, EmergencyLightRed.copy(alpha = 0.55f), CircleShape)
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onPress = {
+                                    holdHintMessage = ""
+                                    var triggered = false
+                                    val holdJob = scope.launch {
+                                        val steps = 16
+                                        val totalMs = 800L
+                                        for (i in 1..steps) {
+                                            delay(totalMs / steps)
+                                            sosHoldProgress = i.toFloat() / steps
+                                        }
+                                        triggered = true
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        val freshLoc = locationManager.acquireFreshLocation(2500L)
+                                        coordinator.triggerManualSos("Dashboard_SOS_Button", freshLoc)
+                                        sosHoldProgress = 0f
+                                    }
+                                    try {
+                                        awaitRelease()
+                                    } finally {
+                                        holdJob.cancel()
+                                        if (!triggered) {
+                                            sosHoldProgress = 0f
+                                            holdHintMessage = "Hold SOS button briefly (0.8s) to dispatch alert"
+                                        }
+                                    }
+                                }
+                            )
+                        },
+                    contentAlignment = Alignment.Center
                 ) {
+                    if (sosHoldProgress > 0f) {
+                        CircularProgressIndicator(
+                            progress = { sosHoldProgress },
+                            modifier = Modifier.size(156.dp),
+                            color = Color.White,
+                            strokeWidth = 6.dp,
+                            trackColor = Color.Transparent
+                        )
+                    }
                     Column(
                         horizontalAlignment = Alignment.CenterHorizontally,
                         verticalArrangement = Arrangement.Center
                     ) {
                         Icon(
                             imageVector = Icons.Default.Campaign,
-                            contentDescription = "SOS",
+                            contentDescription = "SOS Emergency Trigger",
                             tint = Color.White,
                             modifier = Modifier.size(44.dp)
                         )
@@ -458,52 +518,94 @@ fun DashboardScreen(
                             letterSpacing = 1.sp
                         )
                         Text(
-                            text = "TAP FOR HELP",
+                            text = if (sosHoldProgress > 0f) "KEEP HOLDING..." else "HOLD FOR HELP",
                             fontSize = 9.sp,
                             fontWeight = FontWeight.Bold,
-                            color = Color.White.copy(alpha = 0.85f)
+                            color = Color.White.copy(alpha = 0.9f)
                         )
                     }
                 }
 
+                if (holdHintMessage.isNotBlank()) {
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = holdHintMessage,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.Medium,
+                        color = WarningAmber,
+                        textAlign = TextAlign.Center
+                    )
+                }
+
                 Spacer(modifier = Modifier.height(14.dp))
 
-                // Discreet Stealth SOS Action
-                OutlinedButton(
-                    onClick = {
-                        scope.launch {
-                            val freshLoc = locationManager.acquireFreshLocation(2000L)
-                            coordinator.triggerDiscreetSos("Stealth_Discreet_Button")
-                            val payload = AlertPayload(
-                                incidentId = "DISCREET-${System.currentTimeMillis()}",
-                                timestampEpochMs = System.currentTimeMillis(),
-                                distressType = DistressType.SILENT_ACTIVATION,
-                                confidence = 1.0f,
-                                emergencyMessage = "DISCREET SILENT SOS: User in distress, silent stealth activation.",
-                                location = freshLoc
+                // Discreet Stealth SOS Action (Hold 0.6s)
+                Box(
+                    modifier = Modifier
+                        .clip(RoundedCornerShape(20.dp))
+                        .background(DarkSurfaceElevated)
+                        .border(BorderStroke(1.dp, DarkBorder), RoundedCornerShape(20.dp))
+                        .pointerInput(Unit) {
+                            detectTapGestures(
+                                onPress = {
+                                    holdHintMessage = ""
+                                    var triggered = false
+                                    val holdJob = scope.launch {
+                                        val steps = 12
+                                        val totalMs = 600L
+                                        for (i in 1..steps) {
+                                            delay(totalMs / steps)
+                                            discreetHoldProgress = i.toFloat() / steps
+                                        }
+                                        triggered = true
+                                        haptics.performHapticFeedback(HapticFeedbackType.LongPress)
+                                        val freshLoc = locationManager.acquireFreshLocation(2000L)
+                                        coordinator.triggerDiscreetSos("Stealth_Discreet_Button", freshLoc)
+                                        discreetHoldProgress = 0f
+                                    }
+                                    try {
+                                        awaitRelease()
+                                    } finally {
+                                        holdJob.cancel()
+                                        if (!triggered) {
+                                            discreetHoldProgress = 0f
+                                            holdHintMessage = "Hold Discreet SOS (0.6s) to activate silent mode"
+                                        }
+                                    }
+                                }
                             )
-                            val receipts = communicator.dispatchAlert(payload, listOf(DeliveryChannel.TELEGRAM, DeliveryChannel.SMS))
-                            receipts.forEach { EmergencyStateHolder.recordDeliveryReceipt(it) }
                         }
-                    },
-                    shape = RoundedCornerShape(20.dp),
-                    colors = ButtonDefaults.outlinedButtonColors(contentColor = TextSecondary),
-                    border = ButtonDefaults.outlinedButtonBorder.copy(
-                        brush = androidx.compose.ui.graphics.SolidColor(DarkBorder)
-                    )
+                        .padding(horizontal = 16.dp, vertical = 10.dp)
                 ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.VolumeOff,
-                        contentDescription = null,
-                        modifier = Modifier.size(16.dp),
-                        tint = WarningAmber
-                    )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Discreet Stealth SOS (Silent)",
-                        fontSize = 12.sp,
-                        color = TextPrimary
-                    )
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.AutoMirrored.Filled.VolumeOff,
+                                contentDescription = "Discreet Stealth SOS",
+                                modifier = Modifier.size(16.dp),
+                                tint = WarningAmber
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(
+                                text = if (discreetHoldProgress > 0f) "Activating Silent SOS..." else "Hold: Discreet Stealth SOS",
+                                fontSize = 12.sp,
+                                fontWeight = FontWeight.SemiBold,
+                                color = TextPrimary
+                            )
+                        }
+                        if (discreetHoldProgress > 0f) {
+                            Spacer(modifier = Modifier.height(4.dp))
+                            LinearProgressIndicator(
+                                progress = { discreetHoldProgress },
+                                modifier = Modifier
+                                    .width(160.dp)
+                                    .height(3.dp)
+                                    .clip(RoundedCornerShape(2.dp)),
+                                color = WarningAmber,
+                                trackColor = DarkSurfaceHighlight
+                            )
+                        }
+                    }
                 }
             }
         }
@@ -531,13 +633,10 @@ fun DashboardScreen(
                         modifier = Modifier.weight(1f)
                     )
 
-                    val isMotionActive = state.isMotionMonitoringRunning
-                    HealthIndicatorCard(
-                        title = "Motion Sensors",
-                        status = if (isMotionActive) "Active" else "Standby",
-                        detail = if (isMotionActive) "Accel + Gyro" else "Idle",
-                        icon = Icons.AutoMirrored.Filled.DirectionsRun,
-                        isActive = isMotionActive,
+                    MotionTelemetryCard(
+                        motionDetector = motionDetector,
+                        isMotionRunning = state.isMotionMonitoringRunning,
+                        isAccelAvailable = state.isAccelerometerAvailable,
                         modifier = Modifier.weight(1f)
                     )
                 }
@@ -547,25 +646,54 @@ fun DashboardScreen(
                     horizontalArrangement = Arrangement.spacedBy(8.dp)
                 ) {
                     val hasGps = state.currentLocation != null
-                    val locationDetail = state.currentLocation?.let { "±${it.accuracyMeters.toInt()}m accuracy" } ?: "Searching..."
+                    val locationDetail = when {
+                        !state.isLocationPermissionGranted -> "Permission needed"
+                        state.currentLocation != null -> "±${state.currentLocation!!.accuracyMeters.toInt()}m accuracy"
+                        state.isGpsEnabled -> "Searching fix..."
+                        else -> "GPS disabled"
+                    }
                     HealthIndicatorCard(
                         title = "Location GPS",
-                        status = if (hasGps) "GPS Locked" else "No Fix",
+                        status = when {
+                            !state.isLocationPermissionGranted -> "Denied"
+                            hasGps -> "GPS Locked"
+                            else -> "No Fix"
+                        },
                         detail = locationDetail,
                         icon = Icons.Default.LocationOn,
                         isActive = hasGps,
-                        modifier = Modifier.weight(1f)
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable {
+                                if (!state.isLocationPermissionGranted) {
+                                    showPermissionDialog = true
+                                } else {
+                                    scope.launch { locationManager.acquireFreshLocation(3000L) }
+                                }
+                            }
                     )
 
                     val isTelegramReady = TelegramConfigManager.isConfigured()
-                    val commDetail = if (pendingQueueCount > 0) "$pendingQueueCount Pending" else if (isTelegramReady) "Ready" else "Not Configured"
+                    val isSmsReady = state.isSmsPermissionGranted
+                    val commReady = isTelegramReady || isSmsReady
+                    val commDetail = when {
+                        pendingQueueCount > 0 -> "$pendingQueueCount Queued"
+                        isTelegramReady && isSmsReady -> "TG + SMS Ready"
+                        isTelegramReady -> "Telegram Ready"
+                        isSmsReady -> "SMS Ready"
+                        else -> "Configure Channels"
+                    }
                     HealthIndicatorCard(
                         title = "Emergency Net",
-                        status = if (isTelegramReady) "Telegram Ready" else "Setup Needed",
+                        status = if (commReady) "Configured" else "Setup Needed",
                         detail = commDetail,
                         icon = Icons.Default.Sensors,
-                        isActive = isTelegramReady,
-                        modifier = Modifier.weight(1f)
+                        isActive = commReady,
+                        modifier = Modifier
+                            .weight(1f)
+                            .clickable {
+                                if (pendingQueueCount > 0) onNavigateToOfflineQueue() else onNavigateToCommunication()
+                            }
                     )
                 }
             }
@@ -647,8 +775,8 @@ fun DashboardScreen(
                             }
 
                             Icon(
-                                imageVector = Icons.Default.KeyboardArrowRight,
-                                contentDescription = null,
+                                imageVector = Icons.AutoMirrored.Filled.KeyboardArrowRight,
+                                contentDescription = "View Incident History",
                                 tint = TextSecondary
                             )
                         }
@@ -761,8 +889,14 @@ private fun MicrophoneTelemetryCard(
     modifier: Modifier = Modifier
 ) {
     val audioMetrics by audioModule?.liveMetrics?.collectAsState() ?: remember { mutableStateOf(LiveAudioMetrics()) }
-    val isRecording = audioMetrics.status == AudioCaptureStatus.RECORDING && isMonitoringRunning && hasAudioPermission
-    val hasError = audioMetrics.status == AudioCaptureStatus.CAPTURE_ERROR || audioMetrics.status == AudioCaptureStatus.PERMISSION_DENIED
+    val isPhysicalMicActive = audioMetrics.status == AudioCaptureStatus.RECORDING &&
+            audioMetrics.isPhysicalRecord &&
+            !audioMetrics.isUsingMockCapture &&
+            isMonitoringRunning &&
+            hasAudioPermission
+    val hasError = audioMetrics.status == AudioCaptureStatus.CAPTURE_ERROR ||
+            audioMetrics.status == AudioCaptureStatus.PERMISSION_DENIED ||
+            audioMetrics.isUsingMockCapture
 
     Card(
         modifier = modifier,
@@ -770,7 +904,7 @@ private fun MicrophoneTelemetryCard(
         shape = RoundedCornerShape(12.dp),
         border = CardDefaults.outlinedCardBorder().copy(
             brush = androidx.compose.ui.graphics.SolidColor(
-                if (isRecording) SafeGreen.copy(alpha = 0.3f) else if (hasError) EmergencyRed.copy(alpha = 0.3f) else DarkBorder
+                if (isPhysicalMicActive) SafeGreen.copy(alpha = 0.3f) else if (hasError) EmergencyRed.copy(alpha = 0.3f) else DarkBorder
             )
         )
     ) {
@@ -783,14 +917,14 @@ private fun MicrophoneTelemetryCard(
                 Icon(
                     imageVector = Icons.Default.Mic,
                     contentDescription = null,
-                    tint = if (isRecording) SafeGreen else if (hasError) EmergencyRed else TextDisabled,
+                    tint = if (isPhysicalMicActive) SafeGreen else if (hasError) EmergencyRed else TextDisabled,
                     modifier = Modifier.size(18.dp)
                 )
                 Box(
                     modifier = Modifier
                         .size(7.dp)
                         .clip(CircleShape)
-                        .background(if (isRecording) SafeGreen else if (hasError) EmergencyRed else TextDisabled)
+                        .background(if (isPhysicalMicActive) SafeGreen else if (hasError) EmergencyRed else TextDisabled)
                 )
             }
 
@@ -803,13 +937,13 @@ private fun MicrophoneTelemetryCard(
                 color = TextSecondary
             )
             Text(
-                text = if (isRecording) "Listening" else if (hasError) "Error" else "Idle",
+                text = if (isPhysicalMicActive) "Listening" else if (audioMetrics.isUsingMockCapture) "Simulated" else if (hasError) "Mic Error" else "Idle",
                 fontSize = 13.sp,
                 fontWeight = FontWeight.Bold,
-                color = if (isRecording) TextPrimary else if (hasError) EmergencyLightRed else TextDisabled
+                color = if (isPhysicalMicActive) TextPrimary else if (hasError) EmergencyLightRed else TextDisabled
             )
 
-            if (isRecording) {
+            if (isPhysicalMicActive) {
                 val dbfsDisplay = if (audioMetrics.dbfs > -95f) "${audioMetrics.dbfs.toInt()} dBFS" else "-∞ dBFS"
                 Text(
                     text = "${audioMetrics.activeSource} • $dbfsDisplay",
@@ -833,6 +967,103 @@ private fun MicrophoneTelemetryCard(
                     text = if (hasError) (audioMetrics.errorMessage ?: "Capture failed") else "Standby",
                     fontSize = 10.sp,
                     color = if (hasError) EmergencyRed else TextTertiary,
+                    maxLines = 1
+                )
+            }
+        }
+    }
+}
+
+@Composable
+private fun MotionTelemetryCard(
+    motionDetector: MotionAnomalyDetectorImpl,
+    isMotionRunning: Boolean,
+    isAccelAvailable: Boolean,
+    modifier: Modifier = Modifier
+) {
+    val metrics by motionDetector.liveMetrics.collectAsState()
+    val isActive = isMotionRunning && isAccelAvailable
+
+    Card(
+        modifier = modifier,
+        colors = CardDefaults.cardColors(containerColor = DarkSurface),
+        shape = RoundedCornerShape(12.dp),
+        border = CardDefaults.outlinedCardBorder().copy(
+            brush = androidx.compose.ui.graphics.SolidColor(
+                if (isActive) SafeGreen.copy(alpha = 0.3f)
+                else if (!isAccelAvailable) EmergencyRed.copy(alpha = 0.3f)
+                else DarkBorder
+            )
+        )
+    ) {
+        Column(modifier = Modifier.padding(12.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.SpaceBetween,
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Icon(
+                    imageVector = Icons.AutoMirrored.Filled.DirectionsRun,
+                    contentDescription = "Motion Sensors",
+                    tint = if (isActive) SafeGreen else if (!isAccelAvailable) EmergencyRed else TextDisabled,
+                    modifier = Modifier.size(18.dp)
+                )
+                Box(
+                    modifier = Modifier
+                        .size(7.dp)
+                        .clip(CircleShape)
+                        .background(if (isActive) SafeGreen else if (!isAccelAvailable) EmergencyRed else TextDisabled)
+                )
+            }
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            Text(
+                text = "Motion Sensors",
+                fontSize = 11.sp,
+                fontWeight = FontWeight.SemiBold,
+                color = TextSecondary
+            )
+            Text(
+                text = when {
+                    !isAccelAvailable -> "Unavailable"
+                    isActive -> "Active"
+                    else -> "Standby"
+                },
+                fontSize = 13.sp,
+                fontWeight = FontWeight.Bold,
+                color = when {
+                    !isAccelAvailable -> EmergencyLightRed
+                    isActive -> TextPrimary
+                    else -> TextDisabled
+                }
+            )
+
+            if (isActive) {
+                val gyroLabel = if (metrics.hasGyroscope) "Accel+Gyro" else "Accel Only"
+                val magText = "%.1f m/s²".format(Locale.US, metrics.magnitude)
+                Text(
+                    text = "$gyroLabel • $magText",
+                    fontSize = 10.sp,
+                    color = SafeGreen,
+                    maxLines = 1
+                )
+                Spacer(modifier = Modifier.height(6.dp))
+                val dynamicProgress = (metrics.dynamicAcceleration / 15f).coerceIn(0f, 1f)
+                LinearProgressIndicator(
+                    progress = { dynamicProgress },
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .height(3.dp)
+                        .clip(RoundedCornerShape(2.dp)),
+                    color = BrandMagenta,
+                    trackColor = DarkSurfaceHighlight
+                )
+            } else {
+                Text(
+                    text = if (!isAccelAvailable) "No Accelerometer" else "Idle",
+                    fontSize = 10.sp,
+                    color = if (!isAccelAvailable) EmergencyRed else TextTertiary,
                     maxLines = 1
                 )
             }

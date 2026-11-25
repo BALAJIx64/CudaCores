@@ -242,6 +242,15 @@ fun GuardianGridMainScreen(
                                         },
                                         onNavigateToIncidents = {
                                             currentDestination = MainNavDestination.INCIDENTS
+                                        },
+                                        onNavigateToContacts = {
+                                            currentDestination = MainNavDestination.EMERGENCY_CONTACTS
+                                        },
+                                        onNavigateToCommunication = {
+                                            currentDestination = MainNavDestination.COMMUNICATION_CONFIG
+                                        },
+                                        onNavigateToOfflineQueue = {
+                                            currentDestination = MainNavDestination.OFFLINE_QUEUE
                                         }
                                     )
                                 }
@@ -255,6 +264,8 @@ fun GuardianGridMainScreen(
                                 MainNavDestination.SETTINGS -> {
                                     SettingsScreen(
                                         audioModule = audioModule,
+                                        motionDetector = motionDetector,
+                                        coordinator = coordinator,
                                         onRequestPermissions = onRequestPermissions,
                                         onNavigateBack = {
                                             currentDestination = MainNavDestination.DASHBOARD

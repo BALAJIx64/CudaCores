@@ -151,6 +151,8 @@ class ScreamDistressClassifier(
         consecutiveDistressFrames = 0
     }
 
+    fun observeSignalsOnly(): Flow<DistressSignal> = signalFlow.asSharedFlow()
+
     override fun isMonitoring(): Boolean = monitoring
 
     override fun setSensitivity(sensitivity: Float) {

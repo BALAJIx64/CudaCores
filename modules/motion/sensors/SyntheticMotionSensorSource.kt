@@ -11,8 +11,14 @@ class SyntheticMotionSensorSource : MotionSensorSource {
     private var sampleListener: ((MotionSample) -> Unit)? = null
     private val streaming = AtomicBoolean(false)
     private var simulatedGyroAvailable: Boolean = true
+    private var simulatedAccelAvailable: Boolean = true
 
     override fun start(onSample: (MotionSample) -> Unit) {
+        if (!simulatedAccelAvailable) {
+            streaming.set(false)
+            sampleListener = null
+            return
+        }
         streaming.set(true)
         sampleListener = onSample
     }
@@ -26,8 +32,17 @@ class SyntheticMotionSensorSource : MotionSensorSource {
 
     override fun hasGyroscope(): Boolean = simulatedGyroAvailable
 
+    override fun hasAccelerometer(): Boolean = simulatedAccelAvailable
+
     fun setGyroscopeAvailable(available: Boolean) {
         simulatedGyroAvailable = available
+    }
+
+    fun setAccelerometerAvailable(available: Boolean) {
+        simulatedAccelAvailable = available
+        if (!available) {
+            stop()
+        }
     }
 
     /**

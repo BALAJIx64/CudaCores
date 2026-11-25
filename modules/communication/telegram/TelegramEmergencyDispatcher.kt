@@ -204,7 +204,8 @@ class TelegramEmergencyDispatcher(
             }
         } catch (e: IOException) {
             val latency = System.currentTimeMillis() - startTime
-            val networkError = "Network error communicating with Telegram API: ${e.message ?: "Connection failed"}"
+            val safeMessage = sanitizeTokenFromText(e.message ?: "Connection failed")
+            val networkError = "Network error communicating with Telegram API: $safeMessage"
             val failedAudit = attemptAudit.copy(
                 state = EmergencyDeliveryState.FAILED,
                 errorMessage = networkError,
@@ -283,7 +284,7 @@ class TelegramEmergencyDispatcher(
         } catch (e: Exception) {
             TelegramVerificationResult(
                 isSuccess = false,
-                errorMessage = "Network error: ${e.message ?: "Failed to connect to Telegram"}"
+                errorMessage = "Network error: ${sanitizeTokenFromText(e.message ?: "Failed to connect to Telegram")}"
             )
         }
     }
@@ -323,9 +324,13 @@ class TelegramEmergencyDispatcher(
         } catch (e: Exception) {
             TelegramVerificationResult(
                 isSuccess = false,
-                errorMessage = "Network error verifying chat: ${e.message}"
+                errorMessage = "Network error verifying chat: ${sanitizeTokenFromText(e.message ?: "Unknown")}"
             )
         }
+    }
+
+    private fun sanitizeTokenFromText(raw: String): String {
+        return raw.replace(Regex("""bot\d+:[A-Za-z0-9_-]+"""), "bot[REDACTED]")
     }
 
     private fun parseBotInfoFromResponse(json: String): Pair<Long?, String?> {

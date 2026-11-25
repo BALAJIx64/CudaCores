@@ -39,7 +39,7 @@ class GuardianLocationManager(private val context: Context? = null) {
             val locationData = location.toLocationData()
             _lastLocation.value = locationData
             EmergencyStateHolder.updateLocation(locationData)
-            Log.d(TAG, "Location updated: lat=${locationData.latitude}, lon=${locationData.longitude}, acc=${locationData.accuracyMeters}m")
+            Log.d(TAG, "Location fix updated (acc=±${locationData.accuracyMeters.toInt()}m, provider=${locationData.provider})")
         }
 
         @Deprecated("Deprecated in Java")

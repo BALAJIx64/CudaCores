@@ -40,8 +40,13 @@ class AudioModuleStub(
      * Emits structured [DistressSignal] instances when distress exceeds calibrated threshold.
      */
     override fun startMonitoring(): Flow<DistressSignal> {
-        captureManager.startCapture()
-        return screamClassifier.startMonitoring()
+        val captureResult = captureManager.startCapture()
+        return if (captureResult.isSuccess) {
+            screamClassifier.startMonitoring()
+        } else {
+            screamClassifier.stopMonitoring()
+            screamClassifier.observeSignalsOnly()
+        }
     }
 
     override fun stopMonitoring() {
@@ -49,7 +54,7 @@ class AudioModuleStub(
         captureManager.stopCapture()
     }
 
-    override fun isMonitoring(): Boolean = screamClassifier.isMonitoring()
+    override fun isMonitoring(): Boolean = screamClassifier.isMonitoring() && captureManager.isCapturing
 
     override fun setSensitivity(sensitivity: Float) {
         screamClassifier.setSensitivity(sensitivity)

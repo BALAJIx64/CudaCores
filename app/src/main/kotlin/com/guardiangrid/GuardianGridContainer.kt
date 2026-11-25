@@ -17,9 +17,11 @@ import com.guardiangrid.modules.communication.security.SecureTelegramCredentialS
 import com.guardiangrid.modules.communication.sms.AndroidSmsSender
 import com.guardiangrid.modules.communication.sms.MockSmsSender
 import com.guardiangrid.modules.motion.anomaly.MotionAnomalyDetectorImpl
+import com.guardiangrid.modules.motion.anomaly.MotionThresholdConfig
 import com.guardiangrid.modules.motion.fusion.MultimodalFusionEngineImpl
 import com.guardiangrid.modules.motion.sensors.AndroidMotionSensorSource
 import com.guardiangrid.modules.motion.sensors.MotionSensorSource
+import com.guardiangrid.modules.motion.sensors.SyntheticMotionSensorSource
 import java.io.File
 
 /**
@@ -135,12 +137,14 @@ class DefaultGuardianGridContainer(
     }
 
     private val motionSensorSource: MotionSensorSource by lazy {
-        customMotionSource ?: (appContext?.let { AndroidMotionSensorSource(it) }
-            ?: throw IllegalStateException("MotionSensorSource requires non-null context or customMotionSource"))
+        customMotionSource ?: (appContext?.let { AndroidMotionSensorSource(it) } ?: SyntheticMotionSensorSource())
     }
 
     override val motionDetector: MotionAnomalyDetectorImpl by lazy {
-        customMotionDetector ?: MotionAnomalyDetectorImpl(sensorSource = motionSensorSource)
+        customMotionDetector ?: MotionAnomalyDetectorImpl(
+            sensorSource = motionSensorSource,
+            config = MotionThresholdConfig(sensitivity = settingsRepository.getSettings().motionSensitivity)
+        )
     }
 
     override val fusionEngine: MultimodalFusionEngineImpl by lazy {
@@ -148,6 +152,8 @@ class DefaultGuardianGridContainer(
     }
 
     override val coordinator: EmergencyCoordinatorImpl by lazy {
+        val savedSettings = settingsRepository.getSettings()
+        audioModule.setSensitivity(savedSettings.screamSensitivity)
         customCoordinator ?: EmergencyCoordinatorImpl(
             locationProvider = {
                 locationManager.lastLocation.value ?: locationManager.getLastKnownLocation()
@@ -157,6 +163,8 @@ class DefaultGuardianGridContainer(
             motionDetector = motionDetector,
             fusionEngine = fusionEngine,
             incidentRepository = incidentRepository
-        )
+        ).apply {
+            setVerificationTimeoutMs(savedSettings.countdownDurationSeconds * 1000L)
+        }
     }
 }

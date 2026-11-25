@@ -22,24 +22,14 @@ object EmergencyStateHolder {
     const val MAX_DELIVERY_RECEIPTS = 20
     const val MAX_DISTRESS_SIGNALS = 20
 
-    private val initialContacts = listOf(
-        EmergencyContact(
-            id = "contact-placeholder-1",
-            name = "Primary Contact (Placeholder)",
-            phoneNumber = "+00000000000",
-            telegramChatId = "@placeholder_channel",
-            isPrimary = true
-        )
-    )
-
     private val _state = MutableStateFlow(
-        EmergencyState(trustedContacts = initialContacts)
+        EmergencyState(trustedContacts = emptyList())
     )
 
     val state: StateFlow<EmergencyState> = _state.asStateFlow()
 
     fun reset() {
-        _state.value = EmergencyState(trustedContacts = initialContacts)
+        _state.value = EmergencyState(trustedContacts = emptyList())
     }
 
     fun setProtectionActive(active: Boolean, mode: ProtectionMode = ProtectionMode.ACTIVE_MONITORING) {
@@ -119,6 +109,14 @@ object EmergencyStateHolder {
 
     fun updateVerificationCountdown(remainingMs: Long) {
         _state.update { it.copy(verificationCountdownRemainingMs = remainingMs) }
+    }
+
+    fun updateVerificationTotalTimeout(totalMs: Long) {
+        _state.update { it.copy(verificationTotalTimeoutMs = totalMs.coerceAtLeast(1000L)) }
+    }
+
+    fun updateMotionHardwareAvailability(accelAvailable: Boolean) {
+        _state.update { it.copy(isAccelerometerAvailable = accelAvailable) }
     }
 
     fun updateStatusMessage(message: String) {
